@@ -8,7 +8,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { initLedger, loadConfig, loadAll, record, getById, commitAndPush, pull, type Config } from "./store.js";
 import { brief, search, similarFindings, stats, renderFull } from "./query.js";
 import { regenerateViews } from "./views.js";
-import { agentRulesText, upsertClaudeHooks, HOOK_EVENTS, isLedgerHookCommand } from "./install.js";
+import { agentRulesText, upsertHooks, HOOK_EVENTS, isLedgerHookCommand } from "./install.js";
 import { handleHook, loadJournal, captureStats, debt } from "./hooks.js";
 
 const sh = (cwd: string, args: string[]) =>
@@ -332,12 +332,18 @@ assert.deepEqual(
 
 // first Stop with debt: blocked once, evidence quoted, both resolutions offered
 const blocked = hook("Stop", { stop_hook_active: false }, T(6));
-assert.equal(blocked.exit, 2, "stop blocked");
-assert.ok(blocked.stderr!.includes("2 data queries") && blocked.stderr!.includes("select count(*) from events"), blocked.stderr ?? "");
-assert.ok(blocked.stderr!.includes("ledger_record_finding") && blocked.stderr!.includes("ledger_skip_record"), "both ways out are named");
+assert.equal(blocked.exit, 0, "block is JSON on stdout with exit 0 (the form Claude Code and Codex both document)");
+const bj = JSON.parse(blocked.stdout!);
+assert.equal(bj.decision, "block");
+assert.equal(bj.hookSpecificOutput.hookEventName, "Stop");
+assert.equal(bj.hookSpecificOutput.decision, "block");
+assert.ok(bj.reason.includes("2 data queries") && bj.reason.includes("select count(*) from events"), bj.reason);
+assert.ok(bj.reason.includes("ledger_record_finding") && bj.reason.includes("ledger_skip_record"), "both ways out are named");
 
-// second Stop with the same debt: passes, and the ignored nudge is counted
-assert.equal(hook("Stop", { stop_hook_active: true }, T(7)).exit, 0, "never nudges twice for the same work");
+// second Stop with the same debt: passes silently, and the ignored nudge is counted
+const second = hook("Stop", { stop_hook_active: true }, T(7));
+assert.equal(second.exit, 0, "never nudges twice for the same work");
+assert.ok(!second.stdout, "no block output on the pass");
 assert.ok(loadJournal(sid, jdir).entries.some((e) => e.kind === "unresolved"), "ignored nudge counted");
 
 // new work after that: PreCompact injects the list instead of blocking
@@ -388,8 +394,8 @@ assert.ok(cap.includes("nudges 1") && cap.includes("explicit skips 1") && cap.in
 
 // installer: one entry per event, replaced on re-run, other people's hooks untouched
 const settings: any = { hooks: { Stop: [{ hooks: [{ type: "command", command: "someone-else" }] }], SessionStart: [{ hooks: [{ type: "command", command: "ledger brief --hook", timeout: 30 }] }] } };
-upsertClaudeHooks(settings);
-upsertClaudeHooks(settings);
+upsertHooks(settings);
+upsertHooks(settings);
 for (const ev of Object.keys(HOOK_EVENTS)) {
   const ours = settings.hooks[ev].filter((e: any) => e.hooks.some((h: any) => isLedgerHookCommand(h.command)));
   assert.equal(ours.length, 1, `${ev}: exactly one ledger entry`);

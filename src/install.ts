@@ -96,7 +96,7 @@ function tryExec(cmd: string, args: string[]): boolean {
 const isOurs = (h: any) => isLedgerHookCommand(h?.command);
 
 /** Replace ledger's entry for every event; leave other people's hooks alone. Returns what changed. */
-export function upsertClaudeHooks(settings: any): string[] {
+export function upsertHooks(settings: any): string[] {
   const log: string[] = [];
   settings.hooks = settings.hooks ?? {};
   for (const [event, spec] of Object.entries(HOOK_EVENTS)) {
@@ -137,7 +137,7 @@ export function installClaude(): string[] {
   const settingsFile = path.join(home, ".claude", "settings.json");
   fs.mkdirSync(path.dirname(settingsFile), { recursive: true });
   const settings = fs.existsSync(settingsFile) ? JSON.parse(fs.readFileSync(settingsFile, "utf8")) : {};
-  const changed = upsertClaudeHooks(settings);
+  const changed = upsertHooks(settings);
   fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2) + "\n");
   log.push(
     changed.length
@@ -182,9 +182,22 @@ export function installCodex(): string[] {
     }
   }
 
-  // 2. The guide, inline. Codex has no hooks, so the guide carries the whole loop.
+  // 2. Hooks: same checkpoint loop, same event names and JSON contract as
+  //    Claude Code. Codex reads ~/.codex/hooks.json (CLI and desktop app).
+  //    Non-managed hooks must be trusted once, by hash, inside Codex.
+  const hooksFile = path.join(codexDir, "hooks.json");
+  const hj = fs.existsSync(hooksFile) ? JSON.parse(fs.readFileSync(hooksFile, "utf8")) : {};
+  const changed = upsertHooks(hj);
+  fs.writeFileSync(hooksFile, JSON.stringify(hj, null, 2) + "\n");
+  log.push(
+    changed.length
+      ? `hooks installed in ${hooksFile}: ${changed.join(", ")}`
+      : `hooks already current in ${hooksFile} (${Object.keys(HOOK_EVENTS).join(", ")})`
+  );
+  log.push("Codex skips untrusted hooks: open Codex, run /hooks, review the five ledger entries, and trust them (once per change)");
+
+  // 3. The guide, inline.
   log.push(upsertBlock(path.join(codexDir, "AGENTS.md"), codexBlock()));
-  log.push("no lifecycle hooks in Codex: the Stop-time checkpoint does not apply; the guide asks it to record before finishing");
   log.push("restart Codex to pick this up");
   return log;
 }

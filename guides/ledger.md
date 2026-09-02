@@ -157,7 +157,7 @@ Every record commits and pushes. Every read pulls. Teammates see each other's ob
 
 ## What runs automatically
 
-In Claude Code, five hooks make the loop deterministic. None of them decide what counts as knowledge; they only decide when to ask.
+In Claude Code and in Codex (CLI and desktop app), five hooks make the loop deterministic. None of them decide what counts as knowledge; they only decide when to ask.
 
 - **SessionStart:** the brief is injected. After a compaction or resume, any uncaptured queries from earlier in the session are listed again, so nothing is lost when context is compressed.
 - **PostToolUse:** every data-tool call (MCP analytics servers, `psql`/`clickhouse`/`bq`/`duckdb` in Bash) is noted in a local session journal: tool, query text, time. This is evidence, not knowledge. It never leaves the machine.
@@ -165,7 +165,7 @@ In Claude Code, five hooks make the loop deterministic. None of them decide what
 - **PreCompact:** if uncaptured queries exist when context is about to be compacted, they are injected into context with a request to record now, while method and assumptions are still in your head.
 - **SessionEnd:** capture debt is noted for `ledger stats`. Nothing is reconstructed from the transcript.
 
-In Codex there are no lifecycle hooks. Call `ledger_brief` yourself at the start of a relevant session, and record before you finish; nothing will remind you.
+Codex runs the same five hooks from `~/.codex/hooks.json`, but skips any hook that has not been trusted. If the checkpoint never fires in Codex, the user has not run `/hooks` and trusted the ledger entries yet; tell them. Until then, call `ledger_brief` yourself at the start of a relevant session and record before you finish.
 
 ---
 

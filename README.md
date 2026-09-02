@@ -73,7 +73,8 @@ ledger stats          # should show 0 of everything
 
 **Codex** (CLI and desktop app share `~/.codex`):
 - registers the MCP server (`codex mcp add`, or appends to `~/.codex/config.toml`)
-- puts the guide text itself inside a marked block in `~/.codex/AGENTS.md`, since AGENTS.md has no import syntax. Codex has no lifecycle hooks, so the guide tells it to call `ledger_brief` itself and to record before finishing; the checkpoint does not apply there.
+- installs the same five hooks in `~/.codex/hooks.json`. Codex uses the same event names and JSON contract as Claude Code, so `ledger hook <event>` serves both. Codex skips hooks it has not been told to trust: after install, run `/hooks` inside Codex, review the five ledger entries, and trust them. Repeat when the hook commands change (a node upgrade, for instance).
+- puts the guide text itself inside a marked block in `~/.codex/AGENTS.md`, since AGENTS.md has no import syntax.
 
 Both are idempotent. Re-run after upgrades; the marked block is replaced. `ledger rules` prints the guide if you want to paste it into a project-level CLAUDE.md or AGENTS.md instead.
 
@@ -115,6 +116,16 @@ Deterministic software decides *when* to ask. The agent decides *what* it was. T
 | what happens at compaction | PreCompact checkpoint, SessionStart re-injection |
 
 One nudge per batch of uncaptured work. A second Stop with the same work passes and is logged as ignored, so the pilot can count it. `ledger stats` reports, per machine: sessions with data queries, records unprompted vs after a nudge, explicit skips, nudges ignored, compactions with uncaptured work.
+
+### What works where
+
+| | tools + schema | brief at start | guide | checkpoint loop |
+|---|---|---|---|---|
+| Claude Code, incl. Conductor | yes | automatic (hook) | `~/.claude/ledger.md` via CLAUDE.md import | yes |
+| Codex CLI and desktop app | yes | automatic (hook, once trusted) | inline in `~/.codex/AGENTS.md` | yes, once the five hooks are trusted via `/hooks` |
+| ChatGPT web | not yet: needs a remote HTTPS MCP endpoint (Developer mode connector), not stdio | agent must call `ledger_brief` | paste the guide into project or custom instructions | no lifecycle hooks exist |
+
+Conductor runs Claude Code, and everything here is installed at user scope (`~/.claude.json`, `~/.claude/settings.json`, `~/.claude/CLAUDE.md`), so every Conductor workspace gets it. The installed commands use absolute paths, so Conductor's PATH does not matter.
 
 The journal lives in `~/.ledger/sessions/` and never enters the data repo. Which tools count as data work is a regex list, `data_tools` in `~/.ledger/config.json`; the default matches common analytics MCP servers and `psql`/`clickhouse`/`bq`/`duckdb` in Bash.
 

@@ -213,8 +213,14 @@ export function handleHook(event: string, input: any, opts: HookOpts = {}): Hook
       j.nudged = fp;
       j.entries.push({ at: now, kind: "nudge", summary: fp });
       saveJournal(j, dir);
-      // exit 2 + stderr is the version-stable way to block a Stop and hand the reason to the model
-      return { stderr: stopReason(d), exit: 2 };
+      // JSON on stdout, exit 0: the block form both Claude Code and Codex document.
+      // Top-level decision/reason is the original Claude shape and the Codex shape;
+      // hookSpecificOutput is the current Claude shape. Emit both.
+      const reason = stopReason(d);
+      return {
+        stdout: JSON.stringify({ decision: "block", reason, hookSpecificOutput: { hookEventName: "Stop", decision: "block", reason } }),
+        exit: 0,
+      };
     }
 
     case "PreCompact": {
