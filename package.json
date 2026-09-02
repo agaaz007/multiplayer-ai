@@ -1,0 +1,34 @@
+{
+  "name": "@tranzmit/ledger",
+  "version": "0.1.0",
+  "description": "A shared ledger of definitions, findings, changes, and decisions that any coding agent (Claude Code, Codex, Cursor) reads before work and writes after. MCP server + CLI over plain markdown in git.",
+  "type": "module",
+  "bin": {
+    "ledger": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "template",
+    "guides",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && chmod +x dist/cli.js",
+    "dev": "tsc -p tsconfig.json --watch",
+    "test": "npm run build && node dist/selftest.js",
+    "prepare": "npm run build"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "gray-matter": "^4.0.3",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.1",
+    "typescript": "^7.0.2"
+  }
+}

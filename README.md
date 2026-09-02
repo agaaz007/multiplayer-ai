@@ -1,0 +1,253 @@
+# ledger
+
+Shared memory for a team's coding agents. Plain markdown in git, read and written by Claude Code, Codex, Cursor, or anything that speaks MCP.
+
+It holds four things, and only four:
+
+| type | agent reads it before | agent writes it when | it kills |
+|---|---|---|---|
+| **definition** | writing any query | a metric is computed with no definition, or one changes | two people getting different numbers for the same metric |
+| **finding** | starting an analysis | an analysis finishes | redoing work someone did on Tuesday |
+| **change** | attributing a metric move | something ships | crediting your test for someone else's fix |
+| **decision** | proposing direction | a direction is chosen, dropped, or reversed | two agents compounding in opposite directions |
+
+Not a transcript drive. Not a codebase wiki. Not a new chat UI. Your agents keep running wherever they run today; this is the thing they read first and write last.
+
+## How it works
+
+```
+Claude Code (Conductor) ──┐
+                          ├── MCP (stdio) ── ledger ── ~/tranzmit-ledger/   (git clone)
+Codex (app or CLI) ───────┘                              ├── definitions/*.md
+                                                         ├── findings/*.md
+                                                         ├── changes/*.md
+                                                         └── decisions/*.md
+```
+
+- Every object is one markdown file with YAML frontmatter. The file name is the id. Humans can `cat` it, diff it, review it in a PR.
+- Every `record` pulls, commits, and pushes. Every read pulls (at most once a minute). Two people on two machines see each other's objects within a minute, with git as the sync layer and conflict log. Objects are one file each, so they never conflict; the generated views can, and when they do `ledger` regenerates them from the merged objects and carries on. A record made offline is committed locally and pushed by the next one. The data repo is never left mid-rebase.
+- `ledger_record_finding` returns similar prior findings, so the agent sees the duplicate before it writes one.
+- Nothing is edited in place. Refreshes and reversals are new files with `supersedes`; the old one is marked `deprecated` and drops out of the brief but stays in history.
+- Every record also rebuilds the data repo's `README.md`, per-directory `index.md`, and `log.md` from the full set of objects, and commits them alongside. They are derived files: byte-identical on every machine, never edited, never merged. **GitHub is the dashboard**: open the data repo and you see definitions, decisions in force, and the last 14 days of changes and findings as tables; `log.md` is the newest-first feed; commit history is the audit trail.
+- Session start injects a brief: all definitions, decisions in force, last 14 days of findings and changes. That's it. Small enough to always be in context.
+
+## Install
+
+Requires Node 20+ and git.
+
+```bash
+git clone <this repo> && cd ledger
+npm install && npm link          # puts `ledger` on your PATH
+```
+
+**First machine** (creates the data repo):
+
+```bash
+ledger init ~/tranzmit-ledger --author agaaz
+cd ~/tranzmit-ledger
+gh repo create tranzmit/ledger-data --private --source=. --push
+ledger install all               # wires Claude Code + Codex
+```
+
+**Every other machine:**
+
+```bash
+git clone git@github.com:tranzmit/ledger-data.git ~/tranzmit-ledger
+ledger use ~/tranzmit-ledger --author rachit
+ledger install codex             # or: claude / all
+```
+
+Then restart the agent. Verify with:
+
+```bash
+ledger brief          # what the agent will see
+ledger stats          # should show 0 of everything
+```
+
+### What `install` does
+
+**Claude Code** (this is also what Conductor runs, so Conductor workspaces pick it up):
+- registers the MCP server at user scope (`claude mcp add --scope user`, or edits `~/.claude.json` if the CLI isn't found)
+- installs five hooks in `~/.claude/settings.json`, all `ledger hook <event>`: the checkpoint loop described below
+- writes the agent guide to `~/.claude/ledger.md` and adds one `@~/.claude/ledger.md` import line to `~/.claude/CLAUDE.md` inside a marked block
+
+**Codex** (CLI and desktop app share `~/.codex`):
+- registers the MCP server (`codex mcp add`, or appends to `~/.codex/config.toml`)
+- puts the guide text itself inside a marked block in `~/.codex/AGENTS.md`, since AGENTS.md has no import syntax. Codex has no lifecycle hooks, so the guide tells it to call `ledger_brief` itself and to record before finishing; the checkpoint does not apply there.
+
+Both are idempotent. Re-run after upgrades; the marked block is replaced. `ledger rules` prints the guide if you want to paste it into a project-level CLAUDE.md or AGENTS.md instead.
+
+Every installed command (the MCP server and each hook) is written with the absolute path of the node binary and of `cli.js`, not the bare `ledger` name. The agent process is launched by Conductor, the Codex app, or a scheduler with whatever PATH it inherited, which usually does not include an nvm bin dir. After upgrading node or this package, re-run `ledger install all`.
+
+The guide (`guides/ledger.md`) is the prompt. It is the same shape Code Almanac uses for its `~/.claude/almanac.md`: mental model in 60 seconds, the read loop, the write loop with a worked example, the decisions the agent will face, what runs automatically, troubleshooting. Standing rules in CLAUDE.md are advisory; the guide is read at the moment of the task. What actually enforces the format is the tool schema, below.
+
+## The checkpoint loop
+
+Do not think of a session as one transaction with a read at the start and a write at the end. Long sessions get compacted and agents forget standing instructions. Think checkpoints:
+
+```
+SessionStart   read the brief (and, after a compaction, re-list uncaptured work)
+      ↓
+work: queries, research
+      ↓
+PostToolUse    every data-tool call goes in a local session journal (tool, query, time)
+      ↓
+agent reaches a conclusion and tries to finish the turn
+      ↓
+Stop           queries since the last record? block once, quote them back
+      ↓ record (schema-validated, committed, pushed)   or   ledger_skip_record with a reason
+continue
+      ↓
+PreCompact     uncaptured work is injected into context before it is compressed
+      ↓
+SessionEnd     capture debt is noted for ledger stats
+```
+
+Deterministic software decides *when* to ask. The agent decides *what* it was. The schema decides *what fields* it must have. The transcript is never mined for facts.
+
+| responsibility | owner |
+|---|---|
+| when to check for knowledge | hook |
+| what qualifies as durable | guide |
+| what fields must be present | schema |
+| was the work actually done | session journal (the evidence quoted in the nudge) |
+| how a teammate retrieves it | search and brief |
+| what happens at compaction | PreCompact checkpoint, SessionStart re-injection |
+
+One nudge per batch of uncaptured work. A second Stop with the same work passes and is logged as ignored, so the pilot can count it. `ledger stats` reports, per machine: sessions with data queries, records unprompted vs after a nudge, explicit skips, nudges ignored, compactions with uncaptured work.
+
+The journal lives in `~/.ledger/sessions/` and never enters the data repo. Which tools count as data work is a regex list, `data_tools` in `~/.ledger/config.json`; the default matches common analytics MCP servers and `psql`/`clickhouse`/`bq`/`duckdb` in Bash.
+
+## Tools the agent gets
+
+| tool | purpose |
+|---|---|
+| `ledger_brief` | definitions + decisions in force + recent findings and changes |
+| `ledger_search` | free text across all types; use before any analysis |
+| `ledger_get` | one object in full: query, inputs, method, assumptions, options |
+| `ledger_record_definition` | canonical metric: formula, source, exclusions, owner, valid_from |
+| `ledger_record_finding` | question, result, definitions used, data window, inputs, method, query, assumptions (explicit and implicit), alternatives, confidence and its basis, relation to prior findings. Returns similar prior findings. |
+| `ledger_record_change` | what shipped, when, where, to whom, how to undo |
+| `ledger_record_decision` | the decision, context, every option considered and why it lost, rationale, assumptions, consequences, confidence, revisit date, how it will be confirmed |
+| `ledger_skip_record` | the Stop checkpoint asked and nothing was durable; the reason is counted |
+| `ledger_stats` | pilot health, including what the checkpoint loop caught |
+
+## Recording format
+
+A finding is an argument, not a number. A decision is a choice among options, not a sentence. The schemas require the parts people leave out, and the tool rejects a record without them, naming what is missing. Prose instructions cannot do that; a zod schema can.
+
+**Finding** (shape from ICD 203 analytic standards and the Key Assumptions Check):
+
+- `inputs` — every source, with `dataset`, `population`, and `filters`. At least one.
+- `method` — how the inputs became the result, in words, plus optional `grain` and `baseline`. The exact SQL stays in `query`.
+- `assumptions` — each with `kind: explicit | implicit`, `evidence`, and `if_wrong: minor | weakens_conclusion | changes_conclusion`. At least one, and at least one implicit. If none is implicit the rejection lists the usual suspects: tracking complete for the window, cohort assignment logged correctly, definition matches, no concurrent experiment or release, same denominator and attribution window as before.
+- `alternatives_considered`, `limitations`, `confidence_basis`, `prior: { relation: confirms | revises | contradicts | new }`, `reproduce: { tool, query_or_artifact, instructions }` — optional.
+
+**Decision** (shape from [MADR](https://adr.github.io/madr/)):
+
+- `context` — what forced a decision now.
+- `options_considered` — every option on the table including "do nothing", each with `rationale`, exactly the chosen one marked `chosen: true`. At least one.
+- `assumptions` — same rule as findings.
+- `drivers`, `consequences`, `reversibility`, `confirmation` (a string, or `{ metric, success_condition, evaluate_after }`), `consulted` — optional.
+
+The brief stays small: result and confidence. The full argument is behind `ledger_get` and in the file, where a reviewer on GitHub sees it whole. `ledger stats` counts findings and decisions without an implicit assumption, which after the format change should only be hand-written or legacy files.
+
+## The pilot
+
+Two weeks, two people, then decide.
+
+1. Both of you record every real analysis, ship, and decision for two weeks. No cleanup, no backfill.
+2. Every day, `ledger stats`. It reports:
+   - objects per author (is anyone actually recording?)
+   - findings with no `definitions_used` (drift risk)
+   - findings and decisions with no implicit assumption (only possible for hand-written or legacy files)
+   - cross-author near-duplicate findings (rework the ledger did *not* catch)
+3. At the end, answer three questions honestly:
+   - Did an agent ever reuse a finding instead of recomputing?
+   - Did an agent ever catch a change it would otherwise have misattributed?
+   - Did either of you change a decision because the ledger showed the other's?
+
+If the answer to all three is no, either the capture is too manual (make it automatic: scan transcripts) or the problem isn't real at your scale. Both are useful to learn before HiAstro.
+
+If yes to any, the HiAstro pilot is the same install with `--tags hiastro` and their PMs as authors, and the definitions file seeded from their Amplitude metrics.
+
+## Where you see it
+
+Nowhere new. The data repo on GitHub:
+
+- `README.md` — generated dashboard: definitions table, decisions in force, changes and findings from the last 14 days. Same content the agents get in `ledger_brief`.
+- `log.md` — every record, newest first, who and what.
+- `definitions/`, `findings/`, `changes/`, `decisions/` — one file per object, each with its own `index.md`.
+- Commits — one per record, message is `type: title (author)`. `git log` and `git blame` work.
+
+`ledger brief` and `ledger stats` give the same views in a terminal. A web UI can come later; it would read the same files.
+
+## OKF
+
+The data repo is a conformant [OKF v0.2](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md) bundle, checked by the self-test:
+
+- every non-reserved `.md` has YAML frontmatter with `type`
+- `generated: { by: human:<name>, at }`, `status: stable | deprecated`, `supersedes`, `sources`, `stale_after` (decisions' `revisit_by`) follow the spec's trust and lifecycle families
+- reserved `index.md` (progressive disclosure, root carries `okf_version`) and `log.md` (newest-first history) are generated
+- our type-specific fields (`question`, `data_window`, `formula`, ...) are extension keys, which the spec requires consumers to preserve
+
+So any OKF reader (Google's tooling, `serradura/okf`, an agent with a generic OKF skill) can consume the ledger, and you can move it out of this tool without conversion. The spec's `Attested Computation` type is the natural next step for `definitions` if HiAstro's number drift turns out to be about *how* a metric was run rather than *what* it means: the formula becomes a parameterized computation, the agent can only fill parameters, and an attester checks the executed SQL matched. Not built. Noted.
+
+## What's deliberately not here
+
+- No embeddings. Term overlap over a few hundred objects is fine. Add them when search visibly misses.
+- No web UI. GitHub renders the generated README.
+- No transcript mining. Recording is an explicit, schema-validated tool call by the agent that did the work, prompted by a deterministic checkpoint. A transcript-to-draft extractor is the planned safety net, never the primary writer, and its output would be `status: draft`, never a trusted fact.
+- No fifth object type. Add one when an agent visibly needed something and couldn't find it.
+
+## Object format
+
+```markdown
+---
+type: finding
+id: fnd-20260902-trial-cvr-august-k3p2
+title: Trial CVR August
+description: What was trial to paid conversion in August for iOS? → 11.2% (n=4,310 trials)
+tags: [hiastro]
+status: stable
+generated:
+  by: human:agaaz
+  at: '2026-09-02T10:14:00.000Z'
+sources:
+  - id: primary
+    resource: postgres.subscriptions
+question: What was trial to paid conversion in August for iOS?
+result: 11.2% (n=4,310 trials)
+definitions_used: [trial_to_paid_cvr]
+data_window: { from: '2026-08-01', to: '2026-08-31' }
+inputs:
+  - source: postgres.subscriptions
+    population: trials started in window
+    filters: platform='ios', excludes internal users
+method: Cohort by trial start date. Paid within 14 days over trials started.
+grain: user
+query: select ... where platform='ios'
+assumptions:
+  - { statement: iOS means App Store, not web checkout on an iPhone, kind: explicit, if_wrong: changes_conclusion }
+  - { statement: postgres.subscriptions is complete for August, kind: implicit, evidence: row counts match the ETL log, if_wrong: changes_conclusion }
+  - { statement: the paywall test shipped 2026-08-20 does not invalidate a monthly figure, kind: implicit, evidence: not independently verified, if_wrong: weakens_conclusion }
+alternatives_considered: [attributing by payment date instead of trial start, rejected, mixes cohorts]
+limitations: [observational]
+confidence: medium
+confidence_basis: n is large; one implicit assumption unchecked
+prior: { relation: new, ids: [] }
+caveats: []
+---
+Optional markdown body, kept short.
+```
+
+Frontmatter is the contract. Body is optional. The generated dashboard shows the result; `ledger_get` and the file show the argument.
+
+## Development
+
+```bash
+npm run build
+npm test        # builds, then runs an end-to-end test incl. the MCP server over stdio
+```
+
+MIT.
