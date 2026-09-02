@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { loadConfig, record, getById, type Config } from "./store.js";
+import { loadConfig, record, getById, discardDraft, type Config } from "./store.js";
 import { brief, search, similarFindings, renderFull, stats } from "./query.js";
 import { ChangeSchema, DecisionSchema, DefinitionSchema, FindingSchema, TYPES } from "./schema.js";
 
@@ -136,6 +136,23 @@ export async function startMcp() {
       },
     },
     async ({ reason }) => text(`Noted, nothing recorded: ${reason}`)
+  );
+
+  server.registerTool(
+    "ledger_discard_draft",
+    {
+      title: "Discard a draft",
+      description:
+        "Reject a draft created by the transcript fallback (listed in the brief under 'Drafts awaiting review'). Read it first with ledger_get. To promote instead, verify it and record a stable object with supersedes set to the draft id. Discarding needs a reason and is kept in history.",
+      inputSchema: {
+        id: z.string().describe("draft id, e.g. fnd-20260903-...-ab12"),
+        reason: z.string().min(5).describe("Why it is not durable knowledge: duplicate, wrong, exploration only"),
+      },
+    },
+    async ({ id, reason }) => {
+      const r = discardDraft(cfg, id, reason);
+      return text(`Discarded ${r.id}${r.git ? ` — ${r.git}` : ""}`);
+    }
   );
 
   server.registerTool(

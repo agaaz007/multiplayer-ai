@@ -1,26 +1,33 @@
 #!/usr/bin/env node
 import fs from "node:fs";
-import { initLedger, loadConfig, record, getById, pull } from "./store.js";
+import path from "node:path";
+import { spawn } from "node:child_process";
+import { initLedger, loadConfig, record, getById, pull, discardDraft } from "./store.js";
 import { brief, search, renderFull, stats } from "./query.js";
 import { TYPES, type LedgerType } from "./schema.js";
 import { installClaude, installCodex, agentRulesText } from "./install.js";
 import { startMcp } from "./mcp.js";
 import { handleHook } from "./hooks.js";
+import { DEFAULT_QUIET_MS, pendingDrafts, reconcile } from "./extract.js";
 
 const USAGE = `ledger — shared definitions, findings, changes, decisions for your agents
 
   ledger init <dir> [--author NAME]      create a ledger repo and point this machine at it
   ledger use <dir>  [--author NAME]      point this machine at an existing ledger clone
-  ledger install claude|codex|all        wire the MCP server, hooks, and guide into your agent
+  ledger install claude|codex|all        wire the MCP server, hooks, guide, and reconciler into your agent
   ledger mcp                             run the MCP server (stdio)
   ledger brief [--days N] [--tags a,b]   what an agent sees at session start
   ledger search <query> [--type T]       free-text search
   ledger get <id>                        show one object
   ledger record <type> < fields.json     record from JSON on stdin
-  ledger stats [--days N]                pilot health, incl. the checkpoint loop
+  ledger drafts                          drafts awaiting review (from the transcript fallback)
+  ledger discard <id> --reason "..."     reject a draft
+  ledger reconcile [--session ID] [--quiet 20m] [--dry-run]
+                                         transcript fallback: sessions with capture debt -> drafts
+  ledger stats [--days N]                pilot health, incl. the checkpoint loop and the fallback
   ledger sync                            git pull now
   ledger rules                           print the agent guide
-  ledger hook <event> < hook.json        Claude Code hook entry point (installed for you)
+  ledger hook <event> < hook.json        Claude Code / Codex hook entry point (installed for you)
 `;
 
 function flag(args: string[], name: string): string | undefined {
@@ -35,6 +42,14 @@ function readStdin(): string {
   } catch {
     return "";
   }
+}
+
+function parseDuration(s: string | undefined, fallbackMs: number): number {
+  if (!s) return fallbackMs;
+  const m = s.match(/^(\d+)\s*(ms|s|m|h)?$/);
+  if (!m) return fallbackMs;
+  const n = Number(m[1]);
+  return { ms: n, s: n * 1000, m: n * 60_000, h: n * 3_600_000 }[m[2] ?? "m"]!;
 }
 
 async function main() {
@@ -81,8 +96,10 @@ async function main() {
         return;
       }
       case "hook": {
-        // Claude Code lifecycle hook. Must never crash the session: any
-        // failure exits 0 silently. Only Stop uses exit 2, deliberately.
+        // Claude Code / Codex lifecycle hook. Must never crash the session:
+        // any failure exits 0 silently. LEDGER_HOOKS_OFF=1 is set for the
+        // extractor's own agent session so it cannot journal or block itself.
+        if (process.env.LEDGER_HOOKS_OFF === "1") process.exit(0);
         const event = args[0] ?? "";
         let input: any = {};
         try {
@@ -110,6 +127,15 @@ async function main() {
           if (parts.length) process.stdout.write(parts.join("\n\n") + "\n");
           process.exit(0);
         }
+        if (res.reconcile && cfg && input?.session_id && (cfg.extractor ?? "auto") !== "none") {
+          // Detached, so the hook returns at once and the agent can exit.
+          const child = spawn(process.execPath, [path.resolve(process.argv[1]), "reconcile", "--session", String(input.session_id)], {
+            detached: true,
+            stdio: "ignore",
+            env: { ...process.env, LEDGER_HOOKS_OFF: "1" },
+          });
+          child.unref();
+        }
         if (res.stdout) process.stdout.write(res.stdout);
         if (res.stderr) process.stderr.write(res.stderr);
         process.exit(res.exit);
@@ -136,6 +162,41 @@ async function main() {
         console.log(`recorded ${res.id}${res.git ? ` — ${res.git}` : ""}`);
         return;
       }
+      case "drafts": {
+        const ds = pendingDrafts(loadConfig());
+        if (!ds.length) return console.log("no drafts awaiting review");
+        for (const d of ds) {
+          console.log(`${d.id}  ${d.title}\n    ${d.fields.capture_reason ?? ""}\n    session ${d.fields.source_session ?? "?"}, ${d.created.slice(0, 16)}. promote: record a stable ${d.type} with supersedes: ${d.id}; discard: ledger discard ${d.id} --reason "..."`);
+        }
+        return;
+      }
+      case "discard": {
+        const id = args[0];
+        const reason = flag(args, "--reason");
+        if (!id || !reason) throw new Error(`usage: ledger discard <id> --reason "..."`);
+        const r = discardDraft(loadConfig(), id, reason);
+        console.log(`discarded ${r.id}${r.git ? ` — ${r.git}` : ""}`);
+        return;
+      }
+      case "reconcile": {
+        const cfg = loadConfig();
+        if ((cfg.extractor ?? "auto") === "none") return console.log("extractor disabled (extractor: none in ~/.ledger/config.json)");
+        const results = reconcile(cfg, {
+          sessionId: flag(args, "--session"),
+          quietMs: parseDuration(flag(args, "--quiet"), DEFAULT_QUIET_MS),
+          dryRun: args.includes("--dry-run"),
+        });
+        const logFile = path.join(path.dirname(process.env.LEDGER_CONFIG_DIR ?? path.join(require_home(), ".ledger", "x")), "reconcile.log");
+        const lines = results.map((r) => `${new Date().toISOString()} ${r.session_id} ${r.result}${r.draft_ids.length ? ` ${r.draft_ids.join(",")}` : ""}: ${r.reason}`);
+        try {
+          fs.mkdirSync(path.dirname(logFile), { recursive: true });
+          if (lines.length) fs.appendFileSync(logFile, lines.join("\n") + "\n");
+        } catch {
+          /* log is best-effort */
+        }
+        console.log(lines.length ? lines.join("\n") : "nothing to reconcile");
+        return;
+      }
       case "stats":
         console.log(stats(loadConfig(), Number(flag(args, "--days") ?? 14)));
         return;
@@ -156,6 +217,10 @@ async function main() {
     console.error(`ledger: ${e.message}`);
     process.exit(1);
   }
+}
+
+function require_home(): string {
+  return process.env.HOME || process.env.USERPROFILE || ".";
 }
 
 function loadAuthorFallback(): string {

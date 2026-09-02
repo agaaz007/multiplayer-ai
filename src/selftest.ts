@@ -5,11 +5,13 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { initLedger, loadConfig, loadAll, record, getById, commitAndPush, pull, type Config } from "./store.js";
+import { initLedger, loadConfig, loadAll, record, getById, commitAndPush, pull, recordDraft, discardDraft, type Config } from "./store.js";
+import { findCandidates, parseDrafts, reconcile, pendingDrafts } from "./extract.js";
+import { findTranscript, parseTranscript, evidenceText } from "./transcript.js";
 import { brief, search, similarFindings, stats, renderFull } from "./query.js";
 import { regenerateViews } from "./views.js";
 import { agentRulesText, upsertHooks, HOOK_EVENTS, isLedgerHookCommand } from "./install.js";
-import { handleHook, loadJournal, captureStats, debt } from "./hooks.js";
+import { handleHook, loadJournal, saveJournal, captureStats, debt } from "./hooks.js";
 
 const sh = (cwd: string, args: string[]) =>
   execFileSync("git", args, { cwd, stdio: ["ignore", "pipe", "pipe"] }).toString().trim();
@@ -408,6 +410,191 @@ assert.ok(!settings.hooks.SessionStart.some((e: any) => e.hooks[0].command.start
 assert.equal(settings.hooks.PostToolUse[0].matcher, "mcp__.*|Bash");
 assert.ok(isLedgerHookCommand("ledger brief --hook") && isLedgerHookCommand('"/opt/node" "/x/dist/cli.js" hook Stop') && !isLedgerHookCommand("someone-else"));
 
+// ---- transcript fallback: reconciliation to drafts ----
+// Runs only when live capture failed (ended with debt, or quiet with debt),
+// reads the real transcript formats, produces drafts only, once per session.
+const roots = { claude: path.join(tmp, "claude-projects"), codex: path.join(tmp, "codex-sessions") };
+const cwdHash = "-Users-x-proj";
+fs.mkdirSync(path.join(roots.claude, cwdHash), { recursive: true });
+const cl = (o: any) => JSON.stringify(o);
+const sidA = "11111111-aaaa-4bbb-8ccc-ddddddddddd1";
+const claudeT = path.join(roots.claude, cwdHash, `${sidA}.jsonl`);
+fs.writeFileSync(
+  claudeT,
+  [
+    cl({ type: "user", timestamp: "2026-09-03T09:00:00.000Z", cwd: "/Users/x/proj", sessionId: sidA, message: { role: "user", content: "What was trial CVR for Android in August?" } }),
+    cl({ type: "assistant", timestamp: "2026-09-03T09:00:05.000Z", sessionId: sidA, message: { role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "mcp__hiastro-clickhouse__run_query", input: { query: "select countIf(paid)/count() from trials where platform='android' and month='2026-08'" } }] } }),
+    cl({ type: "user", timestamp: "2026-09-03T09:00:07.000Z", sessionId: sidA, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "0.093\n(1 row)" }] }, toolUseResult: { stdout: "0.093" } }),
+    cl({ type: "assistant", timestamp: "2026-09-03T09:00:09.000Z", sessionId: sidA, message: { role: "assistant", content: [{ type: "text", text: "Android trial CVR in August was 9.3%." }] } }),
+  ].join("\n") + "\n"
+);
+const evA = parseTranscript(claudeT, "claude");
+assert.equal(evA.session_id, sidA);
+assert.equal(evA.queries.length, 1);
+assert.ok(evA.queries[0].input.includes("platform='android'") && evA.queries[0].output.includes("0.093"), "query paired with its result");
+assert.deepEqual(evA.prompts, ["What was trial CVR for Android in August?"]);
+assert.ok(evA.conclusions[0].includes("9.3%"));
+assert.ok(evidenceText(evA).includes("## Data-tool calls") && evidenceText(evA).includes("0.093"));
+
+// Codex rollout format
+const codexDay = path.join(roots.codex, "2026", "09", "03");
+fs.mkdirSync(codexDay, { recursive: true });
+const sidB = "019cae11-d65e-74d3-b60d-1b26dd1f8a3b";
+const codexT = path.join(codexDay, `rollout-2026-09-03T09-30-00-${sidB}.jsonl`);
+fs.writeFileSync(
+  codexT,
+  [
+    cl({ timestamp: "2026-09-03T09:30:00.000Z", type: "session_meta", payload: { id: sidB, cwd: "/Users/x/proj" } }),
+    cl({ timestamp: "2026-09-03T09:30:01.000Z", type: "event_msg", payload: { type: "user_message", message: "How many paywall impressions yesterday?" } }),
+    cl({ timestamp: "2026-09-03T09:30:02.000Z", type: "response_item", payload: { type: "function_call", name: "mcp__amplitude__query_amplitude_data", arguments: JSON.stringify({ sql: "select count() from paywall_impression where day=yesterday()" }), call_id: "call_1" } }),
+    cl({ timestamp: "2026-09-03T09:30:03.000Z", type: "response_item", payload: { type: "function_call_output", call_id: "call_1", output: "41200" } }),
+    cl({ timestamp: "2026-09-03T09:30:04.000Z", type: "event_msg", payload: { type: "agent_message", message: "41,200 paywall impressions yesterday." } }),
+  ].join("\n") + "\n"
+);
+const evB = parseTranscript(codexT);
+assert.equal(evB.agent, "codex");
+assert.equal(evB.session_id, sidB);
+assert.equal(evB.queries.length, 1);
+assert.ok(evB.queries[0].output.includes("41200"));
+assert.equal(findTranscript(sidB, undefined, roots)?.path, codexT, "codex transcript found by session id");
+assert.equal(findTranscript(sidA, undefined, roots)?.agent, "claude");
+
+// the evidence keeps whole queries (the nudge's 200-char cap must not apply here)
+const longSql = "select " + Array.from({ length: 60 }, (_, i) => `col_${i}`).join(", ") + " from events where platform='android' and day between '2026-08-01' and '2026-08-31'";
+assert.ok(longSql.length > 500);
+const longT = path.join(roots.claude, cwdHash, `${"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"}.jsonl`);
+fs.writeFileSync(longT, cl({ type: "assistant", sessionId: "e", message: { role: "assistant", content: [{ type: "tool_use", id: "t", name: "mcp__hiastro-clickhouse__run_query", input: { query: longSql } }] } }) + "\n");
+assert.equal(parseTranscript(longT, "claude").queries[0].input, longSql, "query text intact in the evidence");
+
+// Journals: A ended with debt, B quiet with debt, C has debt but is still live
+const rdir = path.join(tmp, "sessions-r");
+const rh = (event: string, sid: string, input: any, at: string) =>
+  handleHook(event, { session_id: sid, cwd: "/Users/x/proj", ...input }, { dir: rdir, now: new Date(at) });
+rh("SessionStart", sidA, { source: "startup", transcript_path: claudeT }, T(20));
+rh("PostToolUse", sidA, { tool_name: "mcp__hiastro-clickhouse__run_query", tool_input: { query: "select ..." } }, T(21));
+assert.equal(rh("SessionEnd", sidA, { reason: "other" }, T(22)).reconcile, true, "SessionEnd with debt asks for reconciliation");
+assert.equal(rh("SessionEnd", "no-debt", { reason: "other" }, T(22)).reconcile, undefined);
+rh("PostToolUse", sidB, { tool_name: "mcp__amplitude__query_amplitude_data", tool_input: { sql: "select ..." } }, T(23));
+const sidC = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+fs.writeFileSync(path.join(roots.claude, cwdHash, `${sidC}.jsonl`), cl({ type: "user", sessionId: sidC, message: { role: "user", content: "hi" } }) + "\n");
+rh("PostToolUse", sidC, { tool_name: "mcp__hiastro-clickhouse__run_query", tool_input: { query: "select 1" } }, T(24));
+
+// quiet gating: A and B transcripts are old; C's was just written, so it is still live
+const oldT = new Date(Date.now() - 60 * 60_000);
+fs.utimesSync(claudeT, oldT, oldT);
+fs.utimesSync(codexT, oldT, oldT);
+const cands = findCandidates({ dir: rdir, roots, quietMs: 20 * 60_000 });
+assert.deepEqual(
+  cands.map((c) => [c.journal.session_id, c.trigger]).sort(),
+  [[sidA, "session_end"], [sidB, "quiet"]].sort(),
+  "ended-with-debt and quiet-with-debt are candidates; live sessions are not"
+);
+assert.ok(cands.find((c) => c.journal.session_id === sidA)!.reason.includes("1 data query ran"));
+assert.equal(findCandidates({ dir: rdir, roots, quietMs: 0 }).length, 3, "with no quiet window the live one is included too");
+
+// Fake extractor: captures the prompt, returns a lenient finding for A (missing assumptions, one junk field), nothing for B
+const promptFile = path.join(tmp, "prompt.txt");
+const fake = path.join(tmp, "fake-extractor.mjs");
+fs.writeFileSync(
+  fake,
+  `import fs from "node:fs";
+let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
+  fs.writeFileSync(${JSON.stringify(promptFile)}, s);
+  if (s.includes("paywall_impression")) { console.log(JSON.stringify({ drafts: [], reason: "a count, not a finding" })); return; }
+  console.log("\`\`\`json\\n" + JSON.stringify({ drafts: [{ type: "finding", fields: {
+    title: "Android trial CVR August", question: "What was trial CVR for Android in August?", result: "9.3%",
+    data_window: { from: "2026-08-01", to: "2026-08-31" }, inputs: [{ source: "clickhouse", filters: "platform='android'" }],
+    method: "paid over trials", query: "select countIf(paid)/count() from trials where platform='android'", confidence: "low",
+    bogus_field: 1, confidence_basis: 12345 } }], reason: "one answered question" }) + "\\n\`\`\`");
+});
+`
+);
+process.env.LEDGER_EXTRACTOR_CMD = `${JSON.stringify(process.execPath)} ${JSON.stringify(fake)}`;
+
+const dry = reconcile(cfg2, { dir: rdir, roots, quietMs: 20 * 60_000, dryRun: true });
+assert.equal(dry.length, 2);
+assert.ok(!loadJournal(sidA, rdir).extracted, "dry run marks nothing");
+
+const rr = reconcile(cfg2, { dir: rdir, roots, quietMs: 20 * 60_000 });
+const rA = rr.find((r) => r.session_id === sidA)!;
+const rB = rr.find((r) => r.session_id === sidB)!;
+assert.equal(rA.result, "drafts", JSON.stringify(rA));
+assert.equal(rA.draft_ids.length, 1);
+assert.equal(rB.result, "none");
+const promptSent = fs.readFileSync(promptFile, "utf8");
+assert.ok(promptSent.includes("Capture operation") && promptSent.includes("What the ledger is") && promptSent.includes("## Data-tool calls"), "prompt = base modules + operation + evidence");
+assert.ok(promptSent.includes(`"${cfg2.author}"`), "author passed to the extractor");
+
+const draft = getById(cfg2, rA.draft_ids[0])!;
+assert.equal(draft.status, "draft");
+assert.equal(draft.fields.capture_method, "transcript_fallback");
+assert.equal(draft.fields.source_session, sidA);
+assert.ok(String(draft.fields.capture_reason).includes("no ledger object was recorded"));
+assert.equal(draft.fields.bogus_field, undefined, "unknown fields dropped");
+assert.equal(draft.fields.confidence_basis, undefined, "mistyped field dropped, the rest kept");
+assert.equal(draft.fields.result, "9.3%");
+const draftRaw = fs.readFileSync(draft.path, "utf8");
+assert.ok(draftRaw.includes("status: draft") && draftRaw.includes("capture_method: transcript_fallback") && draftRaw.includes(`source_session: ${sidA}`));
+
+// once per session
+assert.equal(loadJournal(sidA, rdir).extracted?.result, "drafts");
+assert.equal(loadJournal(sidB, rdir).extracted?.result, "none");
+assert.equal(reconcile(cfg2, { dir: rdir, roots, quietMs: 20 * 60_000 }).length, 0, "already reconciled sessions are never re-run");
+
+// an extractor error is not a decision about the session: retried, but not forever
+const jB = loadJournal(sidB, rdir);
+jB.extracted = { at: T(30), result: "error", reason: "claude: Not logged in", draft_ids: [], attempts: 1 };
+saveJournal(jB, rdir);
+assert.equal(findCandidates({ dir: rdir, roots, quietMs: 20 * 60_000 }).length, 1, "errored session is a candidate again");
+jB.extracted.attempts = 3;
+saveJournal(jB, rdir);
+assert.equal(findCandidates({ dir: rdir, roots, quietMs: 20 * 60_000 }).length, 0, "gives up after three attempts");
+jB.extracted = { at: T(30), result: "none", reason: "nothing", draft_ids: [], attempts: 1 };
+saveJournal(jB, rdir);
+
+// drafts are a review queue, not knowledge
+const b2 = brief(cfg2);
+assert.ok(b2.includes("## Drafts awaiting review (1)") && b2.includes(draft.id), "brief lists the draft for review");
+assert.ok(!b2.includes("9.3%"), "draft content stays out of the findings section");
+assert.ok(!search(cfg2, "Android trial CVR").some((h) => h.id === draft.id), "drafts are not search results");
+assert.ok(fs.readFileSync(path.join(dir, "README.md"), "utf8").includes("## Drafts awaiting review"), "dashboard shows the queue");
+assert.ok(stats(cfg2).includes("drafts created 1 (window), pending review 1, promoted 0, discarded 0"), stats(cfg2));
+assert.equal(pendingDrafts(cfg2).length, 1);
+
+// promote: a stable record that supersedes the draft; the full schema applies
+const promoted = record(cfg2, {
+  type: "finding",
+  fields: {
+    title: "Android trial CVR August",
+    question: "What was trial CVR for Android in August?",
+    result: "9.3% (n=12,400)",
+    data_window: { from: "2026-08-01", to: "2026-08-31" },
+    inputs: [{ source: "clickhouse", filters: "platform='android'" }],
+    method: "paid within 14 days over trials started, cohort by trial start",
+    query: "select ...",
+    assumptions: [{ statement: "trials table complete for August", kind: "implicit", if_wrong: "changes_conclusion" }],
+    supersedes: draft.id,
+  },
+});
+assert.equal(getById(cfg2, draft.id)?.status, "deprecated");
+assert.equal(getById(cfg2, draft.id)?.superseded_by, promoted.id);
+assert.ok(!brief(cfg2).includes("Drafts awaiting review"), "promoted draft leaves the queue");
+
+// discard
+const d2 = recordDraft(cfg2, { type: "decision", fields: { title: "Maybe drop Android", decision: "Drop Android paywall work" }, capture: { method: "transcript_fallback", session: sidB, reason: "test" } });
+assert.equal(getById(cfg2, d2.id)?.status, "draft");
+assert.throws(() => discardDraft(cfg2, promoted.id, "x"), /not a draft/);
+discardDraft(cfg2, d2.id, "the agent proposed it; nobody decided");
+const dd = getById(cfg2, d2.id)!;
+assert.equal(dd.status, "deprecated");
+assert.equal(dd.superseded_by, undefined);
+assert.ok(String((dd.fields.discarded as any)?.reason).includes("nobody decided"));
+assert.ok(stats(cfg2).includes("promoted 1, discarded 1"));
+assert.throws(() => recordDraft(cfg2, { type: "finding", fields: { title: "no main field" }, capture: { method: "transcript_fallback", session: "s", reason: "r" } }), /needs question/);
+assert.deepEqual(parseDrafts('{"drafts":[{"type":"finding","fields":{"title":"t"}},{"type":"nope","fields":{}}],"reason":"r"}').drafts.map((d) => d.type), ["finding"]);
+assert.throws(() => parseDrafts("sorry, nothing"), /non-JSON/);
+delete process.env.LEDGER_EXTRACTOR_CMD;
+
 // ---- git sync across two clones ----
 // The MCP server is long-lived and reads are throttled to one pull a minute,
 // so two machines recording inside the same minute is the normal case, not
@@ -505,6 +692,7 @@ const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name).sort();
 assert.deepEqual(names, [
   "ledger_brief",
+  "ledger_discard_draft",
   "ledger_get",
   "ledger_record_change",
   "ledger_record_decision",

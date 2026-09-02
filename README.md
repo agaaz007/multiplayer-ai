@@ -129,6 +129,38 @@ Conductor runs Claude Code, and everything here is installed at user scope (`~/.
 
 The journal lives in `~/.ledger/sessions/` and never enters the data repo. Which tools count as data work is a regex list, `data_tools` in `~/.ledger/config.json`; the default matches common analytics MCP servers and `psql`/`clickhouse`/`bq`/`duckdb` in Bash.
 
+## The transcript fallback
+
+Live capture is the primary path and should carry 90%+ of what is worth keeping, because the agent still has the query, the window, and the intent in context. The fallback exists for the misses. It is a reconciliation mechanism, not something that runs after every session.
+
+```
+Stop / PreCompact checkpoint
+        ↓
+stable object recorded?
+   ├── yes → done
+   └── no
+        ↓
+session ends with debt (SessionEnd)   or   session dies and its transcript goes quiet (reconciler, every 30 min, 20 min quiet)
+        ↓
+ledger reconcile: read the transcript, run the extractor once for this session
+        ↓
+durable knowledge the ledger failed to capture?
+   ├── no  → journal marked, nothing written
+   └── yes → DRAFT objects: status: draft, capture_method: transcript_fallback, source_session, capture_reason
+                  ↓
+        next brief: "Drafts awaiting review" → promote (record a stable object with supersedes) or discard (with a reason)
+```
+
+Rules that do not bend:
+
+- **The extractor never writes trusted memory.** Everything it produces is `status: draft`, kept out of the brief's knowledge sections, out of search, and shown only in the review queue and on the dashboard.
+- **Triggers are journal-driven.** A session is a candidate only if its journal shows data-tool calls with no record or skip after them. No journal debt, no extraction. Sessions still being worked in are left alone until their transcript has been quiet for 20 minutes.
+- **Once per session.** The journal records the outcome (`drafts`, `none`, `skipped`, `error`) and the session is never reconciled again.
+- **Provenance rules in the prompt** (`prompts/operations/capture.md`): numbers come from tool results, not prose; only the human's messages establish a decision; anything the transcript does not state becomes an implicit assumption with `evidence: "not stated in transcript"`; do not duplicate what was recorded live.
+- **Drafts are validated leniently** (title and the type's main field required, mistyped fields dropped); promotion applies the full schema.
+
+It runs on your own login: `claude -p --tools ""` or `codex exec --ephemeral`, with `LEDGER_HOOKS_OFF=1` in the child's environment so ledger's own hooks are no-ops inside the extraction session and it cannot journal or block itself. Choose with `extractor: claude | codex | auto | none` in `~/.ledger/config.json`. `ledger reconcile --dry-run` shows what would run. An extractor error (CLI not logged in, network) is retried on later runs, up to three times; `none`, `drafts`, and `skipped` are final. Prompts are composable modules in `prompts/`, the layout Code Almanac uses: `base/purpose.md`, `base/format.md`, `operations/capture.md`.
+
 ## Tools the agent gets
 
 | tool | purpose |
@@ -141,6 +173,7 @@ The journal lives in `~/.ledger/sessions/` and never enters the data repo. Which
 | `ledger_record_change` | what shipped, when, where, to whom, how to undo |
 | `ledger_record_decision` | the decision, context, every option considered and why it lost, rationale, assumptions, consequences, confidence, revisit date, how it will be confirmed |
 | `ledger_skip_record` | the Stop checkpoint asked and nothing was durable; the reason is counted |
+| `ledger_discard_draft` | reject a draft from the transcript fallback, with a reason. Promote by recording a stable object with `supersedes` |
 | `ledger_stats` | pilot health, including what the checkpoint loop caught |
 
 ## Recording format
@@ -208,7 +241,7 @@ So any OKF reader (Google's tooling, `serradura/okf`, an agent with a generic OK
 
 - No embeddings. Term overlap over a few hundred objects is fine. Add them when search visibly misses.
 - No web UI. GitHub renders the generated README.
-- No transcript mining. Recording is an explicit, schema-validated tool call by the agent that did the work, prompted by a deterministic checkpoint. A transcript-to-draft extractor is the planned safety net, never the primary writer, and its output would be `status: draft`, never a trusted fact.
+- No transcript mining as a primary path. Recording is an explicit, schema-validated tool call by the agent that did the work, prompted by a deterministic checkpoint. The transcript fallback runs only for sessions whose journal proves live capture failed, writes drafts only, and never a trusted fact.
 - No fifth object type. Add one when an agent visibly needed something and couldn't find it.
 
 ## Object format

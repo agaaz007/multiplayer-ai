@@ -175,6 +175,20 @@ export function brief(cfg: Config, opts: BriefOpts = {}): string {
   out.push(``);
   out.push(`## Findings, last ${days}d (${findings.length})`);
   out.push(findings.length ? findings.map(short).join("\n") : "_none_");
+
+  // Drafts from the transcript fallback are not knowledge yet; they are a review queue.
+  // A human's own `status: draft` object is their work in progress, not a review item.
+  const drafts = loadAll(cfg, TYPES, false).filter((o) => o.status === "draft" && o.fields.capture_method === "transcript_fallback" && byTag(o));
+  if (drafts.length) {
+    out.push(``, `## Drafts awaiting review (${drafts.length})`);
+    out.push(
+      `These were extracted from transcripts after live capture failed. They are NOT in force. For each: ledger_get it, then either record a stable ${"object"} with supersedes set to the draft id (after checking the numbers and assumptions), or ledger_discard_draft with a reason.`
+    );
+    for (const d of drafts.slice(0, 5)) {
+      out.push(`- ${d.type} ${d.id}: **${d.title}** — ${d.fields.capture_reason ?? ""} (${d.author}, ${d.created.slice(0, 10)})`);
+    }
+    if (drafts.length > 5) out.push(`- …and ${drafts.length - 5} more: \`ledger drafts\``);
+  }
   return out.join("\n");
 }
 
@@ -216,5 +230,18 @@ export function stats(cfg: Config, days = 14): string {
     ...dupes,
     `  total objects all time: ${all.length}`,
     ...captureStats(days),
+    ...draftStats(all, recent),
   ].join("\n");
+}
+
+/** The transcript fallback: how often it ran, what it produced, and what the humans did with it. */
+function draftStats(all: LedgerObject[], recent: LedgerObject[]): string[] {
+  const fromFallback = (o: LedgerObject) => o.fields.capture_method === "transcript_fallback";
+  const made = recent.filter(fromFallback);
+  const pending = all.filter((o) => fromFallback(o) && o.status === "draft");
+  const promoted = all.filter((o) => fromFallback(o) && o.status === "deprecated" && o.superseded_by);
+  const discarded = all.filter((o) => fromFallback(o) && o.status === "deprecated" && !o.superseded_by);
+  return [
+    `  transcript fallback: drafts created ${made.length} (window), pending review ${pending.length}, promoted ${promoted.length}, discarded ${discarded.length} (all time)`,
+  ];
 }

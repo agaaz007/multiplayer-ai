@@ -36,15 +36,21 @@ export interface Journal {
   session_id: string;
   started: string;
   cwd?: string;
+  /** from the hook input when the agent provides it (Claude Code does); else resolved by session id */
+  transcript_path?: string;
   entries: JournalEntry[];
   /** fingerprint of the debt last nudged; same debt is never nudged twice */
   nudged?: string;
+  /** set by the transcript fallback; a session is reconciled once, except errors, which are retried a few times */
+  extracted?: { at: string; result: "none" | "drafts" | "skipped" | "error"; reason: string; draft_ids: string[]; attempts?: number };
 }
 
 export interface HookResult {
   stdout?: string;
   stderr?: string;
   exit: number;
+  /** SessionEnd with capture debt: the caller should start the transcript fallback for this session */
+  reconcile?: boolean;
 }
 
 export interface HookOpts {
@@ -87,20 +93,27 @@ export function saveJournal(j: Journal, dir = sessionsDir()): void {
   fs.writeFileSync(journalPath(j.session_id, dir), JSON.stringify(j, null, 2) + "\n");
 }
 
+/** Shell tools: Claude's Bash, Codex's exec_command / shell. */
+const SHELL_TOOLS = /^(Bash|exec_command|shell|container\.exec)$/;
+
 export function isDataTool(toolName: string, toolInput: any, patterns = DEFAULT_DATA_TOOLS): boolean {
-  if (toolName === "Bash") return BASH_DATA.test(String(toolInput?.command ?? ""));
+  if (SHELL_TOOLS.test(toolName)) return BASH_DATA.test(String(toolInput?.command ?? toolInput?.cmd ?? ""));
   return patterns.some((p) => new RegExp(p, "i").test(toolName));
 }
 
-/** The query-like part of a tool input, one line, capped. This is the evidence the nudge quotes back. */
-export function summarize(toolInput: any): string {
+/**
+ * The query-like part of a tool input, one line, capped. The nudge quotes it
+ * back at 200 chars; the transcript fallback asks for more so the extractor
+ * sees the whole query.
+ */
+export function summarize(toolInput: any, max = 200): string {
   if (toolInput == null) return "";
-  if (typeof toolInput === "string") return clip(toolInput);
-  for (const k of ["sql", "query", "command", "question", "text", "prompt", "q", "jql", "expression"]) {
+  if (typeof toolInput === "string") return clip(toolInput, max);
+  for (const k of ["sql", "query", "command", "cmd", "question", "text", "prompt", "q", "jql", "expression"]) {
     const v = toolInput[k];
-    if (typeof v === "string" && v.trim()) return clip(v);
+    if (typeof v === "string" && v.trim()) return clip(v, max);
   }
-  return clip(JSON.stringify(toolInput));
+  return clip(JSON.stringify(toolInput), max);
 }
 
 function clip(s: string, n = 200): string {
@@ -169,6 +182,7 @@ export function handleHook(event: string, input: any, opts: HookOpts = {}): Hook
   if (!sessionId) return { exit: 0 };
   const j = loadJournal(sessionId, dir);
   if (input?.cwd && !j.cwd) j.cwd = String(input.cwd);
+  if (input?.transcript_path && !j.transcript_path) j.transcript_path = String(input.transcript_path);
 
   switch (event) {
     case "SessionStart": {
@@ -244,6 +258,8 @@ export function handleHook(event: string, input: any, opts: HookOpts = {}): Hook
       if (d.length) {
         j.entries.push({ at: now, kind: "end", summary: `${d.length} uncaptured` });
         saveJournal(j, dir);
+        // live capture failed for this session: hand it to the transcript fallback now
+        return { exit: 0, reconcile: true };
       }
       return { exit: 0 };
     }

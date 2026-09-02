@@ -135,6 +135,8 @@ Changes and definitions are short. A change is what, when, where, to whom, and h
 
 **"The tool rejected my record."** Read the message. It names the field and, for assumptions, lists the common implicit ones. Add what is missing and call again. Do not drop fields to get past validation.
 
+**"The brief says drafts are awaiting review."** These came from the transcript fallback: a session ran queries, nothing was recorded live, and an extractor read the transcript afterwards. They are not in force and not to be trusted. For each one: `ledger_get` it, check the number against the query and the window, then either record a stable object with `supersedes` set to the draft id (the full format applies, so add the assumptions the extractor could not know), or `ledger_discard_draft` with the reason. Do not leave them sitting; the queue is the signal that live capture failed.
+
 ---
 
 ## The tools
@@ -149,6 +151,7 @@ Changes and definitions are short. A change is what, when, where, to whom, and h
 | `ledger_record_change` | something went live |
 | `ledger_record_decision` | a direction was chosen, dropped, or reversed |
 | `ledger_skip_record` | the checkpoint asked and nothing was durable; give the reason |
+| `ledger_discard_draft` | a draft in the review queue is not durable knowledge; give the reason. To promote instead, record a stable object with `supersedes` |
 | `ledger_stats` | pilot health: who records, what the checkpoint caught, findings missing definitions or assumptions, duplicates across authors |
 
 Every record commits and pushes. Every read pulls. Teammates see each other's objects within a minute.
@@ -163,7 +166,7 @@ In Claude Code and in Codex (CLI and desktop app), five hooks make the loop dete
 - **PostToolUse:** every data-tool call (MCP analytics servers, `psql`/`clickhouse`/`bq`/`duckdb` in Bash) is noted in a local session journal: tool, query text, time. This is evidence, not knowledge. It never leaves the machine.
 - **Stop:** when you try to finish a turn with queries since the last record, the stop is blocked once and the queries are quoted back. You record, or you call `ledger_skip_record`. The same batch is never asked about twice.
 - **PreCompact:** if uncaptured queries exist when context is about to be compacted, they are injected into context with a request to record now, while method and assumptions are still in your head.
-- **SessionEnd:** capture debt is noted for `ledger stats`. Nothing is reconstructed from the transcript.
+- **SessionEnd:** if queries ran and nothing was recorded, live capture has failed for this session, and the transcript fallback starts in the background: an extractor reads the transcript and writes **drafts**, never stable objects. A reconciler also runs every 30 minutes for sessions that died without a SessionEnd, once their transcript has been quiet for 20 minutes. Drafts show up in the next brief under "Drafts awaiting review".
 
 Codex runs the same five hooks from `~/.codex/hooks.json`, but skips any hook that has not been trusted. If the checkpoint never fires in Codex, the user has not run `/hooks` and trusted the ledger entries yet; tell them. Until then, call `ledger_brief` yourself at the start of a relevant session and record before you finish.
 

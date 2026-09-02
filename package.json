@@ -10,6 +10,7 @@
     "dist",
     "template",
     "guides",
+    "prompts",
     "README.md"
   ],
   "scripts": {

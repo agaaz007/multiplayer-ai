@@ -3,6 +3,7 @@ import path from "node:path";
 import os from "node:os";
 import { execFileSync } from "node:child_process";
 import matter from "gray-matter";
+import type { z } from "zod";
 import { DIRS, SCHEMAS, TYPES, type LedgerObject, type LedgerType } from "./schema.js";
 import { isGeneratedView, regenerateViews } from "./views.js";
 
@@ -14,6 +15,8 @@ export interface Config {
   git_sync: boolean;
   /** Regexes over tool names that count as data work for the Stop checkpoint. Defaults in hooks.ts. */
   data_tools?: string[];
+  /** Which CLI runs the transcript fallback: "claude" | "codex" | "auto" (default) | "none". */
+  extractor?: string;
 }
 
 const CONFIG_DIR = path.join(os.homedir(), ".ledger");
@@ -38,6 +41,7 @@ export function loadConfig(): Config {
       ? process.env.LEDGER_GIT_SYNC !== "0"
       : cfg.git_sync ?? true,
     ...(cfg.data_tools ? { data_tools: cfg.data_tools } : {}),
+    ...(cfg.extractor ? { extractor: cfg.extractor } : {}),
   };
 }
 
@@ -380,22 +384,39 @@ function describe(type: LedgerType, f: Record<string, unknown>): string {
   }
 }
 
-export function record(cfg: Config, input: RecordInput): RecordResult {
-  const schema = SCHEMAS[input.type];
+function prepare(cfg: Config, input: RecordInput): Record<string, any> {
   const raw: Record<string, any> = { author: cfg.author, ...input.fields };
   // a finding's headline `source` is its first input unless stated
   if (input.type === "finding" && !raw.source && Array.isArray(raw.inputs) && raw.inputs[0]?.source) {
     raw.source = raw.inputs[0].source;
   }
-  const parsed = schema.safeParse(raw);
-  if (!parsed.success) {
-    const issues = parsed.error.issues
-      .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
-      .join("; ");
-    throw new Error(`Invalid ${input.type}: ${issues}`);
-  }
-  const { body, author, title, description, tags, status, supersedes, source, ...rest } =
-    parsed.data as Record<string, any>;
+  return raw;
+}
+
+function issuesOf(parsed: { success: false; error: { issues: any[] } }): string {
+  return parsed.error.issues.map((i: any) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ");
+}
+
+/** The main field per type: the one thing a draft must have to be worth reviewing. */
+const MAIN_FIELD: Record<LedgerType, string[]> = {
+  definition: ["metric", "formula"],
+  finding: ["question", "result"],
+  change: ["what"],
+  decision: ["decision"],
+};
+
+/**
+ * Write one object: file, supersede bookkeeping, regenerated views, commit,
+ * push. `data` is already validated. `extra` lands in the frontmatter after
+ * the standard families (used for draft capture metadata).
+ */
+function persist(
+  cfg: Config,
+  type: LedgerType,
+  data: Record<string, any>,
+  opts: { extra?: Record<string, unknown>; commitPrefix?: string } = {}
+): RecordResult {
+  const { body, author, title, description, tags, status, supersedes, source, ...rest } = data;
 
   // Always start from the latest remote state: the generated views are a
   // function of the whole object set, so writing from a stale tree would
@@ -403,25 +424,26 @@ export function record(cfg: Config, input: RecordInput): RecordResult {
   pull(cfg, true);
 
   const now = new Date();
-  const id = makeId(input.type, String(title), now);
-  const dir = path.join(cfg.ledger_dir, DIRS[input.type]);
+  const id = makeId(type, String(title), now);
+  const dir = path.join(cfg.ledger_dir, DIRS[type]);
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, `${id}.md`);
 
   // OKF v0.2 frontmatter. `type` is the only required key; the rest is the
   // recommended + trust/lifecycle families, then our type-specific fields.
   const front: Record<string, unknown> = {
-    type: input.type,
+    type,
     id,
     title,
-    description: description || describe(input.type, parsed.data as any),
-    tags,
-    status,
+    description: description || describe(type, data),
+    tags: tags ?? [],
+    status: status ?? "stable",
     generated: { by: `human:${author}`, at: now.toISOString() },
   };
   if (supersedes) front.supersedes = supersedes;
   if (source) front.sources = [{ id: "primary", resource: source }];
-  if (input.type === "decision" && rest.revisit_by) front.stale_after = `${rest.revisit_by}T00:00:00Z`;
+  if (type === "decision" && rest.revisit_by) front.stale_after = `${rest.revisit_by}T00:00:00Z`;
+  Object.assign(front, opts.extra ?? {});
   Object.assign(front, rest);
 
   fs.writeFileSync(file, matter.stringify(body ? body + "\n" : "", front));
@@ -432,10 +454,10 @@ export function record(cfg: Config, input: RecordInput): RecordResult {
     const old = loadAll(cfg, TYPES, false).find((o) => o.id === String(supersedes));
     if (old) {
       const raw = matter(fs.readFileSync(old.path, "utf8"));
-      const data = normalizeYaml(raw.data);
-      data.status = "deprecated";
-      data.superseded_by = id;
-      fs.writeFileSync(old.path, matter.stringify(raw.content, data));
+      const d = normalizeYaml(raw.data);
+      d.status = "deprecated";
+      d.superseded_by = id;
+      fs.writeFileSync(old.path, matter.stringify(raw.content, d));
       touched.push(old.path);
       superseded = old.id;
     }
@@ -446,10 +468,81 @@ export function record(cfg: Config, input: RecordInput): RecordResult {
 
   const git = commitAndPush(
     cfg,
-    `${input.type}: ${String(title).slice(0, 60)} (${author})`,
+    `${opts.commitPrefix ?? type}: ${String(title).slice(0, 60)} (${author})`,
     touched.map((p) => path.relative(cfg.ledger_dir, p))
   );
   return { id, path: file, git, superseded };
+}
+
+/** Record a stable object. The full schema applies; an incomplete argument is rejected. */
+export function record(cfg: Config, input: RecordInput): RecordResult {
+  const parsed = SCHEMAS[input.type].safeParse(prepare(cfg, input));
+  if (!parsed.success) throw new Error(`Invalid ${input.type}: ${issuesOf(parsed as any)}`);
+  return persist(cfg, input.type, parsed.data as Record<string, any>);
+}
+
+export interface DraftCapture {
+  method: "transcript_fallback";
+  session: string;
+  agent?: string;
+  reason: string;
+}
+
+/**
+ * Record a draft from the transcript fallback. Drafts are for review, not
+ * for trust, so validation is lenient: title and the type's main field are
+ * required, everything else is kept if present and well-typed. Status is
+ * forced to draft; the capture metadata says where it came from and why the
+ * fallback ran. A draft never enters the brief. Promote by recording a stable
+ * object with `supersedes`; discard with `discardDraft`.
+ */
+export function recordDraft(cfg: Config, input: RecordInput & { capture: DraftCapture }): RecordResult {
+  const raw = prepare(cfg, input);
+  raw.status = "draft";
+  for (const k of ["title", ...MAIN_FIELD[input.type]]) {
+    if (typeof raw[k] !== "string" || !raw[k].trim()) throw new Error(`draft ${input.type} needs ${k}`);
+  }
+  if (typeof raw.title === "string") raw.title = raw.title.slice(0, 140);
+  // keep only fields the schema knows and that pass their own type checks;
+  // a field that fails (wrong type, or an array refine) is dropped, not fixed
+  const lenient = (SCHEMAS[input.type] as z.ZodObject<any>).partial();
+  let data: Record<string, any>;
+  const first = lenient.safeParse(raw);
+  if (first.success) data = first.data as Record<string, any>;
+  else {
+    const bad = new Set(first.error.issues.map((i: any) => String(i.path[0])));
+    const pruned = Object.fromEntries(Object.entries(raw).filter(([k]) => !bad.has(k)));
+    const again = lenient.safeParse(pruned);
+    if (!again.success) throw new Error(`draft ${input.type} invalid: ${issuesOf(again as any)}`);
+    data = again.data as Record<string, any>;
+  }
+  data.author = cfg.author;
+  data.status = "draft";
+  return persist(cfg, input.type, data, {
+    extra: {
+      capture_method: input.capture.method,
+      source_session: input.capture.session,
+      ...(input.capture.agent ? { source_agent: input.capture.agent } : {}),
+      capture_reason: input.capture.reason,
+    },
+    commitPrefix: `draft ${input.type}`,
+  });
+}
+
+/** Mark a draft as reviewed-and-rejected. It leaves the review list and stays in history. */
+export function discardDraft(cfg: Config, id: string, reason: string): { id: string; git: string | null } {
+  pull(cfg, true);
+  const o = loadAll(cfg, TYPES, false).find((x) => x.id === id);
+  if (!o) throw new Error(`not found: ${id}`);
+  if (o.status !== "draft") throw new Error(`${id} is ${o.status}, not a draft`);
+  const raw = matter(fs.readFileSync(o.path, "utf8"));
+  const d = normalizeYaml(raw.data);
+  d.status = "deprecated";
+  d.discarded = { by: `human:${cfg.author}`, at: new Date().toISOString(), reason };
+  fs.writeFileSync(o.path, matter.stringify(raw.content, d));
+  const touched = [o.path, ...regenerateViews(cfg, loadAll(cfg, TYPES, false))];
+  const git = commitAndPush(cfg, `discard ${o.type}: ${o.title.slice(0, 60)} (${cfg.author})`, touched.map((p) => path.relative(cfg.ledger_dir, p)));
+  return { id, git };
 }
 
 // ---------- init ----------

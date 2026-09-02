@@ -111,6 +111,57 @@ export function upsertHooks(settings: any): string[] {
   return log;
 }
 
+// ---------- the periodic reconciler ----------
+
+const LAUNCHD_LABEL = "com.tranzmit.ledger.reconcile";
+export const RECONCILE_INTERVAL_S = 30 * 60;
+
+/**
+ * Sessions that die (crash, closed terminal, sleep) never reach SessionEnd,
+ * so a scheduler runs `ledger reconcile` every 30 minutes; it only touches
+ * sessions whose journal shows capture debt and whose transcript has been
+ * quiet for 20 minutes. macOS: a LaunchAgent. Elsewhere: a cron line to add.
+ * LEDGER_NO_LAUNCHD=1 writes the plist without loading it (tests, sandboxes).
+ */
+export function installReconciler(): string[] {
+  const log: string[] = [];
+  const home = os.homedir();
+  const logFile = path.join(home, ".ledger", "reconcile.log");
+  fs.mkdirSync(path.dirname(logFile), { recursive: true });
+  const cmdArgs = [NODE, CLI, "reconcile"];
+  if (process.platform !== "darwin") {
+    log.push(`reconciler: add to cron: */30 * * * * ${cmdArgs.map(q).join(" ")} >> ${logFile} 2>&1`);
+    return log;
+  }
+  const plist = path.join(home, "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
+  fs.mkdirSync(path.dirname(plist), { recursive: true });
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>${LAUNCHD_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>${cmdArgs.map((a) => `<string>${a.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</string>`).join("")}</array>
+  <key>StartInterval</key><integer>${RECONCILE_INTERVAL_S}</integer>
+  <key>RunAtLoad</key><false/>
+  <key>EnvironmentVariables</key>
+  <dict><key>LEDGER_HOOKS_OFF</key><string>1</string><key>HOME</key><string>${home}</string><key>PATH</key><string>${path.dirname(NODE)}:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin</string></dict>
+  <key>StandardOutPath</key><string>${logFile}</string>
+  <key>StandardErrorPath</key><string>${logFile}</string>
+</dict>
+</plist>
+`;
+  fs.writeFileSync(plist, xml);
+  if (process.env.LEDGER_NO_LAUNCHD === "1") {
+    log.push(`reconciler: wrote ${plist} (not loaded: LEDGER_NO_LAUNCHD)`);
+    return log;
+  }
+  tryExec("launchctl", ["unload", plist]);
+  if (tryExec("launchctl", ["load", plist])) log.push(`reconciler: LaunchAgent ${LAUNCHD_LABEL} loaded, every ${RECONCILE_INTERVAL_S / 60} min, log ${logFile}`);
+  else log.push(`reconciler: wrote ${plist} but launchctl load failed; run: launchctl load ${plist}`);
+  return log;
+}
+
 // ---------- Claude Code (also what Conductor runs) ----------
 
 export function installClaude(): string[] {
@@ -150,6 +201,9 @@ export function installClaude(): string[] {
   fs.writeFileSync(guideDst, guideText());
   log.push(`wrote ${guideDst}`);
   log.push(upsertBlock(path.join(home, ".claude", "CLAUDE.md"), claudeImportBlock()));
+
+  // 4. The periodic transcript reconciler (shared with Codex; idempotent).
+  log.push(...installReconciler());
   log.push("restart Claude Code (and Conductor workspaces) to pick this up");
   return log;
 }
@@ -198,6 +252,9 @@ export function installCodex(): string[] {
 
   // 3. The guide, inline.
   log.push(upsertBlock(path.join(codexDir, "AGENTS.md"), codexBlock()));
+
+  // 4. The periodic transcript reconciler (shared with Claude; idempotent).
+  log.push(...installReconciler());
   log.push("restart Codex to pick this up");
   return log;
 }
