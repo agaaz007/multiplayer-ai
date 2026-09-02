@@ -2,7 +2,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { initLedger, loadConfig, record, getById, pull, discardDraft } from "./store.js";
+import { initLedger, loadConfig, record, getById, pull, discardDraft, ledgerHome } from "./store.js";
 import { brief, search, renderFull, stats } from "./query.js";
 import { TYPES, type LedgerType } from "./schema.js";
 import { installClaude, installCodex, agentRulesText } from "./install.js";
@@ -186,7 +186,7 @@ async function main() {
           quietMs: parseDuration(flag(args, "--quiet"), DEFAULT_QUIET_MS),
           dryRun: args.includes("--dry-run"),
         });
-        const logFile = path.join(path.dirname(process.env.LEDGER_CONFIG_DIR ?? path.join(require_home(), ".ledger", "x")), "reconcile.log");
+        const logFile = path.join(ledgerHome(), "reconcile.log");
         const lines = results.map((r) => `${new Date().toISOString()} ${r.session_id} ${r.result}${r.draft_ids.length ? ` ${r.draft_ids.join(",")}` : ""}: ${r.reason}`);
         try {
           fs.mkdirSync(path.dirname(logFile), { recursive: true });
@@ -217,10 +217,6 @@ async function main() {
     console.error(`ledger: ${e.message}`);
     process.exit(1);
   }
-}
-
-function require_home(): string {
-  return process.env.HOME || process.env.USERPROFILE || ".";
 }
 
 function loadAuthorFallback(): string {

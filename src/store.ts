@@ -19,14 +19,23 @@ export interface Config {
   extractor?: string;
 }
 
-const CONFIG_DIR = path.join(os.homedir(), ".ledger");
-const CONFIG_FILE = path.join(CONFIG_DIR, "config.json");
+/**
+ * Machine-level state: config, session journals, the reconcile log.
+ * Resolved per call, never at import time — a module-level constant captures
+ * whatever HOME was when the module loaded, which silently wrote the real
+ * ~/.ledger/config.json from tests that set HOME after importing.
+ * LEDGER_CONFIG_DIR overrides it outright.
+ */
+export function ledgerHome(): string {
+  return process.env.LEDGER_CONFIG_DIR || path.join(os.homedir(), ".ledger");
+}
+const configFile = () => path.join(ledgerHome(), "config.json");
 
 export function loadConfig(): Config {
   const env = process.env.LEDGER_DIR;
   let cfg: Partial<Config> = {};
-  if (fs.existsSync(CONFIG_FILE)) {
-    cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8"));
+  if (fs.existsSync(configFile())) {
+    cfg = JSON.parse(fs.readFileSync(configFile(), "utf8"));
   }
   const ledger_dir = env || cfg.ledger_dir;
   if (!ledger_dir) {
@@ -46,8 +55,8 @@ export function loadConfig(): Config {
 }
 
 export function saveConfig(cfg: Config) {
-  fs.mkdirSync(CONFIG_DIR, { recursive: true });
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2) + "\n");
+  fs.mkdirSync(ledgerHome(), { recursive: true });
+  fs.writeFileSync(configFile(), JSON.stringify(cfg, null, 2) + "\n");
 }
 
 // ---------- git sync (best-effort, never throws) ----------
@@ -595,7 +604,7 @@ export function initLedger(dir: string, author: string): string[] {
   // keep machine-level settings (data_tools) across init/use
   let existing: Partial<Config> = {};
   try {
-    if (fs.existsSync(CONFIG_FILE)) existing = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8"));
+    if (fs.existsSync(configFile())) existing = JSON.parse(fs.readFileSync(configFile(), "utf8"));
   } catch {
     /* unreadable: overwrite */
   }

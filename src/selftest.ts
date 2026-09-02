@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { initLedger, loadConfig, loadAll, record, getById, commitAndPush, pull, recordDraft, discardDraft, type Config } from "./store.js";
+import { initLedger, loadConfig, loadAll, record, getById, commitAndPush, pull, recordDraft, discardDraft, ledgerHome, type Config } from "./store.js";
 import { findCandidates, parseDrafts, reconcile, pendingDrafts } from "./extract.js";
 import { findTranscript, parseTranscript, evidenceText } from "./transcript.js";
 import { brief, search, similarFindings, stats, renderFull } from "./query.js";
@@ -35,6 +35,7 @@ process.env.LEDGER_GIT_SYNC = "1";
 
 // keep the real ~/.ledger untouched: initLedger writes config, so point HOME at tmp
 process.env.HOME = tmp;
+process.env.LEDGER_CONFIG_DIR = path.join(tmp, ".ledger"); // never touch the real ~/.ledger
 
 initLedger(dir, "agaaz");
 const cfg = loadConfig();
@@ -594,6 +595,11 @@ assert.throws(() => recordDraft(cfg2, { type: "finding", fields: { title: "no ma
 assert.deepEqual(parseDrafts('{"drafts":[{"type":"finding","fields":{"title":"t"}},{"type":"nope","fields":{}}],"reason":"r"}').drafts.map((d) => d.type), ["finding"]);
 assert.throws(() => parseDrafts("sorry, nothing"), /non-JSON/);
 delete process.env.LEDGER_EXTRACTOR_CMD;
+
+// machine state never escapes the sandbox: config, journals and log all under LEDGER_CONFIG_DIR
+assert.equal(ledgerHome(), path.join(tmp, ".ledger"));
+assert.ok(fs.existsSync(path.join(tmp, ".ledger", "config.json")), "config written inside the sandbox");
+assert.ok(!fs.readFileSync(path.join(tmp, ".ledger", "config.json"), "utf8").includes("undefined"));
 
 // ---- git sync across two clones ----
 // The MCP server is long-lived and reads are throttled to one pull a minute,

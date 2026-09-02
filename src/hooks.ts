@@ -1,6 +1,6 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import { ledgerHome } from "./store.js";
 
 /**
  * The checkpoint loop. Deterministic software decides WHEN to check for
@@ -69,7 +69,7 @@ const SKIP_TOOL = "mcp__ledger__ledger_skip_record";
 const SEARCH_TOOLS = /^mcp__ledger__ledger_(search|brief|get)$/;
 
 export function sessionsDir(): string {
-  return path.join(os.homedir(), ".ledger", "sessions");
+  return path.join(ledgerHome(), "sessions");
 }
 
 function journalPath(sessionId: string, dir: string): string {

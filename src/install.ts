@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { ledgerHome } from "./store.js";
 
 /**
  * What the agent reads, and what runs around it.
@@ -126,7 +127,7 @@ export const RECONCILE_INTERVAL_S = 30 * 60;
 export function installReconciler(): string[] {
   const log: string[] = [];
   const home = os.homedir();
-  const logFile = path.join(home, ".ledger", "reconcile.log");
+  const logFile = path.join(ledgerHome(), "reconcile.log");
   fs.mkdirSync(path.dirname(logFile), { recursive: true });
   const cmdArgs = [NODE, CLI, "reconcile"];
   if (process.platform !== "darwin") {
