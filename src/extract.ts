@@ -89,7 +89,7 @@ export function findCandidates(opts: ReconcileOpts = {}): Candidate[] {
     const ended = j.entries.some((e) => e.kind === "end");
     const quietFor = now.getTime() - fs.statSync(t.path).mtimeMs;
     const trigger: Candidate["trigger"] = opts.sessionId ? "manual" : ended ? "session_end" : "quiet";
-    if (trigger === "quiet" && quietFor < quietMs) continue; // still live: let the hooks do their job
+    if (trigger === "quiet" && quietMs > 0 && quietFor < quietMs) continue; // still live: let the hooks do their job
     out.push({ journal: j, transcript: t, trigger, reason: debtReason(j) });
   }
   return out;
