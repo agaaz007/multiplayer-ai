@@ -175,6 +175,27 @@ Every record commits and pushes. Every read pulls. Teammates see each other's ob
 
 ---
 
+## Execution continuity: continuing a teammate's unfinished work
+
+The four object types carry conclusions. Unfinished work is carried by **threads**: a goal pursued over time in one repo across any number of sessions and harnesses. A local helper captures every session automatically (prompts, assistant text, tool calls, file changes) and snapshots the worktree to a hidden git ref every 30 seconds. Nothing depends on an agent remembering to save.
+
+At session start the brief lists teammates' **Open threads** for the last 48 hours, this repo first, and any **Ledger notices** (for example, that someone continued your thread).
+
+| tool | when |
+|---|---|
+| `ledger_threads` | see open threads on this repo or all repos before starting related work |
+| `ledger_thread_get` | read one thread in full: instructions, files touched, pending operations, checkpoint, claim |
+| `ledger_resume` | continue a thread. `mode: "continue"` claims it and returns the resume pack with worktree bootstrap commands; `mode: "fork"` creates a linked thread you own; `mode: "inspect"` reads without claiming. Pass `cwd` of a checkout of the same repo to get the diff of what changed since |
+| `ledger_thread_start` | give your current work an explicit title and goal (otherwise one is created from your first prompt) |
+| `ledger_thread_note` | leave a mid-task note for whoever continues: a constraint learned, a next step, a dead end |
+| `ledger_release` | release your claim when you stop, so a teammate need not wait for lease expiry |
+
+**The first turn after `ledger_resume`:** check out the snapshot into a fresh worktree using the bootstrap commands and inspect it; state what is confirmed (verified snapshot, acknowledged events) versus uncertain (loss window, pending operations, capture gaps); never rerun a pending operation that mutates anything until its outcome is known; say what you are continuing and what you will do next.
+
+**Rules the pack states and you must respect:** the claim is advisory and protects the shared record, not the other machine; "saved through" timestamps are remote-verified measurements, never assumptions; any narrative is generated and unreviewed, machine fields are the evidence. A thread note is not a decision or finding; record those with the `ledger_record_*` tools.
+
+---
+
 ## What runs automatically
 
 In Claude Code and in Codex (CLI and desktop app), five hooks make the loop deterministic. None of them decide what counts as knowledge; they only decide when to ask.
