@@ -3,10 +3,11 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { registerAppTool, registerAppResource, RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/server";
 import { readFile } from "node:fs/promises";
 import { z } from "zod";
-import { loadConfig, record, getById, discardDraft, type Config } from "./store.js";
+import { loadConfig, loadAll, record, getById, discardDraft, type Config } from "./store.js";
 import { brief, search, similarFindings, renderFull, stats } from "./query.js";
-import { ChangeSchema, DecisionSchema, DefinitionSchema, FindingSchema, TYPES } from "./schema.js";
+import { ChangeSchema, DecisionSchema, DefinitionSchema, FindingSchema, TYPES, type LedgerObject } from "./schema.js";
 import { EVIDENCE_URI, ReferenceSchema, evidenceResult, contributionResult } from "./evidence.js";
+import { RECEIPT_GUIDANCE, savedReceipt, receiptText } from "./receipts.js";
 
 const text = (s: string) => ({ content: [{ type: "text" as const, text: s }] });
 
@@ -43,7 +44,7 @@ export function createMcpServer(cfg: Config) {
     {
       title: "Search the ledger",
       description:
-        "Search definitions, findings, changes, and decisions by free text. Use it BEFORE running an analysis (has this question been answered?), before attributing a metric move (what shipped?), and before proposing direction (what was decided?). Shows retrieved evidence, not proof of use. If your answer builds on these records, call ledger_show_contribution with the actual record IDs and answer excerpts.",
+        "Search definitions, findings, changes, and decisions by free text. Use it BEFORE running an analysis (has this question been answered?), before attributing a metric move (what shipped?), and before proposing direction (what was decided?). Shows retrieved evidence, not proof of use. If your answer builds on these records, call ledger_show_contribution with the actual record IDs and answer excerpts." + RECEIPT_GUIDANCE,
       _meta: evidenceUi,
       annotations: readOnly,
       inputSchema: {
@@ -69,7 +70,7 @@ export function createMcpServer(cfg: Config) {
     "ledger_get",
     {
       title: "Get one ledger object",
-      description: "Fetch a full object by id (e.g. fnd-20260902-trial-cvr-ab12) including its query and body.",
+      description: "Fetch a full object by id (e.g. fnd-20260902-trial-cvr-ab12) including its query and body." + RECEIPT_GUIDANCE,
       inputSchema: { id: z.string() },
       _meta: evidenceUi,
       annotations: readOnly,
@@ -82,7 +83,7 @@ export function createMcpServer(cfg: Config) {
 
   registerAppTool(server, "ledger_show_contribution", {
     title: "Show Ledger's contribution",
-    description: "After using ledger evidence in an answer, show an expandable attribution card linking actual record IDs to exact answer excerpts and their contribution. Source author, date and status are fetched from the ledger. Usage is agent-reported, not independently verified. This only displays a card: it does not save a finding or clear the recording checkpoint. Keep ordinary citations in the answer for hosts without MCP Apps.",
+    description: "After using ledger evidence in an answer, show an expandable attribution card linking actual record IDs to exact answer excerpts and their contribution. Source author, date and status are fetched from the ledger. Usage is agent-reported, not independently verified. This only displays a card: it does not save a finding or clear the recording checkpoint. Keep ordinary citations in the answer for hosts without MCP Apps." + RECEIPT_GUIDANCE,
     inputSchema: { references: z.array(ReferenceSchema).min(1).max(20) },
     _meta: evidenceUi,
     annotations: readOnly,
@@ -96,7 +97,7 @@ export function createMcpServer(cfg: Config) {
   ) =>
     server.registerTool(
       name,
-      { title: name, description, inputSchema: schema.omit({ author: true }).extend({ author: z.string().optional() }).shape },
+      { title: `Save Ledger ${type}`, description: description + RECEIPT_GUIDANCE, inputSchema: schema.omit({ author: true }).extend({ author: z.string().optional() }).shape },
       async (fields: any) => {
         // Rework check for findings: surface prior answers before writing a new one.
         let warn = "";
@@ -109,12 +110,17 @@ export function createMcpServer(cfg: Config) {
           }
         }
         const res = record(cfg, { type, fields });
-        return text(
+        // A source-inspection failure must not turn a successful write into an
+        // error that invites the agent to retry and create a duplicate record.
+        let objects: LedgerObject[] | null = null;
+        try { objects = loadAll(cfg, TYPES, false); } catch { /* receipt reports unavailable details */ }
+        const receipt = savedReceipt(type, fields, res, objects, cfg.git_sync);
+        const details =
           `Recorded ${type} ${res.id}` +
             (res.superseded ? ` (superseded ${res.superseded})` : "") +
             (res.git ? ` — ${res.git}` : "") +
-            warn
-        );
+            warn;
+        return { content: [receiptText(receipt, details)], structuredContent: { receipt } };
       }
     );
 

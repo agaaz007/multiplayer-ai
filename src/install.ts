@@ -16,7 +16,7 @@ import { ledgerHome } from "./store.js";
  * both agents by re-running `ledger install`. Pattern borrowed from Code
  * Almanac (Apache-2.0), which installs ~/.claude/almanac.md the same way.
  *
- * Hooks (Claude Code only; Codex has none): the checkpoint loop in hooks.ts.
+ * Hooks (Claude Code and Codex): the checkpoint loop in hooks.ts.
  * Every entry is `ledger hook <event>`, one per event, replaced on install.
  */
 
@@ -83,6 +83,23 @@ function upsertBlock(file: string, block: string): string {
   }
   fs.writeFileSync(file, (cur.trimEnd() + "\n\n" + block + "\n").replace(/^\n+/, ""));
   return `appended to ${file}`;
+}
+
+/** Refresh agent instructions without changing MCP registrations or trusted hooks. */
+export function installGuides(target: "claude" | "codex" | "all" = "all"): string[] {
+  const home = os.homedir();
+  const log: string[] = [];
+  if (target === "claude" || target === "all") {
+    const dst = path.join(home, ".claude", "ledger.md");
+    fs.mkdirSync(path.dirname(dst), { recursive: true });
+    fs.writeFileSync(dst, guideText());
+    log.push(`wrote ${dst}`);
+    log.push(upsertBlock(path.join(home, ".claude", "CLAUDE.md"), claudeImportBlock()));
+  }
+  if (target === "codex" || target === "all") {
+    log.push(upsertBlock(path.join(home, ".codex", "AGENTS.md"), codexBlock()));
+  }
+  return log;
 }
 
 function tryExec(cmd: string, args: string[]): boolean {
@@ -198,10 +215,7 @@ export function installClaude(): string[] {
   );
 
   // 3. The guide, and one import line in CLAUDE.md.
-  const guideDst = path.join(home, ".claude", "ledger.md");
-  fs.writeFileSync(guideDst, guideText());
-  log.push(`wrote ${guideDst}`);
-  log.push(upsertBlock(path.join(home, ".claude", "CLAUDE.md"), claudeImportBlock()));
+  log.push(...installGuides("claude"));
 
   // 4. The periodic transcript reconciler (shared with Codex; idempotent).
   log.push(...installReconciler());
@@ -252,7 +266,7 @@ export function installCodex(): string[] {
   log.push("Codex skips untrusted hooks: open Codex, run /hooks, review the five ledger entries, and trust them (once per change)");
 
   // 3. The guide, inline.
-  log.push(upsertBlock(path.join(codexDir, "AGENTS.md"), codexBlock()));
+  log.push(...installGuides("codex"));
 
   // 4. The periodic transcript reconciler (shared with Claude; idempotent).
   log.push(...installReconciler());

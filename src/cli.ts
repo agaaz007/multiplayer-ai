@@ -5,7 +5,7 @@ import { spawn } from "node:child_process";
 import { initLedger, loadConfig, record, getById, pull, discardDraft, ledgerHome } from "./store.js";
 import { brief, search, renderFull, stats } from "./query.js";
 import { TYPES, type LedgerType } from "./schema.js";
-import { installClaude, installCodex, agentRulesText } from "./install.js";
+import { installClaude, installCodex, installGuides, agentRulesText } from "./install.js";
 import { startMcp } from "./mcp.js";
 import { handleHook } from "./hooks.js";
 import { DEFAULT_QUIET_MS, pendingDrafts, reconcile } from "./extract.js";
@@ -15,6 +15,7 @@ const USAGE = `ledger — shared definitions, findings, changes, decisions for y
   ledger init <dir> [--author NAME]      create a ledger repo and point this machine at it
   ledger use <dir>  [--author NAME]      point this machine at an existing ledger clone
   ledger install claude|codex|all        wire the MCP server, hooks, guide, and reconciler into your agent
+  ledger install guides                 update both agents' guides without rewiring MCP or hooks
   ledger mcp                             run the MCP server (stdio)
   ledger brief [--days N] [--tags a,b]   what an agent sees at session start
   ledger search <query> [--type T]       free-text search
@@ -78,9 +79,10 @@ async function main() {
       case "install": {
         const which = args[0] ?? "all";
         const log: string[] = [];
+        if (which === "guides") log.push(...installGuides());
         if (which === "claude" || which === "all") log.push("[claude]", ...installClaude().map((l) => "  " + l));
         if (which === "codex" || which === "all") log.push("[codex]", ...installCodex().map((l) => "  " + l));
-        if (!log.length) throw new Error("usage: ledger install claude|codex|all");
+        if (!log.length) throw new Error("usage: ledger install claude|codex|all|guides");
         console.log(log.join("\n"));
         return;
       }

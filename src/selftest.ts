@@ -10,9 +10,10 @@ import { findCandidates, parseDrafts, reconcile, pendingDrafts } from "./extract
 import { findTranscript, parseTranscript, evidenceText } from "./transcript.js";
 import { brief, search, similarFindings, stats, renderFull } from "./query.js";
 import { regenerateViews } from "./views.js";
-import { agentRulesText, upsertHooks, HOOK_EVENTS, isLedgerHookCommand } from "./install.js";
+import { agentRulesText, installGuides, upsertHooks, HOOK_EVENTS, isLedgerHookCommand } from "./install.js";
 import { handleHook, loadJournal, saveJournal, captureStats, debt } from "./hooks.js";
 import { EVIDENCE_URI } from "./evidence.js";
+import { readReceipt, savedReceipt, syncReceipt } from "./receipts.js";
 
 const sh = (cwd: string, args: string[]) =>
   execFileSync("git", args, { cwd, stdio: ["ignore", "pipe", "pipe"] }).toString().trim();
@@ -213,6 +214,24 @@ assert.ok(fullDec.includes("**confirmation**: upi_autopay_live live before Tata 
 // the guide is what gets installed for the agent; it must carry the format
 const guide = agentRulesText();
 assert.ok(guide.includes("key assumptions check") && guide.includes("options_considered") && guide.includes("ledger_record_finding"), "guide has the format");
+// Guide-only upgrades preserve unrelated instructions and never rewrite hooks/MCP config.
+const codexGuideFile = path.join(tmp, ".codex", "AGENTS.md");
+const claudeGuideFile = path.join(tmp, ".claude", "CLAUDE.md");
+for (const file of [codexGuideFile, claudeGuideFile]) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, "Team instructions\n<!-- ledger:start -->\nOld guide\n<!-- ledger:end -->\nOther instructions\n");
+}
+const settingsFiles = [path.join(tmp, ".codex", "hooks.json"), path.join(tmp, ".codex", "config.toml"), path.join(tmp, ".claude", "settings.json"), path.join(tmp, ".claude.json")];
+for (const file of settingsFiles) fs.writeFileSync(file, "unchanged\n");
+installGuides();
+const installedGuide = fs.readFileSync(codexGuideFile, "utf8");
+assert.ok(installedGuide.startsWith("Team instructions\n") && installedGuide.endsWith("\nOther instructions\n"));
+assert.ok(installedGuide.includes("structuredContent.receipt.message") && installedGuide.includes("user-visible chat update immediately after the call"));
+assert.equal(fs.readFileSync(path.join(tmp, ".claude", "ledger.md"), "utf8"), guide);
+assert.ok(fs.readFileSync(claudeGuideFile, "utf8").includes("@~/.claude/ledger.md"));
+installGuides();
+assert.equal(fs.readFileSync(codexGuideFile, "utf8"), installedGuide, "guide upgrades are idempotent");
+for (const file of settingsFiles) assert.equal(fs.readFileSync(file, "utf8"), "unchanged\n");
 assert.ok(stats(cfg2).includes("without an implicit assumption: 0"), "stats counts unargued objects");
 
 // OKF conformance: every non-reserved .md has frontmatter with `type`
@@ -726,6 +745,12 @@ const card = r.structuredContent as any;
 assert.equal(card.mode, "retrieved");
 assert.deepEqual(card.references, [], "retrieval must not claim the answer used any records");
 assert.equal(card.sources.find((s: any) => s.id === f1.id).author, "agaaz");
+assert.equal(card.receipt.action, "found");
+assert.equal(card.receipt.records.length, card.sources.length);
+assert.equal(card.receipt.records.find((s: any) => s.id === f1.id).author, "agaaz");
+assert.match(card.receipt.message, /💡 Ledger · Found/);
+assert.doesNotMatch(card.receipt.message, /Referenced|verified|saved.*minutes/i);
+assert.ok(JSON.stringify(r.content).includes(card.receipt.message), "text-only hosts get the same receipt");
 assert.ok(!JSON.stringify(card).includes(dir), "cards do not expose machine-specific file paths");
 const attribution = await client.callTool({ name: "ledger_show_contribution", arguments: { references: [
   { id: f1.id, answer_excerpt: "August's iOS conversion was 11.2%.", contribution: "Reused the previous estimate." },
@@ -733,6 +758,9 @@ const attribution = await client.callTool({ name: "ledger_show_contribution", ar
 ] } });
 assert.equal((attribution.structuredContent as any).sources.length, 1, "two passages using one record count as one source");
 assert.equal((attribution.structuredContent as any).references.length, 2);
+assert.equal((attribution.structuredContent as any).receipt.action, "referenced");
+assert.equal((attribution.structuredContent as any).receipt.records.length, 1);
+assert.match((attribution.structuredContent as any).receipt.message, /Referenced 1 record.*Usage reported by agent/);
 assert.match(JSON.stringify(attribution.content), /not independent verification/);
 assert.equal((attribution.structuredContent as any).sources[0].snapshot, card.sources.find((s: any) => s.id === f1.id).snapshot);
 const missing = await client.callTool({ name: "ledger_show_contribution", arguments: { references: [
@@ -741,6 +769,7 @@ const missing = await client.callTool({ name: "ledger_show_contribution", argume
 assert.ok(missing.isError, "unknown references cannot produce a contribution card");
 const empty = await client.callTool({ name: "ledger_search", arguments: { query: "zzznomatchingrecords" } });
 assert.deepEqual((empty.structuredContent as any).sources, []);
+assert.match((empty.structuredContent as any).receipt.message, /No matching records/);
 // an unargued number is rejected at the MCP boundary, naming every missing part
 const bare = {
   title: "Trial CVR August, refreshed",
@@ -754,6 +783,7 @@ const bare = {
 const rejected = await client.callTool({ name: "ledger_record_finding", arguments: bare });
 const rejTxt = JSON.stringify(rejected);
 assert.ok(rejected.isError && /inputs/.test(rejTxt) && /method/.test(rejTxt) && /assumptions/.test(rejTxt), rejTxt);
+assert.ok(!(rejected.structuredContent as any)?.receipt, "rejected writes must not return success receipts");
 const r2 = await client.callTool({
   name: "ledger_record_finding",
   arguments: {
@@ -761,17 +791,56 @@ const r2 = await client.callTool({
     inputs: [{ source: "postgres.subscriptions", filters: { platform: "ios" } }],
     method: "Same cohort method as the August finding, re-run after the late-arriving refunds landed.",
     assumptions: [{ statement: "refund backfill is now complete", kind: "implicit", if_wrong: "changes_conclusion" }],
-    prior: { relation: "revises", ids: [f1.id] },
+    prior: { relation: "revises", ids: [f1.id, "fnd-unknown-reference"] },
   },
 });
 const txt = JSON.stringify(r2);
 assert.ok(txt.includes("Recorded finding"), txt);
 assert.ok(txt.includes("superseded " + f1.id), "supersede via MCP");
+const saved = (r2.structuredContent as any).receipt;
+assert.equal(saved.action, "saved");
+assert.equal(saved.records[0].id, saved.record_id);
+assert.equal(saved.records[0].title, bare.title);
+assert.equal(saved.records[0].author, "rachit");
+assert.equal(saved.references[0].author, "agaaz", "the writer and prior source author remain distinct");
+assert.equal(saved.sync, "local_commit", "a ledger with no remote must not claim to have synced");
+assert.deepEqual(saved.references.map((s: any) => s.id), [f1.id], "prior and supersedes links are deduplicated");
+assert.deepEqual(saved.unresolved_references, ["fnd-unknown-reference"]);
+assert.match(saved.message, /No remote.*1 deprecated.*1 unresolved reference/);
+// The existing hook must still recognize a recorded ID in the new tool output.
+handleHook("PostToolUse", { session_id: "receipt-capture", tool_name: "mcp__ledger__ledger_record_finding", tool_response: r2 });
+assert.ok(JSON.stringify(loadJournal("receipt-capture")).includes(saved.record_id));
 const old = await client.callTool({ name: "ledger_get", arguments: { id: f1.id } });
 assert.equal((old.structuredContent as any).sources[0].status, "deprecated");
+assert.match((old.structuredContent as any).receipt.message, /Opened finding.*1 deprecated/);
 assert.ok((old.structuredContent as any).sources[0].superseded_by);
 assert.notEqual((old.structuredContent as any).sources[0].snapshot, card.sources.find((s: any) => s.id === f1.id).snapshot, "lifecycle changes produce a different snapshot");
 await client.close();
+
+// Honest state labels across offline, disabled, failed, and confirmed pushes.
+for (const [gitResult, enabled, expected] of [
+  ["committed and pushed", true, "pushed"],
+  ["committed (no remote)", true, "local_commit"],
+  ["committed locally; push failed: offline", true, "sync_failed"],
+  ["committed locally; pull failed: offline", true, "sync_failed"],
+  ["commit failed: read-only filesystem", true, "commit_failed"],
+  [null, false, "disabled"],
+  [null, true, "unconfirmed"],
+  ["unknown future outcome", true, "unconfirmed"],
+] as const) {
+  const outcome = syncReceipt(gitResult, enabled);
+  assert.equal(outcome.sync, expected);
+  assert.equal(outcome.message.includes("Committed and pushed"), expected === "pushed");
+}
+const oldObject = getById(cfg, f1.id)!;
+const draftReceipt = readReceipt("found", [{ ...oldObject, status: "draft" }, { ...oldObject, status: "draft" }]);
+assert.equal(draftReceipt.records.length, 1);
+assert.match(draftReceipt.message, /Includes 1 draft/);
+const degradedReceipt = savedReceipt("finding", { title: "Saved before metadata became unavailable", prior: { ids: 42 }, based_on: 42 }, { id: "fnd-written", path: "unused", git: "committed and pushed" }, null, true);
+assert.equal(degradedReceipt.sync, "pushed");
+assert.equal(degradedReceipt.record_id, "fnd-written");
+assert.equal(degradedReceipt.metadata_unavailable, true);
+assert.match(degradedReceipt.message, /Source details unavailable/);
 
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log("selftest: ok");

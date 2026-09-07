@@ -177,6 +177,16 @@ It runs on your own login: `claude -p --tools ""` or `codex exec --ephemeral`, w
 | `ledger_discard_draft` | reject a draft from the transcript fallback, with a reason. Promote by recording a stable object with `supersedes` |
 | `ledger_stats` | pilot health, including what the checkpoint loop caught |
 
+### Standard chat receipts
+
+Search, get, contribution, and all four record tools return a `ledger-receipt/v1` receipt in `structuredContent.receipt` and as the first line of their text result. The receipt identifies the action, the stored records and authors, and, for writes, the actual commit/push outcome. Retrieved records are **Found**, explicit answer attribution is **Referenced**, and a successful write is **Saved**. Drafts, deprecated sources, unresolved links, and sync failures remain visible.
+
+The Claude and Codex guides ask the agent to show `receipt.message` as one short chat update immediately after the tool call. This makes the result visible even when Conductor collapses the raw tool output. It is agent-displayed text: this package cannot guarantee that the host renders a custom bubble or that every agent follows the instruction. The existing MCP Apps evidence cards remain available in compatible hosts; record tools currently return receipts, not Apps cards.
+
+After updating and building, run `ledger install guides` to refresh both agents' instructions without changing MCP registrations or trusted hooks. Start a fresh agent session/reconnect its Ledger MCP server to load the new instructions and server code. Pushing this repository alone does not update teammates' installations.
+
+The interaction contract and host-integration requirements are in [the receipt UX specification](docs/receipt-ux.md).
+
 ### Expandable evidence cards (MCP Apps)
 
 `ledger_search`, `ledger_get`, and `ledger_show_contribution` advertise an MCP Apps resource at `ui://ledger/evidence-v1.html`. Compatible hosts render an expandable card with the source author, creation date, lifecycle status, and full record. All three tools still return readable text for hosts without Apps support.

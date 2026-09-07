@@ -3,6 +3,7 @@ import { z } from "zod";
 import { type Config, loadAll } from "./store.js";
 import type { LedgerObject } from "./schema.js";
 import { renderFull } from "./query.js";
+import { readReceipt, receiptText } from "./receipts.js";
 
 export const EVIDENCE_URI = "ui://ledger/evidence-v1.html";
 export const ReferenceSchema = z.object({
@@ -41,6 +42,7 @@ export function evidenceResult(
 ) {
   const unique = [...new Map(objects.map(o => [o.id, o])).values()];
   const fullRecords = Object.fromEntries(unique.map(o => [o.id, renderFull(o)]));
+  const receipt = readReceipt(options.references ? "referenced" : options.query !== undefined ? "found" : "opened", unique, options.query);
   const card: EvidenceCard = {
     schema: "ledger-evidence/v1",
     mode: options.references ? "referenced" : "retrieved",
@@ -56,8 +58,8 @@ export function evidenceResult(
     missing_ids: options.missing_ids ?? [],
   };
   return {
-    content: [{ type: "text" as const, text: message }],
-    structuredContent: { ...card },
+    content: [receiptText(receipt, message)],
+    structuredContent: { ...card, receipt },
     // Full records are for the inspector; don't duplicate them in model context.
     _meta: { "ledger/fullRecords": fullRecords },
   };
