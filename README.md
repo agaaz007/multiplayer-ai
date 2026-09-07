@@ -168,6 +168,7 @@ It runs on your own login: `claude -p --tools ""` or `codex exec --ephemeral`, w
 | `ledger_brief` | definitions + decisions in force + recent findings and changes |
 | `ledger_search` | free text across all types; use before any analysis |
 | `ledger_get` | one object in full: query, inputs, method, assumptions, options |
+| `ledger_show_contribution` | display an attribution card connecting record IDs to answer passages and agent-reported contributions; does not record knowledge |
 | `ledger_record_definition` | canonical metric: formula, source, exclusions, owner, valid_from |
 | `ledger_record_finding` | question, result, definitions used, data window, inputs, method, query, assumptions (explicit and implicit), alternatives, confidence and its basis, relation to prior findings. Returns similar prior findings. |
 | `ledger_record_change` | what shipped, when, where, to whom, how to undo |
@@ -175,6 +176,38 @@ It runs on your own login: `claude -p --tools ""` or `codex exec --ephemeral`, w
 | `ledger_skip_record` | the Stop checkpoint asked and nothing was durable; the reason is counted |
 | `ledger_discard_draft` | reject a draft from the transcript fallback, with a reason. Promote by recording a stable object with `supersedes` |
 | `ledger_stats` | pilot health, including what the checkpoint loop caught |
+
+### Expandable evidence cards (MCP Apps)
+
+`ledger_search`, `ledger_get`, and `ledger_show_contribution` advertise an MCP Apps resource at `ui://ledger/evidence-v1.html`. Compatible hosts render an expandable card with the source author, creation date, lifecycle status, and full record. All three tools still return readable text for hosts without Apps support.
+
+Search cards say **Found**, never **Used**. After referencing evidence in an answer, an agent can call:
+
+```json
+{
+  "references": [{
+    "id": "<actual ID returned by ledger_search or ledger_get>",
+    "answer_excerpt": "The exact sentence that refers to this evidence.",
+    "contribution": "How this record informed the sentence or next step."
+  }]
+}
+```
+
+The contribution tool resolves identity and status from storage, rejects unknown IDs, and counts unique sources. Excerpts and contributions are **agent-reported**: the tool does not inspect the host's answer, prove causal impact, independently verify findings, measure time saved, or persist a usage history. It does not clear the recording checkpoint. Keep ordinary record citations in the answer as well.
+
+The card contains the record snapshot returned by that call; a later supersession appears on the next lookup, not automatically in an old card. Snapshot hashes identify returned content, not a metric-definition version or verification stamp. Full source text is delivered in result `_meta` for UI inspection. The bundled interface makes no network requests and renders record text without interpreting HTML.
+
+**Try locally:** run `npm run preview:ui`, then open `http://127.0.0.1:4318`. Set `LEDGER_UI_PORT` to change the port. This development host uses the real Ledger MCP server and official Apps bridge, reads your configured local ledger, and exposes only the three evidence tools. Git sync and recording are disabled in the preview. No public tunnel is needed.
+
+The interface starts as a compact status pill. Click to expand sources, filter by author, and inspect an original record. In hosts that support calling server tools from Apps, **Reference this source** lets you attach a passage and describe its contribution. **Back to search results** restores the retrieved sources. Escape collapses the panel. The preview adds search suggestions, Command/Ctrl-K to focus search, and light/dark themes. Motion follows the reduced-motion preference.
+
+**In Conductor:** the repository's **ledger** Run action starts the preview on that workspace's assigned `CONDUCTOR_PORT`, so multiple workspaces can run independently. Open the loopback URL printed in the Run terminal. New workspaces install and build with `npm ci`. This Run action opens the local preview; it does not add MCP Apps rendering to Conductor's conversation UI.
+
+If the preview cannot initialize the card, it shows the connection stage, offers a reconnect button, and preserves the tool's text response when available. Subsequent searches reuse the connected bridge. The sandbox does not need same-origin access or form-submission permissions: attribution uses a tool call. Restart the preview after changing its host script or page.
+
+**Host requirement:** MCP tool support does not imply MCP Apps support. Restart/reconnect the Ledger MCP server after building so the host discovers the new tool and resource. In an Apps-capable host, ask it to search the ledger, then show the contribution of specific records. Conductor's published MCP configuration docs do not establish that its chat renderer supports Apps. This feature does not inject native Conductor popups or decorate its answer sentences.
+
+Protocol: [MCP Apps build guide](https://modelcontextprotocol.io/extensions/apps/build). Host configuration: [Conductor MCP](https://conductor.build/docs/reference/mcp).
 
 ## Recording format
 
@@ -292,6 +325,7 @@ Frontmatter is the contract. Body is optional. The generated dashboard shows the
 ```bash
 npm run build
 npm test        # builds, then runs an end-to-end test incl. the MCP server over stdio
+npm run preview:ui  # local read-only MCP Apps host, http://127.0.0.1:4318
 ```
 
 MIT.

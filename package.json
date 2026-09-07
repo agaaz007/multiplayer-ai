@@ -14,9 +14,10 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json && chmod +x dist/cli.js",
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.ui.json && node scripts/build-ui.mjs && chmod +x dist/cli.js",
     "dev": "tsc -p tsconfig.json --watch",
     "test": "npm run build && node dist/selftest.js",
+    "preview:ui": "npm run build && node scripts/preview-ui.mjs",
     "prepare": "npm run build"
   },
   "engines": {
@@ -24,12 +25,14 @@
   },
   "license": "MIT",
   "dependencies": {
+    "@modelcontextprotocol/ext-apps": "1.7.5",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "gray-matter": "^4.0.3",
     "zod": "^4.5.4"
   },
   "devDependencies": {
     "@types/node": "^26.4.1",
+    "esbuild": "0.28.2",
     "typescript": "^7.0.2"
   }
 }

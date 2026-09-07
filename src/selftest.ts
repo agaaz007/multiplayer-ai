@@ -12,6 +12,7 @@ import { brief, search, similarFindings, stats, renderFull } from "./query.js";
 import { regenerateViews } from "./views.js";
 import { agentRulesText, upsertHooks, HOOK_EVENTS, isLedgerHookCommand } from "./install.js";
 import { handleHook, loadJournal, saveJournal, captureStats, debt } from "./hooks.js";
+import { EVIDENCE_URI } from "./evidence.js";
 
 const sh = (cwd: string, args: string[]) =>
   execFileSync("git", args, { cwd, stdio: ["ignore", "pipe", "pipe"] }).toString().trim();
@@ -705,11 +706,38 @@ assert.deepEqual(names, [
   "ledger_record_definition",
   "ledger_record_finding",
   "ledger_search",
+  "ledger_show_contribution",
   "ledger_skip_record",
   "ledger_stats",
 ]);
 const r = await client.callTool({ name: "ledger_search", arguments: { query: "trial conversion" } });
 assert.ok(JSON.stringify(r).includes(f1.id));
+// Cards are discoverable over ordinary MCP and retain a text-only fallback.
+assert.equal((tools.tools.find(t => t.name === "ledger_search")?._meta?.ui as any)?.resourceUri, EVIDENCE_URI);
+const resource = await client.readResource({ uri: EVIDENCE_URI });
+assert.equal(resource.contents[0].mimeType, "text/html;profile=mcp-app");
+assert.ok("text" in resource.contents[0]);
+assert.ok(String(resource.contents[0].text).includes("Ledger evidence"));
+assert.ok(!String(resource.contents[0].text).includes("<!-- APP_SCRIPT -->"));
+const card = r.structuredContent as any;
+assert.equal(card.mode, "retrieved");
+assert.deepEqual(card.references, [], "retrieval must not claim the answer used any records");
+assert.equal(card.sources.find((s: any) => s.id === f1.id).author, "agaaz");
+assert.ok(!JSON.stringify(card).includes(dir), "cards do not expose machine-specific file paths");
+const attribution = await client.callTool({ name: "ledger_show_contribution", arguments: { references: [
+  { id: f1.id, answer_excerpt: "August's iOS conversion was 11.2%.", contribution: "Reused the previous estimate." },
+  { id: f1.id, answer_excerpt: "The comparison uses trial-start cohorts.", contribution: "Kept the cohort definition." },
+] } });
+assert.equal((attribution.structuredContent as any).sources.length, 1, "two passages using one record count as one source");
+assert.equal((attribution.structuredContent as any).references.length, 2);
+assert.match(JSON.stringify(attribution.content), /not independent verification/);
+assert.equal((attribution.structuredContent as any).sources[0].snapshot, card.sources.find((s: any) => s.id === f1.id).snapshot);
+const missing = await client.callTool({ name: "ledger_show_contribution", arguments: { references: [
+  { id: "nonexistent", answer_excerpt: "A fabricated source.", contribution: "This must fail." },
+] } });
+assert.ok(missing.isError, "unknown references cannot produce a contribution card");
+const empty = await client.callTool({ name: "ledger_search", arguments: { query: "zzznomatchingrecords" } });
+assert.deepEqual((empty.structuredContent as any).sources, []);
 // an unargued number is rejected at the MCP boundary, naming every missing part
 const bare = {
   title: "Trial CVR August, refreshed",
@@ -736,6 +764,10 @@ const r2 = await client.callTool({
 const txt = JSON.stringify(r2);
 assert.ok(txt.includes("Recorded finding"), txt);
 assert.ok(txt.includes("superseded " + f1.id), "supersede via MCP");
+const old = await client.callTool({ name: "ledger_get", arguments: { id: f1.id } });
+assert.equal((old.structuredContent as any).sources[0].status, "deprecated");
+assert.ok((old.structuredContent as any).sources[0].superseded_by);
+assert.notEqual((old.structuredContent as any).sources[0].snapshot, card.sources.find((s: any) => s.id === f1.id).snapshot, "lifecycle changes produce a different snapshot");
 await client.close();
 
 fs.rmSync(tmp, { recursive: true, force: true });

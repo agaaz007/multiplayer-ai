@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="ledger-preview-nonce" content="__LEDGER_NONCE__">
+  <title>Ledger · Shared context</title>
+  <style>
+    :root { color-scheme: light dark; font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; --ink: light-dark(#292a26,#eeeee7); --muted: light-dark(#76796f,#adb2a3); --paper: light-dark(#f7f7f2,#1b1d19); --surface: light-dark(#fffefa,#272a23); --line: light-dark(#e1e3d8,#44493c); color: var(--ink); background: var(--paper); }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    body { margin: 0; }
+    header { display: flex; align-items: center; justify-content: space-between; max-width: 1080px; margin: auto; padding: 27px 30px; }
+    .brand { font-weight: 600; letter-spacing: -.5px; font-size: 20px; display: flex; align-items: center; gap: 9px; }
+    .mark { width: 23px; height: 23px; display: inline-flex; align-items: end; gap: 3px; transform: rotate(-10deg); }
+    .mark i { display: block; width: 5px; height: 20px; background: var(--ink); border-radius: 2px; }
+    .mark i:nth-child(2) { height: 14px; } .mark i:nth-child(3) { height: 8px; }
+    button, input { font: inherit; color: inherit; }
+    button { cursor: pointer; }
+    button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid #9e83c6; outline-offset: 4px; }
+    #theme { background: none; border: 1px solid var(--line); padding: 6px 12px; border-radius: 20px; font-size: 12px; color: var(--muted); }
+    main { max-width: 760px; padding: 34px 24px 40px; margin: auto; }
+    .intro { text-align: center; margin: 0 auto 28px; max-width: 550px; }
+    .eyebrow { font-size: 11px; text-transform: uppercase; letter-spacing: 1.6px; color: var(--muted); margin: 0 0 13px; }
+    h1 { font-size: clamp(28px, 5vw, 40px); line-height: 1.15; letter-spacing: -1.6px; font-weight: 500; margin: 0 0 15px; text-wrap: balance; }
+    .intro p:last-child { color: var(--muted); font-size: 14px; max-width: 420px; margin: auto; }
+    #search-form { display: flex; align-items: center; border: 1px solid var(--line); border-radius: 16px; padding: 7px; background: var(--surface); gap: 8px; }
+    label { flex: 1; min-width: 0; }
+    input { border: 0; background: transparent; padding: 9px 10px; width: 100%; font-size: 15px; }
+    input:focus-visible { outline-offset: 0; border-radius: 8px; }
+    #search { flex-shrink: 0; background: var(--ink); color: var(--surface); border: 0; border-radius: 10px; padding: 10px 16px; }
+    button:disabled { cursor: wait; opacity: .55; }
+    .suggestions { display: flex; flex-wrap: wrap; justify-content: center; gap: 7px; margin: 13px 0; }
+    .suggestions button { background: transparent; border: 1px solid var(--line); border-radius: 20px; padding: 5px 11px; font-size: 11px; color: var(--muted); }
+    .suggestions button:hover, #theme:hover { background: var(--surface); color: var(--ink); }
+    .stage { min-height: 180px; margin-top: 27px; }
+    #app-frame { display: block; width: 100%; height: 90px; border: 0; color-scheme: inherit; }
+    #loading { width: fit-content; margin: 14px auto; padding: 17px 24px; border-radius: 32px; background: #252624; color: #ded4ec; font-size: 13px; }
+    #loading::before { content: '•'; margin-right: 9px; animation: breathe .7s ease-in-out infinite alternate; }
+    @keyframes breathe { to { opacity: .25; } }
+    #status { font-size: 11px; color: var(--muted); text-align: center; margin: 13px 0 6px; overflow-wrap: anywhere; }
+    #retry { display: block; margin: 12px auto; padding: 7px 14px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; }
+    #fallback { margin: 20px 0; border: 1px solid var(--line); border-radius: 12px; padding: 15px; }
+    #fallback pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.6 ui-monospace, monospace; }
+    footer { color: var(--muted); font-size: 11px; text-align: center; padding-top: 16px; }
+    kbd { font: inherit; border: 1px solid var(--line); border-radius: 4px; padding: 1px 4px; }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+    @media (max-width: 450px) { header { padding: 20px; } main { padding: 24px 12px; } .intro { padding: 0 12px; } input { font-size: 16px; } #search { padding: 11px; } h1 { letter-spacing: -1px; } }
+    @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
+  </style>
+</head>
+<body>
+  <header><div class="brand"><span class="mark" aria-hidden="true"><i></i><i></i><i></i></span>Ledger</div><button id="theme" type="button">Switch theme</button></header>
+  <main>
+    <div class="intro"><p class="eyebrow">A little context goes a long way</p><h1>Pick up where your<br>team left off.</h1><p>Find the thinking behind a decision.<br>See who contributed, and what you can build on.</p></div>
+    <form id="search-form"><label><span class="sr-only">Search your ledger</span><input id="query" value="ledger" placeholder="What is your team working through?" required minlength="2" autocomplete="off"></label><button id="search" type="submit">Find context ↗</button></form>
+    <div class="suggestions" aria-label="Try a search"><button type="button" data-query="continuity">Decision continuity</button><button type="button" data-query="retention">Retention</button><button type="button" data-query="verification">Verification</button></div>
+    <div class="stage">
+      <div id="loading" role="status">Opening your team’s context…</div>
+      <iframe id="app-frame" title="Ledger evidence MCP App" sandbox="allow-scripts" hidden></iframe>
+      <p id="status" role="status" aria-live="polite"></p>
+      <button id="retry" type="button" hidden>Reconnect and try again</button>
+      <details id="fallback" hidden><summary>Read the tool’s text response</summary><pre></pre></details>
+    </div>
+    <footer>Local preview · Reads your Ledger · <kbd>⌘ K</kbd> to search</footer>
+  </main>
+  <script src="/preview.js" nonce="__LEDGER_NONCE__"></script>
+</body>
+</html>

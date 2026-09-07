@@ -1,22 +1,28 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { registerAppTool, registerAppResource, RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/server";
+import { readFile } from "node:fs/promises";
 import { z } from "zod";
 import { loadConfig, record, getById, discardDraft, type Config } from "./store.js";
 import { brief, search, similarFindings, renderFull, stats } from "./query.js";
 import { ChangeSchema, DecisionSchema, DefinitionSchema, FindingSchema, TYPES } from "./schema.js";
+import { EVIDENCE_URI, ReferenceSchema, evidenceResult, contributionResult } from "./evidence.js";
 
 const text = (s: string) => ({ content: [{ type: "text" as const, text: s }] });
 
-export async function startMcp() {
-  let cfg: Config;
-  try {
-    cfg = loadConfig();
-  } catch (e: any) {
-    process.stderr.write(`ledger: ${e.message}\n`);
-    process.exit(1);
-  }
-
+export function createMcpServer(cfg: Config) {
   const server = new McpServer({ name: "ledger", version: "0.1.0" });
+  const evidenceUi = { ui: { resourceUri: EVIDENCE_URI } };
+  const readOnly = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
+
+  registerAppResource(server, "Ledger evidence card", EVIDENCE_URI, { mimeType: RESOURCE_MIME_TYPE }, async () => ({
+    contents: [{
+      uri: EVIDENCE_URI,
+      mimeType: RESOURCE_MIME_TYPE,
+      text: await readFile(new URL("./ui/evidence.html", import.meta.url), "utf8"),
+      _meta: { ui: { csp: { connectDomains: [], resourceDomains: [] }, prefersBorder: false } },
+    }],
+  }));
 
   server.registerTool(
     "ledger_brief",
@@ -32,12 +38,14 @@ export async function startMcp() {
     async ({ days, tags }) => text(brief(cfg, { days, tags }))
   );
 
-  server.registerTool(
+  registerAppTool(server,
     "ledger_search",
     {
       title: "Search the ledger",
       description:
-        "Search definitions, findings, changes, and decisions by free text. Use it BEFORE running an analysis (has this question been answered?), before attributing a metric move (what shipped?), and before proposing direction (what was decided?).",
+        "Search definitions, findings, changes, and decisions by free text. Use it BEFORE running an analysis (has this question been answered?), before attributing a metric move (what shipped?), and before proposing direction (what was decided?). Shows retrieved evidence, not proof of use. If your answer builds on these records, call ledger_show_contribution with the actual record IDs and answer excerpts.",
+      _meta: evidenceUi,
+      annotations: readOnly,
       inputSchema: {
         query: z.string().min(2),
         types: z.array(z.enum(TYPES)).optional(),
@@ -48,27 +56,37 @@ export async function startMcp() {
     },
     async ({ query, types, tags, limit, include_superseded }) => {
       const hits = search(cfg, query, { types, tags, limit, includeSuperseded: include_superseded });
-      if (!hits.length) return text(`No matches for "${query}". If you go on to answer this, record the finding.`);
-      return text(
+      if (!hits.length) return evidenceResult(`No matches for "${query}". If you go on to answer this, record the finding.`, [], { query });
+      return evidenceResult(
         hits
           .map((h) => `[${h.score.toFixed(2)}] ${h.type} ${h.id} — ${h.title}\n    ${(h.fields.result ?? h.fields.formula ?? h.fields.decision ?? h.fields.what ?? "")}`)
-          .join("\n")
+          .join("\n"), hits, { query }
       );
     }
   );
 
-  server.registerTool(
+  registerAppTool(server,
     "ledger_get",
     {
       title: "Get one ledger object",
       description: "Fetch a full object by id (e.g. fnd-20260902-trial-cvr-ab12) including its query and body.",
       inputSchema: { id: z.string() },
+      _meta: evidenceUi,
+      annotations: readOnly,
     },
     async ({ id }) => {
       const o = getById(cfg, id);
-      return text(o ? renderFull(o) : `Not found: ${id}`);
+      return evidenceResult(o ? renderFull(o) : `Not found: ${id}`, o ? [o] : [], { missing_ids: o ? [] : [id] });
     }
   );
+
+  registerAppTool(server, "ledger_show_contribution", {
+    title: "Show Ledger's contribution",
+    description: "After using ledger evidence in an answer, show an expandable attribution card linking actual record IDs to exact answer excerpts and their contribution. Source author, date and status are fetched from the ledger. Usage is agent-reported, not independently verified. This only displays a card: it does not save a finding or clear the recording checkpoint. Keep ordinary citations in the answer for hosts without MCP Apps.",
+    inputSchema: { references: z.array(ReferenceSchema).min(1).max(20) },
+    _meta: evidenceUi,
+    annotations: readOnly,
+  }, async ({ references }) => contributionResult(cfg, references));
 
   const recordTool = (
     name: string,
@@ -165,6 +183,16 @@ export async function startMcp() {
     async ({ days }) => text(stats(cfg, days))
   );
 
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
+  return server;
+}
+
+export async function startMcp() {
+  let cfg: Config;
+  try {
+    cfg = loadConfig();
+  } catch (e: any) {
+    process.stderr.write(`ledger: ${e.message}\n`);
+    process.exit(1);
+  }
+  await createMcpServer(cfg).connect(new StdioServerTransport());
 }
