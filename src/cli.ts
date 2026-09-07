@@ -10,6 +10,13 @@ import { installClaude, installCodex, installGuides, agentRulesText } from "./in
 import { startMcp } from "./mcp.js";
 import { handleHook } from "./hooks.js";
 import { DEFAULT_QUIET_MS, pendingDrafts, reconcile } from "./extract.js";
+import { continuityConfigured, getPool, migrate, tableList, closePools } from "./continuity/db.js";
+import { listThreads, getThread, updateThread } from "./continuity/store.js";
+import { buildResumePack, threadLine } from "./continuity/resume.js";
+import { checkoutWip, repoRoot } from "./continuity/shadow.js";
+import { openThreadsText } from "./continuity/brief.js";
+import { helperOnce, helperLoop, loadState } from "./helper/daemon.js";
+import { installHelper, helperStatus } from "./install.js";
 
 const USAGE = `ledger — shared definitions, findings, changes, decisions for your agents
 
@@ -30,6 +37,15 @@ const USAGE = `ledger — shared definitions, findings, changes, decisions for y
   ledger sync                            git pull now
   ledger rules                           print the agent guide
   ledger hook <event> < hook.json        Claude Code / Codex hook entry point (installed for you)
+
+  execution continuity (needs continuity.database_url in ~/.ledger/config.json):
+  ledger continuity migrate|status       create the cont_* tables in the shared Postgres / show counts
+  ledger helper once|start|status|install
+                                         capture helper: one pass, run forever, show state, install the launchd agent
+  ledger threads [--all] [--hours N]     open work threads (this repo by default)
+  ledger resume <thread> [--mode continue|fork|inspect] [--checkout <dir>]
+                                         claim + resume pack; --checkout creates a worktree at the saved snapshot
+  ledger thread show|close|title <id>
 
   search/get/record show boxed receipts in interactive terminals.
   --plain disables the box; --box enables it in captured/piped output.
@@ -135,9 +151,15 @@ async function main() {
             } catch (e: any) {
               parts.push(`# Ledger brief unavailable: ${e?.message ?? e}`);
             }
+            // continuity: teammates' open threads + any notices the helper fetched. Fails open in 4 s.
+            try {
+              const threads = await openThreadsText(cfg, { cwd: input?.cwd ? String(input.cwd) : process.cwd() });
+              if (threads) parts.push(threads);
+            } catch { /* never block a session start */ }
           }
           if (res.stdout) parts.push(res.stdout);
           if (parts.length) process.stdout.write(parts.join("\n\n") + "\n");
+          await closePools().catch(() => {});
           process.exit(0);
         }
         if (res.reconcile && cfg && input?.session_id && (cfg.extractor ?? "auto") !== "none") {
@@ -221,6 +243,84 @@ async function main() {
       case "stats":
         console.log(stats(loadConfig(), Number(flag(args, "--days") ?? 14)));
         return;
+
+      // ---------- execution continuity ----------
+      case "continuity": {
+        const cfg = loadConfig();
+        if (!continuityConfigured(cfg)) throw new Error("continuity not configured: add continuity.database_url to ~/.ledger/config.json (or set LEDGER_CONTINUITY_DB)");
+        const sub = args[0] ?? "status";
+        const pool = getPool(cfg);
+        if (sub === "migrate") {
+          const created = await migrate(pool);
+          console.log(created.length ? `created: ${created.join(", ")}` : "schema up to date");
+          console.log(`tables: ${(await tableList(pool)).join(", ")}`);
+        } else if (sub === "status") {
+          const t = await tableList(pool);
+          const counts = await Promise.all(t.map(async (n) => `${n}=${(await pool.query(`select count(*)::int as c from ${n}`)).rows[0].c}`));
+          console.log(`db ok · author ${cfg.author} · machine ${cfg.continuity!.machine}\n${counts.join("  ")}`);
+        } else throw new Error("usage: ledger continuity migrate|status");
+        await closePools();
+        return;
+      }
+      case "helper": {
+        const cfg = loadConfig();
+        const sub = args[0] ?? "status";
+        if (sub === "once") {
+          const s = await helperOnce(cfg, { log: (l) => console.log(l), push: !args.includes("--no-push") });
+          console.log(JSON.stringify(s, null, 2));
+          await closePools();
+          return;
+        }
+        if (sub === "start") { await helperLoop(cfg, { intervalMs: parseDuration(flag(args, "--interval"), 10_000), push: !args.includes("--no-push") }); await closePools(); return; }
+        if (sub === "install") { console.log(installHelper().join("\n")); return; }
+        if (sub === "status") {
+          console.log(helperStatus().join("\n"));
+          const st = loadState();
+          const live = Object.entries(st).filter(([, s]) => !s.ended);
+          console.log(`tracked sessions: ${Object.keys(st).length} (${live.length} live)`);
+          for (const [sid, s] of live.slice(0, 10)) console.log(`  ${sid.slice(0, 8)} ${s.harness} ${s.repo ? path.basename(s.repo) : "(no repo)"}${s.branch ? `@${s.branch}` : ""} thread ${s.threadId?.slice(0, 8) ?? `unbound${s.unbound_reason ? ` (${s.unbound_reason})` : ""}`} offset ${s.offset}${s.lastCommit ? ` wip ${s.lastCommit.slice(0, 8)}` : ""}`);
+          return;
+        }
+        throw new Error("usage: ledger helper once|start|status|install [--no-push] [--interval 10s]");
+      }
+      case "threads": {
+        const cfg = loadConfig();
+        const root = repoRoot(process.cwd());
+        const rows = await listThreads(getPool(cfg), { repo: args.includes("--all") ? undefined : root ? (await import("./continuity/shadow.js")).repoIdentity(root) : undefined, sinceHours: Number(flag(args, "--hours") ?? 168), status: flag(args, "--status") ?? "open", limit: Number(flag(args, "--limit") ?? 20) });
+        console.log(rows.length ? rows.map((r) => threadLine(r)).join("\n") : "no threads");
+        await closePools();
+        return;
+      }
+      case "resume": {
+        const cfg = loadConfig();
+        const id = args[0];
+        if (!id) throw new Error("usage: ledger resume <thread-id> [--mode continue|fork|inspect] [--checkout <dir>]");
+        const mode = (flag(args, "--mode") ?? "continue") as "continue" | "fork" | "inspect";
+        const pack = await buildResumePack(cfg, getPool(cfg), id, { mode, author: cfg.author, sessionId: `cli:${cfg.author}:${Date.now()}`, repoPath: process.cwd() });
+        console.log(pack.text);
+        const dest = flag(args, "--checkout");
+        if (dest && pack.checkpoint?.wip_ref && pack.checkpoint?.wip_commit) {
+          const root = repoRoot(process.cwd());
+          if (!root) throw new Error("--checkout needs to run inside a checkout of the same repo");
+          console.log(`\ncheckout → ${checkoutWip(root, String(pack.checkpoint.wip_ref), String(pack.checkpoint.wip_commit), path.resolve(dest))}`);
+        }
+        await closePools();
+        return;
+      }
+      case "thread": {
+        const cfg = loadConfig();
+        const [sub, id] = args;
+        if (!id) throw new Error("usage: ledger thread show|close|title <id> [--title ...]");
+        const pool = getPool(cfg);
+        const t = await getThread(pool, id);
+        if (!t) throw new Error(`not found: ${id}`);
+        if (sub === "show") console.log((await buildResumePack(cfg, pool, id, { mode: "inspect", author: cfg.author, repoPath: process.cwd(), budgetTokens: 12000 })).text);
+        else if (sub === "close") { await updateThread(pool, id, { status: "done" }); console.log(`closed ${id}`); }
+        else if (sub === "title") { await updateThread(pool, id, { title: flag(args, "--title") ?? t.title }); console.log("updated"); }
+        else throw new Error("usage: ledger thread show|close|title <id>");
+        await closePools();
+        return;
+      }
       case "sync": {
         const r = pull(loadConfig(), true);
         console.log(r ?? "synced");

@@ -17,6 +17,23 @@ export interface Config {
   data_tools?: string[];
   /** Which CLI runs the transcript fallback: "claude" | "codex" | "auto" (default) | "none". */
   extractor?: string;
+  /** Execution continuity: shared Postgres for threads/sessions/events/claims. Absent = feature off. */
+  continuity?: ContinuityConfig;
+}
+
+export interface ContinuityConfig {
+  /** postgres:// URL. Never committed; lives in ~/.ledger/config.json (mode 600) or LEDGER_CONTINUITY_DB. */
+  database_url: string;
+  /** Label for this machine in sessions and notifications. Defaults to os.hostname(). */
+  machine?: string;
+  /** Extra deny globs for shadow commits and uploads, on top of the defaults. */
+  deny?: string[];
+  /** Gitignored paths that must still be captured (e.g. generated assets a study needs). Repo-relative globs. */
+  include?: string[];
+  /** Only these repo remotes/paths are captured. Empty or absent = every git worktree a session runs in. */
+  repos?: string[];
+  /** Shadow commit cadence in seconds. Default 30. */
+  snapshot_interval_s?: number;
 }
 
 /**
@@ -51,7 +68,14 @@ export function loadConfig(): Config {
       : cfg.git_sync ?? true,
     ...(cfg.data_tools ? { data_tools: cfg.data_tools } : {}),
     ...(cfg.extractor ? { extractor: cfg.extractor } : {}),
+    ...(continuityFrom(cfg) ? { continuity: continuityFrom(cfg)! } : {}),
   };
+}
+
+function continuityFrom(cfg: Partial<Config>): ContinuityConfig | undefined {
+  const url = process.env.LEDGER_CONTINUITY_DB || cfg.continuity?.database_url;
+  if (!url) return undefined;
+  return { ...(cfg.continuity ?? { database_url: url }), database_url: url, machine: cfg.continuity?.machine || os.hostname() };
 }
 
 export function saveConfig(cfg: Config) {

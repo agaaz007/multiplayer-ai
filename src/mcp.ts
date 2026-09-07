@@ -8,6 +8,12 @@ import { brief, search, similarFindings, renderFull, stats } from "./query.js";
 import { ChangeSchema, DecisionSchema, DefinitionSchema, FindingSchema, TYPES, type LedgerObject } from "./schema.js";
 import { EVIDENCE_URI, ReferenceSchema, evidenceResult, contributionResult } from "./evidence.js";
 import { RECEIPT_GUIDANCE, savedReceipt, receiptText } from "./receipts.js";
+import { continuityConfigured, getPool } from "./continuity/db.js";
+import { listThreads, createThread, getThread, claimThread, releaseClaim, upsertSession, appendEvents } from "./continuity/store.js";
+import { buildResumePack, threadLine } from "./continuity/resume.js";
+import { repoRoot, repoIdentity, currentBranch } from "./continuity/shadow.js";
+import { openThreadsText } from "./continuity/brief.js";
+import { writeBinding, writeSignal } from "./helper/signals.js";
 
 const text = (s: string) => ({ content: [{ type: "text" as const, text: s }] });
 
@@ -36,7 +42,11 @@ export function createMcpServer(cfg: Config) {
         tags: z.array(z.string()).optional().describe("Filter to tags, e.g. ['hiastro']"),
       },
     },
-    async ({ days, tags }) => text(brief(cfg, { days, tags }))
+    async ({ days, tags }) => {
+      const b = brief(cfg, { days, tags });
+      const threads = await openThreadsText(cfg, { cwd: process.cwd(), includeOwn: false });
+      return text(threads ? `${b}\n\n${threads}` : b);
+    }
   );
 
   registerAppTool(server,
@@ -188,6 +198,106 @@ export function createMcpServer(cfg: Config) {
     },
     async ({ days }) => text(stats(cfg, days))
   );
+
+  // ---------- execution continuity (spec §8) ----------
+  if (continuityConfigured(cfg)) {
+    const pool = () => getPool(cfg);
+    const sessionOf = (given?: string) => given || process.env.CLAUDE_SESSION_ID || process.env.CODEX_THREAD_ID || `mcp:${cfg.author}:${process.pid}`;
+
+    server.registerTool(
+      "ledger_threads",
+      {
+        title: "Open work threads",
+        description: "List teammates' (and optionally your own) open work threads: goal, last activity, harness, claim holder, verified snapshot age. Use before continuing anyone's work. Pass cwd to see threads on the repo you are in.",
+        inputSchema: {
+          cwd: z.string().optional().describe("A path inside the repo to filter by; defaults to all repos"),
+          author: z.string().optional(),
+          include_own: z.boolean().default(false),
+          hours: z.number().int().min(1).max(720).default(72),
+          limit: z.number().int().min(1).max(50).default(10),
+        },
+      },
+      async ({ cwd, author, include_own, hours, limit }) => {
+        const root = cwd ? repoRoot(cwd) : null;
+        const rows = await listThreads(pool(), { repo: root ? repoIdentity(root) : undefined, author, excludeAuthor: include_own || author ? undefined : cfg.author, sinceHours: hours, status: "open", limit });
+        return text(rows.length ? rows.map((r) => threadLine(r)).join("\n") : "No open threads match.");
+      }
+    );
+
+    server.registerTool(
+      "ledger_thread_get",
+      { title: "Thread detail", description: "Full detail for one thread: every human instruction, files touched, pending operations, checkpoint, claim state. Read-only; does not claim.", inputSchema: { thread_id: z.string() } },
+      async ({ thread_id }) => text((await buildResumePack(cfg, pool(), thread_id, { mode: "inspect", author: cfg.author, budgetTokens: 12000 })).text)
+    );
+
+    server.registerTool(
+      "ledger_resume",
+      {
+        title: "Resume a thread",
+        description: "Continue a teammate's thread. mode=continue claims it (advisory) and returns the resume pack with worktree bootstrap commands; mode=fork creates a linked fork you own; mode=inspect reads without claiming. Pass cwd (a checkout of the same repo) to get the diff of what changed since the checkpoint. Your first turn must inspect the worktree, state confirmed vs uncertain progress, and never blindly rerun a pending operation.",
+        inputSchema: {
+          thread_id: z.string(),
+          mode: z.enum(["continue", "fork", "inspect"]).default("continue"),
+          cwd: z.string().optional().describe("Local checkout of the same repo, for the intervening-change diff"),
+          session_id: z.string().optional().describe("Your harness session id if known; binds this session to the thread"),
+          budget_tokens: z.number().int().min(1500).max(20000).default(6000),
+        },
+      },
+      async ({ thread_id, mode, cwd, session_id, budget_tokens }) => {
+        const sid = sessionOf(session_id);
+        const pack = await buildResumePack(cfg, pool(), thread_id, { mode, author: cfg.author, sessionId: sid, repoPath: cwd, budgetTokens: budget_tokens });
+        if (mode !== "inspect" && pack.claim.acquired) writeBinding(sid, { thread_id: pack.fork?.id ?? thread_id });
+        return text(pack.text);
+      }
+    );
+
+    server.registerTool(
+      "ledger_thread_start",
+      { title: "Start a new thread", description: "Bind this session to a new thread you own, with an explicit title and goal. Otherwise the helper auto-creates one from your first prompt.", inputSchema: { title: z.string().min(3).max(140), goal: z.string().optional(), cwd: z.string().describe("A path inside the repo"), session_id: z.string().optional() } },
+      async ({ title, goal, cwd, session_id }) => {
+        const root = repoRoot(cwd);
+        if (!root) return text("cwd must be inside a git repo so the thread has a repo identity.");
+        const t = await createThread(pool(), { repo: repoIdentity(root), branch: currentBranch(root), title, goal: goal ?? null, created_by: cfg.author });
+        const sid = sessionOf(session_id);
+        const c = await claimThread(pool(), t.id, sid, cfg.author);
+        writeBinding(sid, { thread_id: t.id });
+        return text(`Thread ${t.id} "${t.title}" created on ${t.repo}${t.branch ? `@${t.branch}` : ""}; ${c.ok ? `claimed, generation ${c.generation}` : "claim failed"}. The helper will attach this session's events and snapshots.`);
+      }
+    );
+
+    server.registerTool(
+      "ledger_thread_bind",
+      { title: "Bind session to a thread", description: "Attach this session to an existing thread as a contributor without claiming it. To take ownership use ledger_resume mode=continue.", inputSchema: { thread_id: z.string(), session_id: z.string().optional() } },
+      async ({ thread_id, session_id }) => {
+        const t = await getThread(pool(), thread_id);
+        if (!t) return text(`Not found: ${thread_id}`);
+        writeBinding(sessionOf(session_id), { thread_id });
+        return text(`Session bound to ${t.id} "${t.title}" as a contributor (no claim).`);
+      }
+    );
+
+    server.registerTool(
+      "ledger_thread_note",
+      { title: "Add a note to a thread", description: "Append a note to a thread's event stream: a constraint learned, a next step, a mid-task choice. Shows in the resume pack. Not a Ledger decision or finding; record those with ledger_record_*.", inputSchema: { thread_id: z.string(), text: z.string().min(3).max(4000), session_id: z.string().optional() } },
+      async ({ thread_id, text: note, session_id }) => {
+        const sid = sessionOf(session_id);
+        await upsertSession(pool(), { id: sid, author: cfg.author, harness: process.env.CODEX_THREAD_ID ? "codex" : "claude", machine: cfg.continuity?.machine ?? null });
+        const r = await appendEvents(pool(), sid, [{ producer_event_id: `note:${Date.now()}`, kind: "instruction.added", occurred_at: new Date().toISOString(), payload: { text: `[note by ${cfg.author}] ${note}` } }], thread_id, null);
+        return text(r.inserted ? `Note added to ${thread_id}.` : `Note already present.`);
+      }
+    );
+
+    server.registerTool(
+      "ledger_release",
+      { title: "Release a thread claim", description: "Release your claim when you stop working on a thread, so a teammate can continue without waiting for lease expiry. The helper publishes a final checkpoint.", inputSchema: { thread_id: z.string(), session_id: z.string().optional() } },
+      async ({ thread_id, session_id }) => {
+        const sid = sessionOf(session_id);
+        const ok = await releaseClaim(pool(), thread_id, sid);
+        writeSignal(sid, "checkpoint");
+        return text(ok ? `Released ${thread_id}.` : `No live claim on ${thread_id} held by this session.`);
+      }
+    );
+  }
 
   return server;
 }
