@@ -478,13 +478,16 @@ assert.equal(rh("SessionEnd", sidA, { reason: "other" }, T(22)).reconcile, true,
 assert.equal(rh("SessionEnd", "no-debt", { reason: "other" }, T(22)).reconcile, undefined);
 rh("PostToolUse", sidB, { tool_name: "mcp__amplitude__query_amplitude_data", tool_input: { sql: "select ..." } }, T(23));
 const sidC = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
-fs.writeFileSync(path.join(roots.claude, cwdHash, `${sidC}.jsonl`), cl({ type: "user", sessionId: sidC, message: { role: "user", content: "hi" } }) + "\n");
+const liveTranscript = path.join(roots.claude, cwdHash, `${sidC}.jsonl`);
+fs.writeFileSync(liveTranscript, cl({ type: "user", sessionId: sidC, message: { role: "user", content: "hi" } }) + "\n");
 rh("PostToolUse", sidC, { tool_name: "mcp__hiastro-clickhouse__run_query", tool_input: { query: "select 1" } }, T(24));
 
 // quiet gating: A and B transcripts are old; C's was just written, so it is still live
 const oldT = new Date(Date.now() - 60 * 60_000);
 fs.utimesSync(claudeT, oldT, oldT);
 fs.utimesSync(codexT, oldT, oldT);
+const futureT = new Date(Date.now() + 60_000);
+fs.utimesSync(liveTranscript, futureT, futureT);
 const cands = findCandidates({ dir: rdir, roots, quietMs: 20 * 60_000 });
 assert.deepEqual(
   cands.map((c) => [c.journal.session_id, c.trigger]).sort(),
@@ -492,7 +495,7 @@ assert.deepEqual(
   "ended-with-debt and quiet-with-debt are candidates; live sessions are not"
 );
 assert.ok(cands.find((c) => c.journal.session_id === sidA)!.reason.includes("1 data query ran"));
-assert.equal(findCandidates({ dir: rdir, roots, quietMs: 0 }).length, 3, "with no quiet window the live one is included too");
+assert.equal(findCandidates({ dir: rdir, roots, quietMs: 0 }).length, 3, "zero quiet window includes a future-mtime live session");
 
 // Fake extractor: captures the prompt, returns a lenient finding for A (missing assumptions, one junk field), nothing for B
 const promptFile = path.join(tmp, "prompt.txt");
