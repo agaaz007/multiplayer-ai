@@ -201,8 +201,13 @@ export function handleHook(event: string, input: any, opts: HookOpts = {}): Hook
       // continuity: index every tool call locally so the helper can reconcile the transcript against it
       try { appendIndex(sessionId, { at: now, tool, id: input?.tool_use_id ? String(input.tool_use_id) : undefined }); } catch { /* best-effort */ }
       if (RECORD_TOOL.test(tool)) {
-        const m = text.match(/Recorded (?:finding|decision|change|definition) ((?:fnd|dec|chg|def)-[\w-]+)/);
-        if (m && !input?.tool_response?.isError) {
+        // Record tools answered "Recorded <type> <id>" originally and now return receipts ("Saved <type> …" with
+        // structuredContent.receipt.record_id). Accept either: take the id from the receipt when present, else the
+        // first ledger id anywhere in the response. A record that the hook fails to see never clears the checkpoint.
+        const resp = input?.tool_response;
+        const receiptId = resp?.structuredContent?.receipt?.record_id ?? resp?.receipt?.record_id;
+        const m = typeof receiptId === "string" ? [receiptId, receiptId] : (text + " " + JSON.stringify(resp ?? "")).match(/((?:fnd|dec|chg|def)-\d{8}-[\w-]+)/);
+        if (m && !resp?.isError) {
           j.entries.push({ at: now, kind: "record", tool, id: m[1], summary: clip(String(input?.tool_input?.title ?? "")) });
         }
       } else if (tool === SKIP_TOOL) {
