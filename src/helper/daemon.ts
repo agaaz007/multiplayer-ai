@@ -225,7 +225,10 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
         if (s.root) { s.repo = repoIdentity(s.root); s.branch = s.branch ?? currentBranch(s.root); s.baseCommit = headCommit(s.root); s.wipRef = `refs/wip/${safe(author)}/${safe(sid)}`; }
       }
       if (s.root && s.repo && !repoAllowed(cfg, s.repo, s.root)) { s.ended = true; continue; }
-      if (!s.firstInstruction) { const fi = r.events.find((e) => e.kind === "instruction.added"); if (fi) s.firstInstruction = String(fi.payload.text ?? "").slice(0, 140); }
+      if (!s.firstInstruction) {
+        const fi = r.events.find((e) => e.kind === "instruction.added");
+        if (fi) s.firstInstruction = String(fi.payload.text ?? "").split("\n").map((l) => l.trim()).find((l) => l.length > 0)?.slice(0, 100) ?? undefined;
+      }
       for (const e of r.events) if (e.call_id && e.kind === "tool.requested") s.seenCallIds.push(e.call_id);
       if (s.seenCallIds.length > 5000) s.seenCallIds = s.seenCallIds.slice(-5000);
       if (r.events.length) {
