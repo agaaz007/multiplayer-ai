@@ -99,8 +99,20 @@ function textOf(content: unknown): string {
   return "";
 }
 
-function isHarnessInjected(t: string): boolean {
-  return t.startsWith("<") || t.startsWith("# AGENTS.md") || t.startsWith("Caveat:") || t.startsWith("[Request interrupted");
+/** Text the harness or a skill injected as a "user" message; never a human instruction. */
+function isHarnessInjected(raw: string): boolean {
+  const t = raw.trimStart();
+  return (
+    t.startsWith("<") ||
+    t.startsWith("# AGENTS.md") ||
+    t.startsWith("Caveat:") ||
+    t.startsWith("[Request interrupted") ||
+    t.startsWith("[SYSTEM NOTIFICATION") ||
+    t.startsWith("Base directory for this skill:") ||
+    t.startsWith("Stop hook feedback:") ||
+    t.startsWith("Launching skill:") ||
+    /^<(system_instruction|task-notification|local-command|command-name)/.test(t)
+  );
 }
 
 function toolRequested(id: string, tool: string, input: unknown, at: string | undefined, dataTools: string[]): NormEvent {
