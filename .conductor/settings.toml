@@ -1,11 +1,11 @@
 "$schema" = "https://conductor.build/schemas/settings.repo.schema.json"
 
 [scripts]
-setup = "npm ci"
+setup = "bash scripts/conductor.sh setup"
 run_mode = "concurrent"
 
 [scripts.run.ledger]
 available_in = ["local"]
-command = 'LEDGER_UI_PORT="${CONDUCTOR_PORT:-4318}" npm run preview:ui'
+command = "bash scripts/conductor.sh preview"
 default = true
 icon = "play"
