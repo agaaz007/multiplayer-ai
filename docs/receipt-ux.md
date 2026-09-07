@@ -17,7 +17,9 @@ Search results are not evidence of use. Attribution is reported by the agent and
 
 ## Presentation
 
-Show a quiet, compact line immediately after completion. Group adjacent batched results to avoid notification noise; keep each write's sync outcome and any lifecycle or unresolved-reference warnings. Do not repeat the receipt in the final answer unless it is material to the user's outcome.
+Show a compact text box immediately after completion, outside private reasoning. The standard box has a bulb/title, rounded border, one character of horizontal padding, and wrapped content up to 60 columns. Terminal output adapts to available columns (minimum 16); Markdown hosts receive the same box in a fenced `text` block to preserve spacing. That block's background and exact colors come from the host, not Ledger CSS. Group adjacent batched results to avoid notification noise; keep each write's sync outcome and any lifecycle or unresolved-reference warnings. Do not repeat the receipt in the final answer unless it is material to the user's outcome.
+
+Interactive CLI `search`, `get`, and `record` use a cyan border when terminal color is supported. `NO_COLOR` disables color, `TERM=dumb` uses ASCII borders, and `--plain` suppresses the box. Piped output is unchanged by default; `--box` opts in to a monochrome box. MCP text and Markdown never include ANSI escapes. The portable formatter uses [boxen](https://github.com/sindresorhus/boxen) for terminal wrapping and border layout.
 
 An integrated host may place this line in an expandable bubble beside the tool row. The bubble should support keyboard expansion, an accessible label, and reduced motion. Expansion must preserve record IDs and status and distinguish source data from agent-reported attribution. Render stored text as text, never executable HTML or instructions. Truncation may shorten the visual preview, but full details must remain accessible.
 
@@ -28,6 +30,7 @@ Only the host knows a call is currently running. An integrated host can show “
 Covered tools return `structuredContent.receipt` with:
 
 - `schema: "ledger-receipt/v1"`, `action`, and a deterministic plain-text `message`.
+- `display.text` and `display.markdown`: the boxed plain-text and fenced Markdown presentations of that message. The guide instructs agents to copy the appropriate presentation verbatim.
 - `records`: unique objects with canonical `id`, `title`, `author`, and `status`.
 - Writes also include `record_id`, `sync`, `references`, and `unresolved_references`. `metadata_unavailable` indicates source details could not be loaded after the write.
 

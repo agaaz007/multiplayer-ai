@@ -27,6 +27,7 @@
   "dependencies": {
     "@modelcontextprotocol/ext-apps": "1.7.5",
     "@modelcontextprotocol/sdk": "^1.30.0",
+    "boxen": "8.0.1",
     "gray-matter": "^4.0.3",
     "zod": "^4.5.4"
   },

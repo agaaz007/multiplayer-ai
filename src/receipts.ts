@@ -1,11 +1,13 @@
 import type { LedgerObject, LedgerType } from "./schema.js";
 import type { RecordResult } from "./store.js";
+import boxen from "boxen";
 
 /** Structured data for a host, plus one sentence an agent can show in chat. */
 export interface LedgerReceipt {
   schema: "ledger-receipt/v1";
   action: "found" | "opened" | "referenced" | "saved";
   message: string;
+  display: { text: string; markdown: string };
   records: { id: string; title: string; author: string; status: LedgerObject["status"] }[];
   sync?: "pushed" | "local_commit" | "sync_failed" | "commit_failed" | "disabled" | "unconfirmed";
   record_id?: string;
@@ -14,7 +16,25 @@ export interface LedgerReceipt {
   metadata_unavailable?: boolean;
 }
 
-export const RECEIPT_GUIDANCE = " After this call, show receipt.message (or the first 💡 Ledger line) as one short user-visible chat update adjacent to the tool call. Do not leave it only in tool output. Combine receipts if calls were batched. Do not describe retrieved sources as used or local saves as synced.";
+export const RECEIPT_GUIDANCE = " After this call, show receipt.display.markdown verbatim as a user-visible chat update adjacent to the tool call; it is a fenced, boxed Ledger receipt. In plain-text hosts use receipt.display.text. Older results can fall back to receipt.message or the first 💡 Ledger line. Do not leave it only in tool output or thinking. Combine receipts if calls were batched, preserving statuses. Do not describe retrieved sources as used or local saves as synced.";
+
+/** Portable box: no HTML/CSS, and no ANSI escapes unless a terminal opts in. */
+export function renderReceiptBox(receipt: Pick<LedgerReceipt, "message">, options: { columns?: number; color?: boolean; ascii?: boolean } = {}): string {
+  const width = Math.min(60, Math.max(16, Math.floor(options.columns || 60)));
+  const message = receipt.message.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
+  return boxen(message.replace(/^💡 Ledger · /, "").replaceAll(" · ", "\n"), {
+    title: options.ascii ? "Ledger" : "💡 Ledger",
+    borderStyle: options.ascii ? "classic" : "round",
+    ...(options.color ? { borderColor: "cyan" } : {}),
+    width, padding: { left: 1, right: 1, top: 0, bottom: 0 },
+  });
+}
+
+function withDisplay(receipt: Omit<LedgerReceipt, "display">): LedgerReceipt {
+  const text = renderReceiptBox(receipt);
+  // Every data line begins with a box border, so source backticks cannot close the fence.
+  return { ...receipt, display: { text, markdown: `\`\`\`text\n${text}\n\`\`\`` } };
+}
 const compact = (s: string, max = 100) => {
   const line = s.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
   return line.length > max ? `${line.slice(0, max - 1)}…` : line;
@@ -48,7 +68,7 @@ export function readReceipt(action: "found" | "opened" | "referenced", objects: 
     message = n ? `Found ${n} record${n === 1 ? "" : "s"} from ${owners(records)}` : "No matching records";
     if (query) message += ` · “${compact(query, 70)}”`;
   }
-  return { schema: "ledger-receipt/v1", action, message: `💡 Ledger · ${message}${lifecycle(records)}`, records: refs(records) };
+  return withDisplay({ schema: "ledger-receipt/v1", action, message: `💡 Ledger · ${message}${lifecycle(records)}`, records: refs(records) });
 }
 
 /** Only an acknowledged push can be described as synced. */
@@ -81,9 +101,9 @@ export function savedReceipt(type: LedgerType, fields: Record<string, unknown>, 
   if (referenced.length) message += ` · Links ${referenced.length} prior record${referenced.length === 1 ? "" : "s"} from ${owners(referenced)}${lifecycle(referenced)}`;
   if (unresolved.length) message += ` · ${unresolved.length} unresolved reference${unresolved.length === 1 ? "" : "s"}`;
   if (!saved) message += " · Source details unavailable";
-  return { schema: "ledger-receipt/v1", action: "saved", record_id: result.id, message, sync: outcome.sync,
+  return withDisplay({ schema: "ledger-receipt/v1", action: "saved", record_id: result.id, message, sync: outcome.sync,
     ...(!saved ? { metadata_unavailable: true } : {}),
-    records: saved ? refs([saved]) : [], references: refs(referenced), unresolved_references: unresolved };
+    records: saved ? refs([saved]) : [], references: refs(referenced), unresolved_references: unresolved });
 }
 
 export const receiptText = (receipt: LedgerReceipt, details?: string) => ({

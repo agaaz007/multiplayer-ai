@@ -2,9 +2,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { initLedger, loadConfig, record, getById, pull, discardDraft, ledgerHome } from "./store.js";
+import { initLedger, loadConfig, loadAll, record, getById, pull, discardDraft, ledgerHome } from "./store.js";
 import { brief, search, renderFull, stats } from "./query.js";
-import { TYPES, type LedgerType } from "./schema.js";
+import { TYPES, type LedgerType, type LedgerObject } from "./schema.js";
+import { readReceipt, savedReceipt, renderReceiptBox, type LedgerReceipt } from "./receipts.js";
 import { installClaude, installCodex, installGuides, agentRulesText } from "./install.js";
 import { startMcp } from "./mcp.js";
 import { handleHook } from "./hooks.js";
@@ -29,6 +30,10 @@ const USAGE = `ledger — shared definitions, findings, changes, decisions for y
   ledger sync                            git pull now
   ledger rules                           print the agent guide
   ledger hook <event> < hook.json        Claude Code / Codex hook entry point (installed for you)
+
+  search/get/record show boxed receipts in interactive terminals.
+  --plain disables the box; --box enables it in captured/piped output.
+  NO_COLOR disables terminal color; TERM=dumb uses an ASCII border.
 `;
 
 function flag(args: string[], name: string): string | undefined {
@@ -55,6 +60,12 @@ function parseDuration(s: string | undefined, fallbackMs: number): number {
 
 async function main() {
   const [cmd, ...args] = process.argv.slice(2);
+  const showReceipt = !args.includes("--plain") && (process.stdout.isTTY || args.includes("--box"));
+  const printReceipt = (receipt: LedgerReceipt) => console.log(renderReceiptBox(receipt, {
+    columns: process.stdout.columns,
+    color: Boolean(process.stdout.isTTY) && !("NO_COLOR" in process.env) && process.env.TERM !== "dumb",
+    ascii: process.env.TERM === "dumb",
+  }));
   try {
     switch (cmd) {
       case "init": {
@@ -147,12 +158,14 @@ async function main() {
         const q = args.filter((a) => !a.startsWith("--") && a !== flag(args, "--type")).join(" ");
         const t = flag(args, "--type") as LedgerType | undefined;
         const hits = search(cfg, q, { types: t ? [t] : undefined, limit: 20 });
+        if (showReceipt) printReceipt(readReceipt("found", hits, q));
         if (!hits.length) return console.log("no matches");
         for (const h of hits) console.log(`[${h.score.toFixed(2)}] ${h.type} ${h.id} — ${h.title}`);
         return;
       }
       case "get": {
         const o = getById(loadConfig(), args[0]);
+        if (showReceipt) printReceipt(readReceipt("opened", o ? [o] : []));
         console.log(o ? renderFull(o) : `not found: ${args[0]}`);
         return;
       }
@@ -160,7 +173,13 @@ async function main() {
         const type = args[0] as LedgerType;
         if (!TYPES.includes(type)) throw new Error(`type must be one of ${TYPES.join("|")}`);
         const fields = JSON.parse(readStdin() || "{}");
-        const res = record(loadConfig(), { type, fields });
+        const cfg = loadConfig();
+        const res = record(cfg, { type, fields });
+        if (showReceipt) {
+          let objects: LedgerObject[] | null = null;
+          try { objects = loadAll(cfg, TYPES, false); } catch { /* preserve a successful save if metadata is unavailable */ }
+          printReceipt(savedReceipt(type, fields, res, objects, cfg.git_sync));
+        }
         console.log(`recorded ${res.id}${res.git ? ` — ${res.git}` : ""}`);
         return;
       }

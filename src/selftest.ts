@@ -13,7 +13,7 @@ import { regenerateViews } from "./views.js";
 import { agentRulesText, installGuides, upsertHooks, HOOK_EVENTS, isLedgerHookCommand } from "./install.js";
 import { handleHook, loadJournal, saveJournal, captureStats, debt } from "./hooks.js";
 import { EVIDENCE_URI } from "./evidence.js";
-import { readReceipt, savedReceipt, syncReceipt } from "./receipts.js";
+import { readReceipt, savedReceipt, syncReceipt, renderReceiptBox } from "./receipts.js";
 
 const sh = (cwd: string, args: string[]) =>
   execFileSync("git", args, { cwd, stdio: ["ignore", "pipe", "pipe"] }).toString().trim();
@@ -227,6 +227,7 @@ installGuides();
 const installedGuide = fs.readFileSync(codexGuideFile, "utf8");
 assert.ok(installedGuide.startsWith("Team instructions\n") && installedGuide.endsWith("\nOther instructions\n"));
 assert.ok(installedGuide.includes("structuredContent.receipt.message") && installedGuide.includes("user-visible chat update immediately after the call"));
+assert.ok(installedGuide.includes("structuredContent.receipt.display.markdown") && installedGuide.includes("verbatim"));
 assert.equal(fs.readFileSync(path.join(tmp, ".claude", "ledger.md"), "utf8"), guide);
 assert.ok(fs.readFileSync(claudeGuideFile, "utf8").includes("@~/.claude/ledger.md"));
 installGuides();
@@ -751,6 +752,9 @@ assert.equal(card.receipt.records.find((s: any) => s.id === f1.id).author, "agaa
 assert.match(card.receipt.message, /💡 Ledger · Found/);
 assert.doesNotMatch(card.receipt.message, /Referenced|verified|saved.*minutes/i);
 assert.ok(JSON.stringify(r.content).includes(card.receipt.message), "text-only hosts get the same receipt");
+assert.equal(card.receipt.display.markdown, "```text\n" + card.receipt.display.text + "\n```");
+assert.ok(card.receipt.display.text.startsWith("╭ 💡 Ledger"));
+assert.ok(!card.receipt.display.markdown.includes("\u001b"), "MCP display data has no terminal color escapes");
 assert.ok(!JSON.stringify(card).includes(dir), "cards do not expose machine-specific file paths");
 const attribution = await client.callTool({ name: "ledger_show_contribution", arguments: { references: [
   { id: f1.id, answer_excerpt: "August's iOS conversion was 11.2%.", contribution: "Reused the previous estimate." },
@@ -841,6 +845,23 @@ assert.equal(degradedReceipt.sync, "pushed");
 assert.equal(degradedReceipt.record_id, "fnd-written");
 assert.equal(degradedReceipt.metadata_unavailable, true);
 assert.match(degradedReceipt.message, /Source details unavailable/);
+
+// Portable formatting handles narrow output and keeps source text inside the box.
+const narrow = renderReceiptBox({ message: "💡 Ledger · A long receipt that wraps without truncating the final Sync failed status" }, { columns: 32, ascii: true });
+assert.ok(narrow.split("\n").every(line => line.length === 32));
+assert.match(narrow, /Sync failed/);
+const literal = readReceipt("opened", [{ ...oldObject, title: '₹499 用户 👩‍💻 ``` <script>text</script>' }]);
+assert.match(literal.display.text, /₹499 用户 👩‍💻/);
+assert.equal(literal.display.markdown.split("\n").filter(line => line.startsWith("```")).length, 2, "source backticks cannot escape the fenced box");
+const runGet = (args: string[]) => execFileSync(process.execPath, [path.resolve("dist/cli.js"), "get", f1.id, ...args], {
+  encoding: "utf8", env: { ...process.env, NO_COLOR: "1", TERM: "dumb" },
+});
+const piped = runGet([]);
+assert.ok(piped.startsWith("# Trial CVR August"), "piped CLI output retains its original format");
+const boxed = runGet(["--box"]);
+assert.ok(boxed.startsWith("+ Ledger") && boxed.includes("# Trial CVR August"));
+assert.ok(!boxed.includes("\u001b"), "plain terminal output has no color escapes");
+assert.equal(runGet(["--box", "--plain"]), piped, "plain mode overrides the box");
 
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log("selftest: ok");
