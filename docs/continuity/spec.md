@@ -1,6 +1,7 @@
 # Tranzmit Execution Continuity — Local Capture Spec
 
-Version 1.1 · 8 September 2026 · Status: Phase 0 in progress; Phases 1–3 proposed
+Version 1.2 · 8 September 2026 · Status: Phases 1–2 live on one machine; work-records layer (§13a) in build; Phase 3 pending Rachit
+Canonical location: `docs/continuity/spec.md`. The copy under `.context/` is frozen at v1.1.
 Author: Claude (Fable 5.1) for Agaaz, synthesizing the 7 Sep investigation-DAG plan, the 7 Sep hosted-runner MVP spec, the revised local architecture, the Mosaic memo, and a read of the Ledger source at this branch.
 
 **v1.1 corrections (Agaaz review, 8 Sep).** Six defects in v1.0 fixed in place: (1) request and result shared a `producer_event_id` and would have deduplicated each other; (2) the "30 seconds" loss claim was a constant, not a measurement, and discoverability lagged snapshots by up to five minutes; (3) shadow commits covered only bound sessions while test 16 promised unbound recovery; (4) the head-update rule reopened overwrites after a claim release; (5) `read-tree HEAD` would carry a tracked `.env` into the snapshot because `add` exclusions do not remove indexed entries; (6) the spec itself introduced loss via a 256 KB artifact cap below an observed 278 KB output and "clipped" instructions. Also: a hook/transcript mismatch is "not observed yet" before it is "missing." Each fix is marked **[v1.1]** below.
@@ -386,6 +387,40 @@ To be recorded in the ledger as a decision once Agaaz and Rachit confirm.
 | Scope | Both directions Codex ↔ Claude, code and analysis | Analysis-only: misses the actual HiAstro night work |
 
 ---
+
+## 13a. Work records: shared accumulation, then task-directed retrieval **[v1.2]**
+
+**Requirement.** A session can contribute evidence and state updates to multiple work records. Each record maintains its own progress and dependencies, independent of any session's rolling summary.
+
+**Why.** A thread (§2) is the physical unit: one session, one worktree, one claim, one snapshot ref. It is the wrong unit for "continue the attribution investigation" when Rachit's night session touched five unrelated pieces of work. The logical unit is the work record. A session contributes to many records; a record accumulates from many sessions and teammates.
+
+**Three layers.**
+1. *Shared evidence*: `cont_events`, `cont_artifacts`, wip snapshots. Unchanged. Nothing is ever deleted at compaction.
+2. *Work records*: `cont_records` (kind: implementation | investigation | writing | decision | other; nullable repo for non-code work), `cont_record_links` (spans of a session's events, `source: explicit | suggested | unassigned`, confidence), `cont_state_updates` (append-only; kind: progress | decision | hypothesis | blocker | next | contradiction | note; `status: proposed → confirmed | rejected`; evidence = exact event refs; `supersedes` keeps history). A record's current state is a projection over its updates; proposed items are visibly flagged; contradictions sit side by side and are never resolved by timestamp.
+3. *Active context*: assembled at `ledger_resume(record)` from the two layers above, within a budget, with drill-down tools for the originals.
+
+**Contribution.** Explicit links come from the agent or the user naming a record (`ledger_record_link`, `ledger_thread_note` with a record). Suggested links come from a classifier that runs at each `turn` checkpoint: given the open records and the events since the last checkpoint, it assigns spans with a confidence, proposes new records with a title and kind, and proposes state updates with evidence refs. Anything it cannot place stays **unassigned** and is surfaced in the brief under "Unassigned work," never silently dropped. The classifier reuses the transcript-fallback extractor path (`src/extract.ts`, `prompts/operations/classify.md`); its output is always `proposed`.
+
+**Compaction is evidence, not memory.** Both harnesses write a model-authored summary when they compact (Claude: a structured `isCompactSummary` message; Codex: `compacted` items). These are captured as `compaction` events with text and are the best available contemporaneous digest, because the source model still held the full context. A record's state may cite one; a record's state is never one. The resume pack shows the latest compaction summary as a spine labeled "evidence, not memory," and the agent retrieves originals through `ledger_events` and `ledger_artifact_get` rather than trying to uncompact a sentence.
+
+**Saving is not accepting.** A record's confirmed state is still not a Ledger decision or finding. Promotion is a person's act: `ledger_record_decision` / `ledger_record_finding` with `based_on` pointing at the record's evidence. Records reference Ledger objects by id and version and flag superseded ones at resume.
+
+**Retrieval by record.** `ledger_resume(record_id)` returns: the record's state projection with proposed items flagged; contributing sessions and authors; evidence spans across all of them ordered by time; pending operations from the most recent contributing session; contradictions; linked Ledger objects with supersession flags; unassigned spans from the same sessions that may belong here; and, when the record has a repo, the thread bootstrap for the latest snapshot. Budgeted; recency-shaped (first instruction plus the last N); everything omitted is named with the call that fetches it.
+
+**Store.** Postgres and git remain the stores (decision D-010 in `docs/CONTINUITY.md`). The record graph is shallow; every retrieval is one or two joins; full-text search over events is a GIN index in Postgres; embeddings, if ever needed, are `pgvector`. No graph database.
+
+**Acceptance (added to §11).**
+| # | test | required result |
+|---|---|---|
+| 27 | One session discusses three topics; classifier runs at a turn checkpoint | Three records proposed with spans; no span assigned to two records with the same source; leftovers listed as unassigned |
+| 28 | Two sessions by different authors contribute to one record | `ledger_resume(record)` shows evidence from both, ordered, attributed; contributing_sessions lists both |
+| 29 | Two contradicting hypotheses from different sessions | Both present in the record state under contradictions; neither auto-resolved |
+| 30 | Classifier proposes a state update; nobody confirms | It renders as proposed in the pack; `state_version` unchanged |
+| 31 | Compaction summary present | Pack shows it as a spine labeled evidence; originals reachable via `ledger_events` |
+| 32 | Record references a decision that is later superseded | Pack flags it |
+| 33 | Session with no assignable content | Appears under Unassigned work in the brief; nothing invented |
+
+**Build.** Wave 1 (parallel): records store layer with FTS; emitter captures compaction text and Codex structured completion events; evidence query tools and the recency-shaped pack. Wave 2 (after the records interface lands): classifier at turn checkpoints; record-level retrieval, record tools, brief sections. The records interface is fixed in `src/continuity/records.ts` before either wave starts.
 
 ## 14. Open questions
 
