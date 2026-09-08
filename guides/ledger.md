@@ -190,6 +190,18 @@ At session start the brief lists teammates' **Open threads** for the last 48 hou
 | `ledger_thread_note` | leave a mid-task note for whoever continues: a constraint learned, a next step, a dead end |
 | `ledger_release` | release your claim when you stop, so a teammate need not wait for lease expiry |
 
+**Work records.** A thread is one session's worktree. A **record** is one piece of work, accumulated across sessions and teammates: its state (decisions, blockers, next, progress, hypotheses, contradictions), with every line resting on exact events. The brief lists **Open work (records)** and **Unassigned work**. A classifier proposes links and state updates after each turn; everything it writes is `suggested` or `PROPOSED` until a person or their agent confirms it. **Never treat a PROPOSED line as decided.**
+
+| tool | when |
+|---|---|
+| `ledger_records` | see open records on this repo before starting related work |
+| `ledger_resume(record_id)` / `ledger_record_get` | continue or read one piece of work: state with PROPOSED flags, evidence across sessions, pending operations, contradictions, superseded decisions, bootstrap |
+| `ledger_record_link` | say that a span of this session's events belongs to a record (explicit beats suggested) |
+| `ledger_record_update` | propose a state update with evidence seqs; confirm or reject one (reject needs a reason) |
+| `ledger_record_start` | start a record with an explicit kind, title, and goal |
+| `ledger_unassigned` | spans no record claims; link them or start a record; never invent from them |
+| `ledger_evidence_search`, `ledger_events`, `ledger_artifact_get` | the originals behind any line, across everyone's sessions |
+
 **The first turn after `ledger_resume`:** check out the snapshot into a fresh worktree using the bootstrap commands and inspect it; state what is confirmed (verified snapshot, acknowledged events) versus uncertain (loss window, pending operations, capture gaps); never rerun a pending operation that mutates anything until its outcome is known; say what you are continuing and what you will do next.
 
 **Rules the pack states and you must respect:** the claim is advisory and protects the shared record, not the other machine; "saved through" timestamps are remote-verified measurements, never assumptions; any narrative is generated and unreviewed, machine fields are the evidence. A thread note is not a decision or finding; record those with the `ledger_record_*` tools.

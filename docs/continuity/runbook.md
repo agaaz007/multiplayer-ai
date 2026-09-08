@@ -10,6 +10,32 @@ What is running, how to check it, how Rachit joins, how to stop it. Spec: `execu
 - Brief: SessionStart and `ledger_brief` append "Open threads" (teammates', last 48 h, this repo first) and "Ledger notices."
 - MCP tools: `ledger_threads`, `ledger_thread_get`, `ledger_resume`, `ledger_thread_start`, `ledger_thread_bind`, `ledger_thread_note`, `ledger_release`. Requires an MCP restart in each harness to appear.
 
+## Work records (added 8 Sep, later)
+
+Threads are the physical unit (one session, one worktree, one claim). **Work records** are the logical unit: a session contributes spans of its events to many records; a record accumulates from many sessions and teammates and keeps its own state with provenance. The brief shows **Open work (records)** and **Unassigned work**.
+
+```
+ledger_records(cwd?)                               records on this repo, newest first
+ledger_resume(record_id, mode: "continue")         state, evidence across sessions, pending ops, contradictions, bootstrap
+ledger_record_get(record_id)                       same, read-only, bigger budget
+ledger_record_link(record_id, session_id, from_seq, to_seq)   say "these events belong to this record"
+ledger_record_update(record_id, action: "propose"|"confirm"|"reject", …)   propose with evidence; confirm or reject with reason
+ledger_record_start(kind, title, goal?, cwd?)      start a record explicitly
+ledger_unassigned()                                spans no record claims
+ledger_evidence_search(q)                          full-text search over everyone's captured events
+ledger_events / ledger_artifact_get                the originals behind any line
+```
+
+CLI: `ledger records [--all]`, `ledger record show|start|link|propose|confirm|reject …`, `ledger unassigned`, `ledger resume --record <id>`, `ledger events …`, `ledger artifact …`.
+
+A classifier runs after each turn checkpoint (at most once per 120 s per session, detached from capture): it links spans as **suggested**, proposes state updates as **proposed**, and leaves the rest unassigned. It never confirms anything and never writes a Ledger decision or finding. Disable with `"classify": false` under `continuity` in `~/.ledger/config.json`, or `LEDGER_CLASSIFY=0` in the helper's environment. Each run is one model call through your own `claude` or `codex` login; a 250-event slice took about four minutes.
+
+**PROPOSED means unconfirmed.** Do not treat a proposed hypothesis or decision as settled. Confirm with `ledger_record_update(action: "confirm")` when you have checked it; promotion to a Ledger decision or finding remains a separate, human act.
+
+## Credentials the helper needs
+
+The helper runs under launchd with no terminal. macOS's keychain credential helper cannot answer there, so remote git operations use `gh auth git-credential`. Requirements: `gh` installed and `gh auth status` logged in for the account that can push to the project remotes. Override with `LEDGER_GIT_CREDENTIAL_HELPER` if you use something else. A push that cannot authenticate is recorded on the checkpoint as `snapshot_not_verified` and in the helper log as a pass error; the snapshot is not "saved" until the remote confirms it.
+
 ## Daily use
 
 Morning, in any Claude or Codex session (after MCP restart), the brief lists teammates' open threads. To continue one:

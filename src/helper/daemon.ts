@@ -264,7 +264,8 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
       s.lastSeenMtime = mtime;
       if (r.cwd) s.cwd = r.cwd;
       if (r.branch) s.branch = r.branch;
-      if ((r as any).sidechain) s.sidechain = true;
+      // derived every pass from the path (self-healing: an earlier build mis-set this from mirrored lines)
+      s.sidechain = s.file.includes(`${path.sep}subagents${path.sep}`) || path.basename(s.file).startsWith("agent-") || Boolean(r.sidechain);
       for (const [k, v] of Object.entries(r.unknown)) s.unknown[k] = (s.unknown[k] ?? 0) + v;
       if (s.cwd && s.root === undefined) {
         s.root = repoRoot(s.cwd);
@@ -280,7 +281,17 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
       if (r.events.length) {
         spoolAppend(sid, { offset: r.offset, events: r.events, at: now.toISOString() });
         sum.events_spooled += r.events.length;
-        if (s.ended) { s.ended = false; log(`session ${sid.slice(0, 8)} resumed after end/quiet; capture continues (routing may be a fork)`); }
+        if (s.ended) {
+          s.ended = false;
+          log(`session ${sid.slice(0, 8)} resumed after end/quiet; capture continues (routing may be a fork)`);
+          // the quiet-end released our claim; take it back if nobody else has, so checkpoints advance the head again
+          if (s.threadId) {
+            try {
+              const c = await S.claimThread(pool, s.threadId, sid, author);
+              log(c.ok ? `session ${sid.slice(0, 8)} re-claimed thread ${s.threadId.slice(0, 8)} (gen ${c.generation})` : `thread ${s.threadId.slice(0, 8)} now held by ${c.holder.holder_author}; this session's uploads will route to a fork`);
+            } catch (e: any) { log(`re-claim failed for ${sid.slice(0, 8)}: ${String(e?.message ?? e).slice(0, 120)}`); }
+          }
+        }
       }
       sum.sessions++;
 
@@ -341,10 +352,12 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
       const cpSignal = takeSignal(sid, "checkpoint") || endSignal;
       const quiet = now.getTime() - mtime > quietMs;
       const due = !s.lastShadowAt || now.getTime() - s.lastShadowAt >= snapEvery;
-      if (s.root && s.wipRef && (due || cpSignal) && !s.ended) {
+      // subagent transcripts share the parent's worktree; the parent session snapshots it
+      if (s.root && s.wipRef && (due || cpSignal) && !s.ended && !s.sidechain) {
         const sh = shadowCommit(s.root, { ref: s.wipRef, parent: s.lastCommit ?? undefined, lastTree: s.lastTree, deny: cfg.continuity.deny, include: cfg.continuity.include, push: opts.push ?? true, now, message: `wip ${sid.slice(0, 8)} ${now.toISOString()}` });
         s.lastShadowAt = now.getTime();
-        if (sh.error && !sh.commit) sum.errors.push(`shadow ${sid.slice(0, 8)}: ${sh.error}`);
+        // a push or verify failure is a pass error even when the local commit exists: the snapshot is not saved until the remote has it
+        if (sh.error) sum.errors.push(`shadow ${sid.slice(0, 8)}: ${sh.error.replace(/\s+/g, " ").trim()}`);
         if (sh.tree) s.lastTree = sh.tree;
         if (sh.commit) {
           s.lastCommit = sh.commit;
@@ -380,7 +393,14 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
           s.ended = true;
           log(`session ${sid.slice(0, 8)} ${endSignal ? "ended" : "went quiet"}; claim released`);
         } else if (!s.lastHeartbeatAt || now.getTime() - s.lastHeartbeatAt > 30_000) {
-          await S.heartbeatClaim(pool, s.threadId, sid);
+          // hold the claim while live: if the heartbeat finds none (released by a quiet-end, an expiry, or a restart), take it back
+          const held = await S.heartbeatClaim(pool, s.threadId, sid);
+          if (!held) {
+            try {
+              const c = await S.claimThread(pool, s.threadId, sid, author);
+              log(c.ok ? `session ${sid.slice(0, 8)} claimed thread ${s.threadId.slice(0, 8)} (gen ${c.generation})` : `thread ${s.threadId.slice(0, 8)} held by ${c.holder.holder_author} (${c.holder.holder_session_id.slice(0, 8)}); this session routes to a fork`);
+            } catch (e: any) { log(`claim failed for ${sid.slice(0, 8)}: ${String(e?.message ?? e).slice(0, 120)}`); }
+          }
           s.lastHeartbeatAt = now.getTime();
         }
       }
