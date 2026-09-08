@@ -85,7 +85,7 @@ export interface PassSummary {
   snapshots: number;
   checkpoints: number;
   bound: number;
-  /** sessions the classifier ran on after a turn checkpoint (model replied and output was applied) */
+  /** classifications started after a turn checkpoint; each runs detached and logs its outcome (or failure) when it returns */
   classified: number;
   errors: string[];
 }
@@ -160,19 +160,28 @@ async function structuredState(pool: pg.Pool, sessionId: string, threadId: strin
  * (spec §13a). Gated by config/env and a per-session rate limit; contained by its
  * own try/catch so a model failure never touches capture or checkpoints.
  */
-async function classifyAfterTurn(cfg: Config, pool: pg.Pool, sid: string, s: SessState, now: Date, sum: PassSummary, log: (m: string) => void): Promise<void> {
+function classifyAfterTurn(cfg: Config, pool: pg.Pool, sid: string, s: SessState, now: Date, sum: PassSummary, log: (m: string) => void): void {
   const gate = classifyAllowed(cfg, { now: now.getTime(), lastClassifyAt: s.lastClassifyAt });
   if (!gate.ok) return;
+  if (classifyInFlight.has(sid)) return; // a model call is still running for this session
   s.lastClassifyAt = now.getTime();
-  try {
-    const r = await classifySession(cfg, pool, sid, { now, log });
-    if (!r.model_ok) { log(`classify ${sid.slice(0, 8)}: ${r.error}`); return; }
-    if (!r.events_considered) return;
-    sum.classified++;
-    log(`classify ${sid.slice(0, 8)}: ${r.events_considered} events → ${r.assignments_applied} span(s) linked, ${r.records_created} new record(s), ${r.updates_proposed} update(s) proposed, ${r.unassigned.length} unassigned${r.rejected.length ? `, ${r.rejected.length} rejected` : ""}`);
-  } catch (e: any) {
-    log(`classify ${sid.slice(0, 8)} failed: ${String(e?.message ?? e).slice(0, 200)}`);
-  }
+  s.classifyInFlight = true;
+  sum.classified++; // counts starts; the outcome is logged when the detached call returns
+  const p = classifySession(cfg, pool, sid, { now, log })
+    .then((r) => {
+      if (!r.model_ok) { log(`classify ${sid.slice(0, 8)}: ${r.error}`); return; }
+      if (!r.events_considered) return;
+      log(`classify ${sid.slice(0, 8)}: ${r.events_considered} events → ${r.assignments_applied} span(s) linked, ${r.records_created} new record(s), ${r.updates_proposed} update(s) proposed, ${r.unassigned.length} unassigned${r.rejected.length ? `, ${r.rejected.length} rejected` : ""}`);
+    })
+    .catch((e: any) => log(`classify ${sid.slice(0, 8)} failed: ${String(e?.message ?? e).slice(0, 200)}`))
+    .finally(() => { classifyInFlight.delete(sid); s.classifyInFlight = false; });
+  classifyInFlight.set(sid, p);
+}
+
+/** Wait up to `ms` for detached classifications (tests; a daemon pass passes 0 and moves on). */
+async function awaitClassifications(ms: number): Promise<void> {
+  if (ms <= 0 || !classifyInFlight.size) return;
+  await Promise.race([Promise.allSettled([...classifyInFlight.values()]), new Promise((r) => setTimeout(r, ms))]);
 }
 
 /**
@@ -347,14 +356,14 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
             });
             sum.checkpoints++;
             if (!cp.advanced) log(`checkpoint ${cp.id.slice(0, 8)} did not advance head: ${cp.reason}`);
-            if (cpSignal) await classifyAfterTurn(cfg, pool, sid, s, now, sum, log);
+            if (cpSignal) classifyAfterTurn(cfg, pool, sid, s, now, sum, log);
           }
         } else if (cpSignal && routing.thread_id) {
           // nothing new on disk but a turn ended: still record the turn boundary
           const cp = await S.publishCheckpoint(pool, { thread_id: routing.thread_id, session_id: sid, generation: routing.generation, kind: "turn", through_event_seq: (await S.appendEvents(pool, sid, [], null, null)).lastSeq, base_commit: s.baseCommit, wip_ref: s.wipRef, wip_commit: s.lastCommit ?? null, verified_events_at: now, structured_state: await structuredState(pool, sid, routing.thread_id, []), capture_gaps: sh.gaps });
           sum.checkpoints++;
           if (!cp.advanced) log(`turn checkpoint did not advance head: ${cp.reason}`);
-          await classifyAfterTurn(cfg, pool, sid, s, now, sum, log);
+          classifyAfterTurn(cfg, pool, sid, s, now, sum, log);
         }
       }
 
@@ -383,6 +392,7 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
 
   // prune ended sessions from state after a day
   for (const [sid, s] of Object.entries(st)) if (s.ended && now.getTime() - s.lastSeenMtime > 86_400_000) delete st[sid];
+  await awaitClassifications(opts.classifyWaitMs ?? 0);
   saveState(st);
   return sum;
 }

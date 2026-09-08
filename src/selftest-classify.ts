@@ -488,7 +488,7 @@ let recLatency: import("./continuity/records.js").WorkRecord;
 
   // pass 1: no turn signal → snapshot checkpoint only, no classification
   clearPrompt();
-  const p1 = await helperOnce(cfg, { roots, now: T(101), push: true, log: quiet });
+  const p1 = await helperOnce(cfg, { roots, now: T(101), push: true, log: quiet, classifyWaitMs: 60_000 });
   assert.equal(p1.errors.length, 0, p1.errors.join(" | "));
   assert.equal(p1.bound, 1);
   assert.equal(p1.snapshots, 1);
@@ -499,7 +499,7 @@ let recLatency: import("./continuity/records.js").WorkRecord;
 
   // pass 2: Stop hook wrote a checkpoint signal; nothing new on disk → the turn-only branch → classify
   writeSignal(sid, "checkpoint");
-  const p2 = await helperOnce(cfg, { roots, now: T(102), push: true, log: quiet });
+  const p2 = await helperOnce(cfg, { roots, now: T(102), push: true, log: quiet, classifyWaitMs: 60_000 });
   assert.equal(p2.errors.length, 0, p2.errors.join(" | "));
   assert.equal(p2.snapshots, 0, "tree unchanged");
   assert.equal(p2.checkpoints, 1, "turn checkpoint recorded");
@@ -521,7 +521,7 @@ let recLatency: import("./continuity/records.js").WorkRecord;
   fs.utimesSync(tf, T(103), T(103));
   writeSignal(sid, "checkpoint");
   clearPrompt();
-  const p3 = await helperOnce(cfg, { roots, now: T(103), push: true, log: quiet });
+  const p3 = await helperOnce(cfg, { roots, now: T(103), push: true, log: quiet, classifyWaitMs: 60_000 });
   assert.equal(p3.errors.length, 0, p3.errors.join(" | "));
   assert.equal(p3.checkpoints, 1);
   assert.equal(p3.classified, 0);
@@ -532,7 +532,7 @@ let recLatency: import("./continuity/records.js").WorkRecord;
   fs.writeFileSync(path.join(repo, "src", "site.ts"), "export const footer = true; // v2\n");
   writeSignal(sid, "checkpoint");
   process.env.LEDGER_CLASSIFY = "0";
-  const p4 = await helperOnce(cfg, { roots, now: T(105), push: true, log: quiet });
+  const p4 = await helperOnce(cfg, { roots, now: T(105), push: true, log: quiet, classifyWaitMs: 60_000 });
   delete process.env.LEDGER_CLASSIFY;
   assert.equal(p4.errors.length, 0, p4.errors.join(" | "));
   assert.equal(p4.snapshots, 1, "new snapshot with the turn");
@@ -544,7 +544,7 @@ let recLatency: import("./continuity/records.js").WorkRecord;
   // pass 5: interval passed, switch off → classifies only the new events, through the snapshot+turn branch
   fs.writeFileSync(path.join(repo, "src", "site.ts"), "export const footer = true; // v3\n");
   writeSignal(sid, "checkpoint");
-  const p5 = await helperOnce(cfg, { roots, now: T(106), push: true, log: quiet });
+  const p5 = await helperOnce(cfg, { roots, now: T(106), push: true, log: quiet, classifyWaitMs: 60_000 });
   assert.equal(p5.errors.length, 0, p5.errors.join(" | "));
   assert.equal(p5.snapshots, 1);
   assert.equal(p5.classified, 1);
@@ -561,10 +561,11 @@ let recLatency: import("./continuity/records.js").WorkRecord;
   setCanned([{ marker: "Run the nightly backup", exit: 3 }]);
   writeSignal(sid, "checkpoint");
   const logs: string[] = [];
-  const p6 = await helperOnce(cfg, { roots, now: T(110), push: true, log: (m) => logs.push(m) });
+  const p6 = await helperOnce(cfg, { roots, now: T(110), push: true, log: (m) => logs.push(m), classifyWaitMs: 60_000 });
   assert.equal(p6.errors.length, 0, "a classifier failure is not a pass error");
   assert.equal(p6.checkpoints, 1, "the turn checkpoint was still published");
-  assert.equal(p6.classified, 0);
+  // `classified` counts classifications STARTED (the call is detached from the pass); the failure shows in the log
+  assert.equal(p6.classified, 1);
   assert.ok(logs.some((l) => /^classify 0199cccc: classifier failed/.test(l)), logs.join("\n"));
   ok("(e) daemon: a failing model is logged and the checkpoint still lands; capture never waits on the classifier");
 }

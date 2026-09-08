@@ -267,7 +267,9 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
   // ----- evidence across sessions, ordered by occurred_at, each attributed -----
   const evAll = await recordEvidence(pool, rec.id, { kinds: EVIDENCE_KINDS, limit: 2000, sources: COVERING });
   const evItem = (e: (typeof evAll)[number]): EvidenceItem => ({ session_id: e.session_id, author: e.author, harness: e.harness, seq: e.seq, kind: e.kind, at: e.occurred_at ? e.occurred_at.toISOString() : null, link_source: e.link_source, line: eventLine(e, EVIDENCE_PREVIEW) });
-  const spanFetches = [...new Set(covering.map((l) => `ledger_events(session_id: ${q(l.session_id)}, after_seq: ${l.from_seq - 1}, before_seq: ${l.to_seq + 1})`))];
+  // one fetch per span, in time order (the first evidence event each span contains); spans with no events last
+  const firstIdx = (l: { session_id: string; from_seq: number; to_seq: number }) => { const i = evAll.findIndex((e) => e.session_id === l.session_id && e.seq >= l.from_seq && e.seq <= l.to_seq); return i === -1 ? Number.MAX_SAFE_INTEGER : i; };
+  const spanFetches = [...new Set([...covering].sort((a, b) => firstIdx(a) - firstIdx(b)).map((l) => `ledger_events(session_id: ${q(l.session_id)}, after_seq: ${l.from_seq - 1}, before_seq: ${l.to_seq + 1})`))];
   const shapeEvidence = (headN: number, tailN: number) => {
     const headIdx = new Set<number>();
     evAll.forEach((e, i) => { if (e.kind === "instruction.added" && headIdx.size < headN) headIdx.add(i); });
@@ -469,8 +471,8 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
     for (const f of files.slice(0, fileMax)) L.push(`- ${f.path} ×${f.count}${f.last_at ? ` (${f.last_at.slice(11, 16)})` : ""}${f.recent ? " recent" : ""}`);
     if (files.length > fileMax) {
       const fetch = [...new Set(fileRows.map((r) => r.session_id))].map((sid) => `ledger_events(session_id: ${q(sid)}, kinds: ["file.changed"])`).join("; ");
-      L.push(`… ${files.length - fileMax} more; ${fetch}`);
-      om.push(`${files.length - fileMax} touched files${level >= 1 ? " (list shortened for budget)" : ""}; ${fetch}`);
+      L.push(fileMax === 0 ? `(list omitted for budget: ${files.length} files; ${fetch})` : `… ${files.length - fileMax} more; ${fetch}`);
+      om.push(`${files.length - fileMax} touched files${fileMax === 0 ? " (list omitted for budget)" : level >= 1 ? " (list shortened for budget)" : ""}; ${fetch}`);
     }
     L.push(``);
 
