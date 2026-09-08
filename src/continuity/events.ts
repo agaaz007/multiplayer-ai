@@ -337,9 +337,11 @@ function streamCodex(file: string, fromOffset: number, dataTools: string[]): Str
   const finishedByCall = new Map<string, NormEvent>();
   const metaByCall = new Map<string, { ev: NormEvent; fields: Record<string, unknown> }>();
   // requested but not yet finished in this read: lets an `exec-…` sub-call name its enclosing `exec` call.
+  // Heuristic, only when exactly one call is in flight and the id is not a model-issued `call_…` (whose own
+  // request may simply sit in an earlier read); the JS wrapper runs its sub-calls sequentially inside one call.
   const inflight = new Map<string, string>();
   const enclosing = (callId: string): Record<string, unknown> => {
-    if (inflight.has(callId) || inflight.size !== 1) return {};
+    if (callId.startsWith("call_") || inflight.has(callId) || inflight.size !== 1) return {};
     const [[id]] = inflight;
     return { enclosing_call_id: id };
   };

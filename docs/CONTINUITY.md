@@ -41,7 +41,7 @@ Documents:
 | Regex redaction and deny globs before spool | live, tested | `src/continuity/redact.ts` |
 | All drafts shown in brief and README, labeled not in force | live, tested | `src/query.ts`, `src/views.ts` |
 | Stop checkpoint clears on receipt-style record responses | live, tested | `src/hooks.ts` |
-| Work records: many-to-many session→record contributions, state updates with provenance | **in progress** (wave 1) | `src/continuity/records.ts` |
+| Work records store: three tables, span links, append-only state updates with provenance, projection, FTS over events | landed (wave 1), 10 checks green | `src/continuity/records.ts`, `src/continuity/db.ts`, `src/selftest-records.ts` |
 | Compaction summaries captured as events; Codex structured completion events as file/exit sources | **in progress** (wave 1) | `src/continuity/events.ts` |
 | Evidence query tools (`ledger_events`, `ledger_artifact_get`), recency-shaped pack, compaction spine | **in progress** (wave 1) | `src/continuity/resume.ts`, `src/mcp.ts` |
 | Classifier at turn checkpoints: spans → records, proposed state updates, unassigned surfaced | planned (wave 2) | `src/continuity/classify.ts` |
@@ -105,6 +105,9 @@ Dated, concrete, with the evidence. Add one whenever reality disagreed with the 
 - **2026-09-08 · Both harnesses already write model-authored compaction summaries.** Claude Code writes a structured document (observed 15 KB) as a user message flagged `isCompactSummary`; Codex writes `compacted` items. These are high-value evidence written while the model still held the full context. Sessions reach 105 MB, so they exist exactly where they matter. Previously discarded; being captured in wave 1.
 - **2026-09-08 · The resume pack kept the wrong end of long instruction lists.** Chronological from the front preserves the goal and drops what is recent. Recency-shaped: first instruction plus the last N.
 - **2026-09-08 · Shell data-tool matching is coarse.** `command -v psql` and a test string with a literal `psql` tripped the checkpoint. Tighten to require an actual query argument.
+- **2026-09-08 · A contract that takes `Pool | PoolClient` cannot open its own transaction.** The records layer needed atomic "insert update + bump record version" and got it with single-statement data-modifying CTEs, which are atomic on a Pool and compose inside a caller's transaction. Cheaper than widening the contract to `pg.Pool`.
+- **2026-09-08 · `drop table … cascade` in one test suite silently strips foreign keys from tables it does not know about.** The continuity suite dropped seven tables; the records suite's `cont_record_links_session_id_fkey` vanished from the shared test DB. Every suite now drops all ten. Per-agent test databases limited the blast radius; the rule is that any suite that resets schema must name every table.
+- **2026-09-08 · An "unassigned" marker link still needs a host record.** `RecordLink.record_id` is non-null, so a span nobody can place has nowhere to sit as a row; the records layer computes unassigned spans from coverage instead. Fine for now; the classifier reports unassigned spans in its result rather than persisting markers.
 
 ---
 
