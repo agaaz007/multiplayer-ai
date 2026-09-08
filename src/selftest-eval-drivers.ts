@@ -63,7 +63,7 @@ type OriginTurnDetail = import("./eval/origin.js").OriginTurnDetail;
 
 let step = 0;
 const ok = (msg: string) => console.log(`  ok ${++step}. ${msg}`);
-const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: ["ignore", "pipe", "pipe"] }).toString().trim();
+const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: ["ignore", "pipe", "pipe"] }).toString().trimEnd();
 const walk = (d: string): string[] => (fs.existsSync(d) ? fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(d, e.name)) : [path.join(d, e.name)])) : []);
 const readJson = (f: string) => JSON.parse(fs.readFileSync(f, "utf8"));
 
