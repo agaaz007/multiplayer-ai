@@ -57,6 +57,35 @@ const clip = (s: unknown, n: number) => {
   return t.length > n ? t.slice(0, n - 1) + "…" : t;
 };
 
+/**
+ * Codex's `exec` custom tool takes JavaScript source that calls
+ * tools.exec_command({cmd: "..."}) one or more times. Pull the literal cmd
+ * strings out so data-tool matching and the evidence pack see shell, not JS.
+ * Dynamic or template expressions stay as the raw source (never guessed).
+ */
+export function codexExecCommands(src: string): string {
+  const cmds: string[] = [];
+  const re = /\bcmd\s*:\s*("((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)')/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(src))) {
+    const raw = m[2] ?? m[3] ?? "";
+    try {
+      cmds.push(m[2] !== undefined ? JSON.parse(`"${raw}"`) : raw.replace(/\\'/g, "'"));
+    } catch {
+      cmds.push(raw);
+    }
+  }
+  return cmds.length ? cmds.join("\n") : src;
+}
+
+/** Codex tool output is a string, or an array of { type: "input_text", text } parts. */
+export function codexOutputText(o: unknown): string {
+  if (o == null) return "";
+  if (typeof o === "string") return o;
+  if (Array.isArray(o)) return o.map((c: any) => (typeof c === "string" ? c : c?.text ?? "")).join("");
+  return JSON.stringify(o);
+}
+
 function walk(dir: string, depth = 4): string[] {
   const out: string[] = [];
   if (!fs.existsSync(dir) || depth < 0) return out;
@@ -154,6 +183,11 @@ function parseCodex(file: string, dataTools: string[]): Evidence {
   const ev: Evidence = { agent: "codex", session_id: "", path: file, mtime: fs.statSync(file).mtimeMs, prompts: [], queries: [], records: [], conclusions: [] };
   const pending = new Map<string, EvidenceQuery>();
   const recordIds = new Map<string, { tool: string; title: string }>();
+  // Older rollouts carry prompts/replies as event_msg user_message/agent_message; newer ones as
+  // response_item message with a role. A file may contain both for the same turn, so collect the
+  // legacy shape separately and use it only when the newer shape yielded nothing.
+  const legacyPrompts: string[] = [];
+  const legacyConclusions: string[] = [];
   for (const j of lines(file)) {
     if (j.timestamp) {
       if (!ev.started) ev.started = j.timestamp;
@@ -164,17 +198,32 @@ function parseCodex(file: string, dataTools: string[]): Evidence {
       ev.session_id = String(p.id ?? ev.session_id);
       if (p.cwd) ev.cwd = p.cwd;
     } else if (j.type === "event_msg" && p.type === "user_message") {
+      // older rollout format (most of the corpus as of 2026-09-08)
       const m = String(p.message ?? "");
-      if (m && !m.startsWith("<")) ev.prompts.push(clip(m, 600));
+      if (m && !m.startsWith("<")) legacyPrompts.push(clip(m, 600));
     } else if (j.type === "event_msg" && p.type === "agent_message") {
-      if (p.message) ev.conclusions.push(clip(p.message, 1500));
-    } else if (j.type === "response_item" && p.type === "function_call") {
+      if (p.message) legacyConclusions.push(clip(p.message, 1500));
+    } else if (j.type === "response_item" && p.type === "message") {
+      // newer rollout format: role user|assistant|developer, content parts input_text|output_text.
+      // `developer` carries injected AGENTS.md / harness instructions and is never a human prompt.
+      const text = codexOutputText(p.content);
+      if (p.role === "user" && text && !text.startsWith("<") && !text.startsWith("# AGENTS.md")) ev.prompts.push(clip(text, 600));
+      else if (p.role === "assistant" && text.trim()) ev.conclusions.push(clip(text, 1500));
+    } else if (j.type === "response_item" && (p.type === "function_call" || p.type === "custom_tool_call")) {
+      // Two call shapes, verified against rollouts on 2026-09-08:
+      //   function_call     { name, call_id, arguments: JSON string }   e.g. exec_command, js, write_stdin
+      //   custom_tool_call  { name, call_id, input: raw string }        e.g. exec (JS wrapper around shell), apply_patch
+      // custom_tool_call is roughly a third of all Codex tool calls and was previously invisible.
       const name = String(p.name ?? "");
-      let input: any = {};
-      try {
-        input = typeof p.arguments === "string" ? JSON.parse(p.arguments) : p.arguments ?? {};
-      } catch {
-        input = { raw: String(p.arguments ?? "") };
+      let input: any;
+      if (p.type === "custom_tool_call") {
+        input = name === "exec" ? codexExecCommands(String(p.input ?? "")) : String(p.input ?? "");
+      } else {
+        try {
+          input = typeof p.arguments === "string" ? JSON.parse(p.arguments) : p.arguments ?? {};
+        } catch {
+          input = { raw: String(p.arguments ?? "") };
+        }
       }
       if (isLedgerRecord(name)) recordIds.set(p.call_id, { tool: name, title: clip(input?.title, 140) });
       else if (isDataTool(name, input, dataTools)) {
@@ -182,19 +231,22 @@ function parseCodex(file: string, dataTools: string[]): Evidence {
         ev.queries.push(q);
         pending.set(p.call_id, q);
       }
-    } else if (j.type === "response_item" && p.type === "function_call_output") {
+    } else if (j.type === "response_item" && (p.type === "function_call_output" || p.type === "custom_tool_call_output")) {
+      const out = codexOutputText(p.output);
       const q = pending.get(p.call_id);
       if (q) {
-        q.output = clip(p.output, 1200);
+        q.output = clip(out, 1200);
         pending.delete(p.call_id);
       }
       const r = recordIds.get(p.call_id);
       if (r) {
-        ev.records.push({ ...r, ok: /Recorded /.test(String(p.output ?? "")) });
+        ev.records.push({ ...r, ok: /Recorded /.test(out) });
         recordIds.delete(p.call_id);
       }
     }
   }
+  if (!ev.prompts.length) ev.prompts = legacyPrompts;
+  if (!ev.conclusions.length) ev.conclusions = legacyConclusions;
   if (!ev.session_id) {
     const m = path.basename(file).match(/([0-9a-f]{8}-[0-9a-f-]{27,})\.jsonl$/i);
     ev.session_id = m?.[1] ?? path.basename(file, ".jsonl");

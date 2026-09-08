@@ -176,18 +176,23 @@ export function brief(cfg: Config, opts: BriefOpts = {}): string {
   out.push(`## Findings, last ${days}d (${findings.length})`);
   out.push(findings.length ? findings.map(short).join("\n") : "_none_");
 
-  // Drafts from the transcript fallback are not knowledge yet; they are a review queue.
-  // A human's own `status: draft` object is their work in progress, not a review item.
-  const drafts = loadAll(cfg, TYPES, false).filter((o) => o.status === "draft" && o.fields.capture_method === "transcript_fallback" && byTag(o));
+  // Every draft is visible and labeled by origin. None is in force. Previously only transcript-fallback
+  // drafts were listed, which hid hand-recorded `status: draft` objects from every brief.
+  const drafts = loadAll(cfg, TYPES, false).filter((o) => o.status === "draft" && byTag(o));
   if (drafts.length) {
-    out.push(``, `## Drafts awaiting review (${drafts.length})`);
-    out.push(
-      `These were extracted from transcripts after live capture failed. They are NOT in force. For each: ledger_get it, then either record a stable ${"object"} with supersedes set to the draft id (after checking the numbers and assumptions), or ledger_discard_draft with a reason.`
-    );
-    for (const d of drafts.slice(0, 5)) {
-      out.push(`- ${d.type} ${d.id}: **${d.title}** — ${d.fields.capture_reason ?? ""} (${d.author}, ${d.created.slice(0, 10)})`);
+    const fallback = drafts.filter((o) => o.fields.capture_method === "transcript_fallback");
+    const manual = drafts.filter((o) => o.fields.capture_method !== "transcript_fallback");
+    out.push(``, `## Drafts, not in force (${drafts.length})`);
+    if (fallback.length) {
+      out.push(`Extracted from transcripts after live capture failed. For each: ledger_get it, then record a stable object with supersedes set to the draft id, or ledger_discard_draft with a reason.`);
+      for (const d of fallback.slice(0, 5)) out.push(`- [fallback] ${d.type} ${d.id}: **${d.title}** — ${d.fields.capture_reason ?? ""} (${d.author}, ${d.created.slice(0, 10)})`);
+      if (fallback.length > 5) out.push(`- …and ${fallback.length - 5} more fallback drafts: \`ledger drafts\``);
     }
-    if (drafts.length > 5) out.push(`- …and ${drafts.length - 5} more: \`ledger drafts\``);
+    if (manual.length) {
+      out.push(`Recorded by a person or their agent with status: draft. Work in progress, not a decision or finding in force; the owner promotes by recording a stable object with supersedes.`);
+      for (const d of manual.slice(0, 5)) out.push(`- [draft] ${d.type} ${d.id}: **${d.title}** (${d.author}, ${d.created.slice(0, 10)})`);
+      if (manual.length > 5) out.push(`- …and ${manual.length - 5} more drafts`);
+    }
   }
   return out.join("\n");
 }

@@ -180,6 +180,72 @@ export function installReconciler(): string[] {
   return log;
 }
 
+// ---------- the capture helper (execution continuity) ----------
+
+const HELPER_LABEL = "com.tranzmit.ledger.helper";
+
+/**
+ * Long-running local daemon: tails transcripts, shadow-commits worktrees,
+ * uploads to the shared store. macOS LaunchAgent with KeepAlive so it comes
+ * back after a crash and starts at login. Elsewhere: a systemd/cron hint.
+ */
+export function installHelper(): string[] {
+  const log: string[] = [];
+  const home = os.homedir();
+  const logFile = path.join(ledgerHome(), "helper.log");
+  fs.mkdirSync(path.dirname(logFile), { recursive: true });
+  const cmdArgs = [NODE, CLI, "helper", "start"];
+  if (process.platform !== "darwin") {
+    log.push(`helper: run as a service: ${cmdArgs.map(q).join(" ")} >> ${logFile} 2>&1  (systemd --user or nohup)`);
+    return log;
+  }
+  const plist = path.join(home, "Library", "LaunchAgents", `${HELPER_LABEL}.plist`);
+  fs.mkdirSync(path.dirname(plist), { recursive: true });
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>${HELPER_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>${cmdArgs.map((a) => `<string>${a.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</string>`).join("")}</array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>15</integer>
+  <key>EnvironmentVariables</key>
+  <dict><key>LEDGER_HOOKS_OFF</key><string>1</string><key>HOME</key><string>${home}</string><key>PATH</key><string>${path.dirname(NODE)}:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin</string></dict>
+  <key>StandardOutPath</key><string>${logFile}</string>
+  <key>StandardErrorPath</key><string>${logFile}</string>
+</dict>
+</plist>
+`;
+  fs.writeFileSync(plist, xml);
+  if (process.env.LEDGER_NO_LAUNCHD === "1") {
+    log.push(`helper: wrote ${plist} (not loaded: LEDGER_NO_LAUNCHD)`);
+    return log;
+  }
+  tryExec("launchctl", ["unload", plist]);
+  if (tryExec("launchctl", ["load", plist])) log.push(`helper: LaunchAgent ${HELPER_LABEL} loaded (KeepAlive), log ${logFile}`);
+  else log.push(`helper: wrote ${plist} but launchctl load failed; run: launchctl load ${plist}`);
+  log.push(`helper: stop with  launchctl unload ${plist}`);
+  return log;
+}
+
+export function helperStatus(): string[] {
+  const plist = path.join(os.homedir(), "Library", "LaunchAgents", `${HELPER_LABEL}.plist`);
+  const out: string[] = [];
+  out.push(fs.existsSync(plist) ? `launchd: ${plist}` : "launchd: not installed (ledger helper install)");
+  try {
+    const r = execFileSync("launchctl", ["list"], { stdio: ["ignore", "pipe", "ignore"] }).toString().split("\n").find((l) => l.includes(HELPER_LABEL));
+    out.push(r ? `launchctl: ${r.trim()} (pid status label)` : "launchctl: not loaded");
+  } catch { out.push("launchctl: unavailable"); }
+  const logFile = path.join(ledgerHome(), "helper.log");
+  if (fs.existsSync(logFile)) {
+    const tail = fs.readFileSync(logFile, "utf8").trim().split("\n").slice(-3);
+    out.push(`log tail:`, ...tail.map((l) => `  ${l.slice(0, 160)}`));
+  }
+  return out;
+}
+
 // ---------- Claude Code (also what Conductor runs) ----------
 
 export function installClaude(): string[] {

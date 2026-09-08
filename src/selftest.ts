@@ -326,7 +326,14 @@ const section = (h: string) => {
 };
 assert.ok(section("Draft").includes("Draft finding"), "draft listed under Draft");
 assert.ok(!section("Deprecated").includes("Draft finding"), "draft not listed as deprecated");
-assert.ok(!brief(cfg2).includes("Draft finding"), "drafts stay out of the brief");
+// Drafts are visible in the brief, but only in the labeled "not in force" section, never in the main sections.
+{
+  const b = brief(cfg2);
+  const cut = b.indexOf("## Drafts, not in force");
+  assert.ok(cut > 0, "brief has a drafts section when drafts exist");
+  assert.ok(!b.slice(0, cut).includes("Draft finding"), "draft absent from definitions/decisions/changes/findings sections");
+  assert.ok(b.slice(cut).includes("[draft] finding") && b.slice(cut).includes("Draft finding"), "manual draft listed and labeled as not in force");
+}
 
 // ---- the checkpoint loop (hooks) ----
 // Deterministic: a data query with no record blocks Stop exactly once with the
@@ -480,6 +487,40 @@ assert.equal(evB.queries.length, 1);
 assert.ok(evB.queries[0].output.includes("41200"));
 assert.equal(findTranscript(sidB, undefined, roots)?.path, codexT, "codex transcript found by session id");
 assert.equal(findTranscript(sidA, undefined, roots)?.agent, "claude");
+assert.deepEqual(evB.prompts, ["How many paywall impressions yesterday?"], "legacy event_msg prompts still read");
+assert.ok(evB.conclusions[0].includes("41,200"), "legacy event_msg agent_message still read");
+
+// Newer Codex rollout shapes, verified against real files 2026-09-08:
+//   custom_tool_call `exec` whose input is JS wrapping tools.exec_command({cmd}) calls, output as text parts;
+//   custom_tool_call `apply_patch` (a file edit, never a data query);
+//   response_item `message` with role user|assistant|developer instead of event_msg user_message/agent_message.
+const sidB2 = "01a07aed-4a46-74a2-986b-3fc96be8e6f6";
+const codexT2 = path.join(codexDay, `rollout-2026-09-03T10-00-00-${sidB2}.jsonl`);
+const execSrc = 'const r = await tools.exec_command({cmd:"psql -c \\"select count(*) from trials\\"", timeout: 5});\nreturn r;';
+fs.writeFileSync(
+  codexT2,
+  [
+    cl({ timestamp: "2026-09-03T10:00:00.000Z", type: "session_meta", payload: { id: sidB2, cwd: "/Users/x/proj" } }),
+    cl({ timestamp: "2026-09-03T10:00:01.000Z", type: "response_item", payload: { type: "message", role: "developer", content: [{ type: "input_text", text: "# AGENTS.md instructions for /Users/x/proj\n\n<INSTRUCTIONS>..." }] } }),
+    cl({ timestamp: "2026-09-03T10:00:02.000Z", type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "How many trials so far?" }] } }),
+    cl({ timestamp: "2026-09-03T10:00:03.000Z", type: "event_msg", payload: { type: "user_message", message: "How many trials so far?" } }),
+    cl({ timestamp: "2026-09-03T10:00:04.000Z", type: "response_item", payload: { type: "custom_tool_call", name: "exec", call_id: "call_x1", status: "completed", input: execSrc } }),
+    cl({ timestamp: "2026-09-03T10:00:05.000Z", type: "response_item", payload: { type: "custom_tool_call_output", call_id: "call_x1", output: [{ type: "input_text", text: "Script completed\nOutput:\n" }, { type: "input_text", text: " count\n-------\n  7712\n" }] } }),
+    cl({ timestamp: "2026-09-03T10:00:06.000Z", type: "response_item", payload: { type: "custom_tool_call", name: "apply_patch", call_id: "call_x2", status: "completed", input: "*** Begin Patch\n*** Update File: src/a.ts\n@@\n-old\n+new\n*** End Patch" } }),
+    cl({ timestamp: "2026-09-03T10:00:07.000Z", type: "response_item", payload: { type: "custom_tool_call_output", call_id: "call_x2", output: "Success. Updated the following files:\nM src/a.ts" } }),
+    cl({ timestamp: "2026-09-03T10:00:08.000Z", type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "7,712 trials so far." }] } }),
+    cl({ timestamp: "2026-09-03T10:00:09.000Z", type: "event_msg", payload: { type: "agent_message", message: "7,712 trials so far." } }),
+  ].join("\n") + "\n"
+);
+const evB2 = parseTranscript(codexT2);
+assert.equal(evB2.agent, "codex");
+assert.equal(evB2.session_id, sidB2);
+assert.deepEqual(evB2.prompts, ["How many trials so far?"], "new-format prompt read once; developer role and legacy duplicate excluded");
+assert.deepEqual(evB2.conclusions, ["7,712 trials so far."], "new-format assistant message read once");
+assert.equal(evB2.queries.length, 1, "custom exec with psql is a data query; apply_patch is not");
+assert.equal(evB2.queries[0].tool, "exec");
+assert.equal(evB2.queries[0].input, 'psql -c "select count(*) from trials"', "shell extracted from the JS wrapper");
+assert.ok(evB2.queries[0].output.includes("7712"), "array-of-parts output joined and paired");
 
 // the evidence keeps whole queries (the nudge's 200-char cap must not apply here)
 const longSql = "select " + Array.from({ length: 60 }, (_, i) => `col_${i}`).join(", ") + " from events where platform='android' and day between '2026-08-01' and '2026-08-31'";
@@ -579,10 +620,10 @@ saveJournal(jB, rdir);
 
 // drafts are a review queue, not knowledge
 const b2 = brief(cfg2);
-assert.ok(b2.includes("## Drafts awaiting review (1)") && b2.includes(draft.id), "brief lists the draft for review");
+assert.ok(b2.includes("## Drafts, not in force (") && b2.includes(`[fallback] finding ${draft.id}`), "brief lists the fallback draft, labeled, not in force");
 assert.ok(!b2.includes("9.3%"), "draft content stays out of the findings section");
 assert.ok(!search(cfg2, "Android trial CVR").some((h) => h.id === draft.id), "drafts are not search results");
-assert.ok(fs.readFileSync(path.join(dir, "README.md"), "utf8").includes("## Drafts awaiting review"), "dashboard shows the queue");
+assert.ok(fs.readFileSync(path.join(dir, "README.md"), "utf8").includes("## Drafts, not in force"), "dashboard shows the drafts section");
 assert.ok(stats(cfg2).includes("drafts created 1 (window), pending review 1, promoted 0, discarded 0"), stats(cfg2));
 assert.equal(pendingDrafts(cfg2).length, 1);
 
@@ -603,7 +644,7 @@ const promoted = record(cfg2, {
 });
 assert.equal(getById(cfg2, draft.id)?.status, "deprecated");
 assert.equal(getById(cfg2, draft.id)?.superseded_by, promoted.id);
-assert.ok(!brief(cfg2).includes("Drafts awaiting review"), "promoted draft leaves the queue");
+assert.ok(!brief(cfg2).includes(`[fallback] finding ${draft.id}`) && !brief(cfg2).includes("[fallback]"), "promoted draft leaves the drafts section");
 
 // discard
 const d2 = recordDraft(cfg2, { type: "decision", fields: { title: "Maybe drop Android", decision: "Drop Android paywall work" }, capture: { method: "transcript_fallback", session: sidB, reason: "test" } });

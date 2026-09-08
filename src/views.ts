@@ -184,13 +184,14 @@ function writeReadme(cfg: Config, all: LedgerObject[]): string {
     }
   } else md.push(`_none_`);
 
-  // Review queue from the transcript fallback. Not in force; shown so it gets handled.
-  const drafts = all.filter((o) => o.status === "draft" && o.fields.capture_method === "transcript_fallback");
+  // Every draft, labeled by origin. Not in force; shown so nothing sits unseen.
+  const drafts = all.filter((o) => o.status === "draft");
   if (drafts.length) {
-    md.push(``, `## Drafts awaiting review (${drafts.length})`, ``, `Extracted from transcripts after live capture failed. Not in force until someone records a stable object with \`supersedes\`, or discards.`, ``);
-    md.push(`| type | title | why the fallback ran | by | id |`, `|---|---|---|---|---|`);
+    md.push(``, `## Drafts, not in force (${drafts.length})`, ``, `Fallback drafts were extracted from transcripts after live capture failed. Manual drafts were recorded with status: draft by a person or their agent. Neither is in force until someone records a stable object with \`supersedes\`, or discards.`, ``);
+    md.push(`| origin | type | title | note | by | id |`, `|---|---|---|---|---|---|`);
     for (const o of drafts) {
-      md.push(`| ${o.type} | **${esc(o.title)}** | ${esc(o.fields.capture_reason ?? "")} | ${esc(o.author)} | ${link(o)} |`);
+      const fb = o.fields.capture_method === "transcript_fallback";
+      md.push(`| ${fb ? "fallback" : "manual"} | ${o.type} | **${esc(o.title)}** | ${esc(fb ? o.fields.capture_reason ?? "" : "")} | ${esc(o.author)} | ${link(o)} |`);
     }
   }
   md.push(``);

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { ledgerHome } from "./store.js";
+import { appendIndex, writeSignal } from "./helper/signals.js";
 
 /**
  * The checkpoint loop. Deterministic software decides WHEN to check for
@@ -93,11 +94,14 @@ export function saveJournal(j: Journal, dir = sessionsDir()): void {
   fs.writeFileSync(journalPath(j.session_id, dir), JSON.stringify(j, null, 2) + "\n");
 }
 
-/** Shell tools: Claude's Bash, Codex's exec_command / shell. */
-const SHELL_TOOLS = /^(Bash|exec_command|shell|container\.exec)$/;
+/** Shell tools: Claude's Bash; Codex's exec_command, and its `exec` custom tool whose input is shell text (or JS wrapping it). */
+const SHELL_TOOLS = /^(Bash|exec|exec_command|shell|container\.exec)$/;
 
 export function isDataTool(toolName: string, toolInput: any, patterns = DEFAULT_DATA_TOOLS): boolean {
-  if (SHELL_TOOLS.test(toolName)) return BASH_DATA.test(String(toolInput?.command ?? toolInput?.cmd ?? ""));
+  if (SHELL_TOOLS.test(toolName)) {
+    const src = typeof toolInput === "string" ? toolInput : String(toolInput?.command ?? toolInput?.cmd ?? "");
+    return BASH_DATA.test(src);
+  }
   return patterns.some((p) => new RegExp(p, "i").test(toolName));
 }
 
@@ -194,9 +198,16 @@ export function handleHook(event: string, input: any, opts: HookOpts = {}): Hook
     case "PostToolUse": {
       const tool = String(input?.tool_name ?? "");
       const text = responseText(input?.tool_response);
+      // continuity: index every tool call locally so the helper can reconcile the transcript against it
+      try { appendIndex(sessionId, { at: now, tool, id: input?.tool_use_id ? String(input.tool_use_id) : undefined }); } catch { /* best-effort */ }
       if (RECORD_TOOL.test(tool)) {
-        const m = text.match(/Recorded (?:finding|decision|change|definition) ((?:fnd|dec|chg|def)-[\w-]+)/);
-        if (m && !input?.tool_response?.isError) {
+        // Record tools answered "Recorded <type> <id>" originally and now return receipts ("Saved <type> …" with
+        // structuredContent.receipt.record_id). Accept either: take the id from the receipt when present, else the
+        // first ledger id anywhere in the response. A record that the hook fails to see never clears the checkpoint.
+        const resp = input?.tool_response;
+        const receiptId = resp?.structuredContent?.receipt?.record_id ?? resp?.receipt?.record_id;
+        const m = typeof receiptId === "string" ? [receiptId, receiptId] : (text + " " + JSON.stringify(resp ?? "")).match(/((?:fnd|dec|chg|def)-\d{8}-[\w-]+)/);
+        if (m && !resp?.isError) {
           j.entries.push({ at: now, kind: "record", tool, id: m[1], summary: clip(String(input?.tool_input?.title ?? "")) });
         }
       } else if (tool === SKIP_TOOL) {
@@ -213,6 +224,8 @@ export function handleHook(event: string, input: any, opts: HookOpts = {}): Hook
     }
 
     case "Stop": {
+      // continuity: end of turn is the primary `turn` checkpoint trigger; the helper does the work
+      try { writeSignal(sessionId, "checkpoint"); } catch { /* best-effort */ }
       const d = debt(j);
       if (!d.length) return { exit: 0 };
       const fp = fingerprint(d);
@@ -238,6 +251,7 @@ export function handleHook(event: string, input: any, opts: HookOpts = {}): Hook
     }
 
     case "PreCompact": {
+      try { writeSignal(sessionId, "checkpoint"); } catch { /* best-effort */ }
       const d = debt(j);
       if (!d.length) return { exit: 0 };
       j.entries.push({ at: now, kind: "compact", summary: fingerprint(d) });
@@ -254,6 +268,7 @@ export function handleHook(event: string, input: any, opts: HookOpts = {}): Hook
     }
 
     case "SessionEnd": {
+      try { writeSignal(sessionId, "end"); } catch { /* best-effort */ }
       const d = debt(j);
       if (d.length) {
         j.entries.push({ at: now, kind: "end", summary: `${d.length} uncaptured` });
