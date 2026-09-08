@@ -73,6 +73,10 @@ export interface StateUpdate {
   confirmed_by: string | null;
   confirmed_at: Date | null;
   supersedes: string | null;        // an earlier update this one replaces (kept, marked)
+  // rejection provenance, mirrors confirmation (additive; rows carry them, added to the type after implementation)
+  reject_reason?: string | null;
+  rejected_by?: string | null;
+  rejected_at?: Date | null;
 }
 
 export interface RecordState {

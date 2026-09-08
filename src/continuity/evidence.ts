@@ -36,8 +36,11 @@ export interface EventFilters {
   preview_chars?: number;
 }
 
+/** An event row plus the tool name resolved from its request when the result payload lacks one. */
+export type EventLineRow = EventRow & { tool_name?: string | null };
+
 export interface EventQueryResult {
-  events: EventRow[];
+  events: EventLineRow[];
   /** matching rows before the limit */
   total: number;
   truncated: boolean;
@@ -68,8 +71,14 @@ export async function queryEvents(q: Q, f: EventFilters): Promise<EventQueryResu
   if (f.before_seq != null) { params.push(Math.floor(f.before_seq)); where.push(`seq < $${params.length}`); }
   const w = where.join(" and ");
   const total = (await q.query<{ n: number }>(`select count(*)::int as n from cont_events where ${w}`, params)).rows[0].n;
-  const order = f.session_id ? "seq asc, id asc" : "id asc";
-  const r = await q.query<EventRow>(`select * from cont_events where ${w} order by ${order} limit ${limit}`, params);
+  const order = f.session_id ? "e.seq asc, e.id asc" : "e.id asc";
+  // a result row often carries no tool name (Codex outputs only have call_id): borrow it from the matching request
+  const r = await q.query<EventLineRow>(
+    `select e.*, case when e.kind = 'tool.finished' and e.payload->>'tool' is null and e.call_id is not null
+                      then (select r.payload->>'tool' from cont_events r where r.session_id = e.session_id and r.call_id = e.call_id and r.kind = 'tool.requested' order by r.seq desc limit 1) end as tool_name
+       from cont_events e where ${w} order by ${order} limit ${limit}`,
+    params
+  );
   const events = r.rows;
   const truncated = total > events.length;
   const lines = events.map((e) => eventLine(e, preview));
@@ -81,13 +90,14 @@ export async function queryEvents(q: Q, f: EventFilters): Promise<EventQueryResu
 }
 
 /** `seq · HH:MM · kind · <preview>`; tool.finished adds `[artifact <id>]` when one was stored. */
-export function eventLine(e: EventRow, previewChars = PREVIEW_CHARS): string {
+export function eventLine(e: EventLineRow, previewChars = PREVIEW_CHARS): string {
   const at = e.occurred_at ?? e.received_at;
   const hhmm = at ? new Date(at).toISOString().slice(11, 16) : "--:--";
   const p = e.payload ?? {};
   // a long preview is a request to read the event in full: keep its line structure
   const one = previewChars > PREVIEW_CHARS ? (s: unknown) => String(s ?? "").replace(/[ \t]+/g, " ").trim() : (s: unknown) => String(s ?? "").replace(/\s+/g, " ").trim();
   const clip = (s: string) => (s.length > previewChars ? s.slice(0, previewChars - 1) + "…" : s);
+  const tool = one(p.tool) || one(e.tool_name);
   let body: string;
   switch (e.kind) {
     case "instruction.added":
@@ -95,10 +105,10 @@ export function eventLine(e: EventRow, previewChars = PREVIEW_CHARS): string {
       body = one(p.text);
       break;
     case "tool.requested":
-      body = `${one(p.tool) || "tool"}: ${one(p.input)}`;
+      body = `${tool ? `${tool}: ` : ""}${one(p.input)}`;
       break;
     case "tool.finished":
-      body = `${one(p.tool) || "tool"}${p.is_error ? " ERROR" : ""}: ${one(p.output_preview) || one(p.stderr_preview)}`;
+      body = `${tool}${p.is_error ? " ERROR" : ""}${tool || p.is_error ? ": " : ""}${one(p.output_preview) || one(p.stderr_preview)}`;
       break;
     case "file.changed":
       body = `${one(p.path)}${p.status ? ` (${one(p.status)})` : ""}${p.source ? ` via ${one(p.source)}` : ""}`;
