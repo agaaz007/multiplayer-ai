@@ -42,10 +42,10 @@ Documents:
 | All drafts shown in brief and README, labeled not in force | live, tested | `src/query.ts`, `src/views.ts` |
 | Stop checkpoint clears on receipt-style record responses | live, tested | `src/hooks.ts` |
 | Work records store: three tables, span links, append-only state updates with provenance, projection, FTS over events | landed (wave 1), 10 checks green | `src/continuity/records.ts`, `src/continuity/db.ts`, `src/selftest-records.ts` |
-| Compaction summaries captured as events; Codex structured completion events as file/exit sources | **in progress** (wave 1) | `src/continuity/events.ts` |
-| Evidence query tools (`ledger_events`, `ledger_artifact_get`), recency-shaped pack, compaction spine | **in progress** (wave 1) | `src/continuity/resume.ts`, `src/mcp.ts` |
-| Classifier at turn checkpoints: spans → records, proposed state updates, unassigned surfaced | planned (wave 2) | `src/continuity/classify.ts` |
-| Retrieval by record across sessions and teammates; record tools; Open work + Unassigned in brief | planned (wave 2) | `src/continuity/resume.ts`, `src/mcp.ts` |
+| Compaction summaries captured as events (Claude text, Codex mostly markers); Codex `patch_apply_end` / `exec_command_end` / `mcp_tool_call_end` as file-change and exit-code sources; linear-cost tailing | landed (wave 1), 10 checks green, validated on 40 real files | `src/continuity/events.ts`, `src/selftest-events.ts` |
+| Evidence query tools (`ledger_events`, `ledger_artifact_get`), recency-shaped pack (first 3 + last 8), compaction spine, recent files, sources line, staged budget shrink | landed (wave 1), 8 checks green, verified over MCP stdio | `src/continuity/resume.ts`, `src/continuity/evidence.ts`, `src/selftest-resume.ts` |
+| Classifier at turn checkpoints: spans → records, proposed state updates, unassigned surfaced | **in progress** (wave 2) | `src/continuity/classify.ts`, `prompts/operations/classify.md` |
+| Retrieval by record across sessions and teammates; record tools; Open work + Unassigned in brief | **in progress** (wave 2) | `src/continuity/recordpack.ts`, `src/mcp.ts`, `src/continuity/brief.ts` |
 | Rachit's machine enrolled; real interrupted handoff test | pending Rachit | runbook |
 | Postgres backup and restore drill | planned | |
 
@@ -107,6 +107,11 @@ Dated, concrete, with the evidence. Add one whenever reality disagreed with the 
 - **2026-09-08 · Shell data-tool matching is coarse.** `command -v psql` and a test string with a literal `psql` tripped the checkpoint. Tighten to require an actual query argument.
 - **2026-09-08 · A contract that takes `Pool | PoolClient` cannot open its own transaction.** The records layer needed atomic "insert update + bump record version" and got it with single-statement data-modifying CTEs, which are atomic on a Pool and compose inside a caller's transaction. Cheaper than widening the contract to `pg.Pool`.
 - **2026-09-08 · `drop table … cascade` in one test suite silently strips foreign keys from tables it does not know about.** The continuity suite dropped seven tables; the records suite's `cont_record_links_session_id_fkey` vanished from the shared test DB. Every suite now drops all ten. Per-agent test databases limited the blast radius; the rule is that any suite that resets schema must name every table.
+- **2026-09-08 · The first tailing loop was quadratic.** `Buffer.byteLength(text.slice(0, pos))` per line re-encoded the prefix every time; on the 30 to 105 MB sessions in the corpus it would have stalled the helper. Rewritten to walk the raw buffer: 40 MB of Claude transcripts stream in 86 ms.
+- **2026-09-08 · Codex compaction rarely carries a summary.** Of 1,527 `compacted` lines in the corpus, `message` is empty in all and only about 7 have an assistant item in `replacement_history`. Claude's `isCompactSummary` messages (5 to 20 KB, 22 in the corpus) are the real compaction spine. Codex compaction events are still emitted as markers with window ids.
+- **2026-09-08 · Codex `exec_command_end` disappears from rollouts after July 2026.** Newer sessions route shell through the `exec` JS wrapper whose sub-calls carry `exec-<uuid>` ids that never match a request id. Exit codes attach where they can; otherwise `tool.result_meta` carries them with a best-effort enclosing call id. Format drift is the norm, not the exception; the hook-index reconciliation exists for this.
+- **2026-09-08 · `seq` is per session, so a thread-level cursor is ambiguous.** Thread queries page by insertion id and say so; pointers that must be exact (the compaction fetch) use `session_id`. Any future record-level cursor should carry `(session_id, seq)` pairs.
+- **2026-09-08 · "Full text via ledger_events" was a lie until previews became adjustable.** Default previews are 200 chars; the pack now emits a fetch call with `preview_chars` sized to the summary. Every "omitted, fetch with X" pointer must be checked against what X actually returns.
 - **2026-09-08 · An "unassigned" marker link still needs a host record.** `RecordLink.record_id` is non-null, so a span nobody can place has nowhere to sit as a row; the records layer computes unassigned spans from coverage instead. Fine for now; the classifier reports unassigned spans in its result rather than persisting markers.
 
 ---
