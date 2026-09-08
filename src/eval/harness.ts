@@ -20,9 +20,12 @@ import type { Harness } from "./types.js";
  *     cache_read_input_tokens, output_tokens, iterations: [{ input_tokens, output_tokens,
  *     cache_read_input_tokens, cache_creation_input_tokens, type }] }, modelUsage: { <model>: { inputTokens,
  *     outputTokens, cacheReadInputTokens, cacheCreationInputTokens, costUSD, contextWindow, … } }, … }.
- *     `usage` is the run total; `usage.iterations[i]` is one API call, so iterations[0] is the boot
- *     context (system prompt + tools + CLAUDE.md + first prompt). Claude's input_tokens EXCLUDES cache
- *     reads and cache writes; the tokens the model actually read are the sum of the three.
+ *     `usage` is the run total and matches the transcript's per-call sum exactly (62,207 = 62,207 in the
+ *     real smoke). `usage.iterations` is NOT one entry per API call: in a 2-call run it held ONE entry,
+ *     the last call (31,232) while the transcript's first call was 30,975. So the boot context (system
+ *     prompt + tools + CLAUDE.md + first prompt) is read from the transcript's first assistant line, and
+ *     iterations[0] is only a fallback. Claude's input_tokens EXCLUDES cache reads and cache writes; the
+ *     tokens the model actually read are the sum of the three.
  *     Transcript: ~/.claude/projects/<cwd with / and . replaced by ->/<session-id>.jsonl; each assistant
  *     line carries message.usage for its API call (the same message id may appear on several lines).
  *   Codex CLI 0.149.0    `codex exec -C <dir> --skip-git-repo-check -s workspace-write [-m m] --json -o <f> <prompt>`
@@ -284,9 +287,9 @@ export interface ClaudeJsonOutput {
   total_cost_usd: number | null;
   usage: ClaudeUsage | null;
   modelUsage: Record<string, unknown> | null;
-  /** input + cache creation + cache read of the first API call (usage.iterations[0]); null when iterations are absent */
-  bootTokens: number | null;
-  /** input + cache creation + cache read summed over every API call */
+  /** input + cache creation + cache read of usage.iterations[0]; observed to be the LAST call when several were made, so a fallback only */
+  iterationInput: number | null;
+  /** input + cache creation + cache read of the top-level usage: the run total, equal to the transcript's per-call sum */
   totalInputTokens: number | null;
   raw: Record<string, unknown>;
 }
@@ -324,8 +327,8 @@ export function readClaudeJsonOutput(stdout: string): ClaudeJsonOutput | null {
   if (!j || typeof j !== "object" || Array.isArray(j)) return null;
   const usage: ClaudeUsage | null = j.usage && typeof j.usage === "object" ? j.usage : null;
   const iterations = Array.isArray(usage?.iterations) ? usage!.iterations! : [];
-  const bootTokens = iterations.length ? claudeCallInput(iterations[0]) : null;
-  const totalInputTokens = iterations.length ? iterations.reduce((n, it) => n + (claudeCallInput(it) ?? 0), 0) : claudeCallInput(usage);
+  const iterationInput = iterations.length ? claudeCallInput(iterations[0]) : null;
+  const totalInputTokens = claudeCallInput(usage);
   return {
     session_id: typeof j.session_id === "string" ? j.session_id : null,
     result: typeof j.result === "string" ? j.result : j.result == null ? "" : JSON.stringify(j.result),
@@ -337,7 +340,7 @@ export function readClaudeJsonOutput(stdout: string): ClaudeJsonOutput | null {
     total_cost_usd: typeof j.total_cost_usd === "number" ? j.total_cost_usd : null,
     usage,
     modelUsage: j.modelUsage && typeof j.modelUsage === "object" ? j.modelUsage : null,
-    bootTokens,
+    iterationInput,
     totalInputTokens,
     raw: j,
   };
@@ -521,7 +524,7 @@ export interface TurnOutcome {
   sessionId: string | null;
   assistantText: string;
   usage: { input_tokens: number; output_tokens: number; cache_read: number } | null;
-  /** first model call input (see file header for what each harness reports) */
+  /** first model call input as the harness's machine output reports it; the transcript is the better source for both harnesses (see header) */
   bootTokens: number | null;
   totalInputTokens: number | null;
   ok: boolean;
@@ -549,7 +552,7 @@ export async function runHarnessTurn(spec: TurnSpec): Promise<TurnOutcome> {
       if (out.usage) {
         base.usage = { input_tokens: num(out.usage.input_tokens) + num(out.usage.cache_creation_input_tokens), output_tokens: num(out.usage.output_tokens), cache_read: num(out.usage.cache_read_input_tokens) };
       }
-      base.bootTokens = out.bootTokens;
+      base.bootTokens = out.iterationInput;
       base.totalInputTokens = out.totalInputTokens;
       if (out.is_error) failures.push(`harness reported is_error: ${out.result.slice(0, 300)}`);
     }
