@@ -18,6 +18,8 @@
     "dev": "tsc -p tsconfig.json --watch",
     "test": "npm run build && node dist/selftest.js",
     "test:continuity": "npm run build && node dist/selftest-continuity.js",
+    "test:events": "npm run build && node dist/selftest-events.js",
+    "test:resume": "npm run build && node dist/selftest-resume.js",
     "preview:ui": "npm run build && node scripts/preview-ui.mjs",
     "prepare": "npm run build"
   },
