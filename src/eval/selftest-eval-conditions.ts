@@ -27,6 +27,7 @@ const { repoIdentity } = await import("../continuity/shadow.js");
 const { initLedger, record } = await import("../store.js");
 const { pluginFor } = await import("./conditions/index.js");
 const { bootstrapWorktree, trialConfig } = await import("./conditions/ours.js");
+const { sessionShort } = await import("./conditions/gbrain.js");
 type TrialContext = import("./types.js").TrialContext;
 type OriginRun = import("./types.js").OriginRun;
 type FixtureEvent = import("./types.js").FixtureEvent;

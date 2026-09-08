@@ -29,6 +29,31 @@ const BODY_MAX = 6000;
 
 const norm = (s: string) => String(s ?? "").replace(/\s+/g, " ").trim();
 
+/**
+ * Short session ids for slugs. The tail of the id, not the head: Codex ids are uuid v7, so sessions created
+ * in the same hour share their leading hex and would collide as `s-<head>-<seq>`. Lengthened until unique
+ * within the trial.
+ */
+export function sessionShorts(ids: string[]): Map<string, string> {
+  const hex = (id: string) => id.replace(/-/g, "");
+  const out = new Map<string, string>();
+  for (let len = 8; len <= 32; len += 4) {
+    out.clear();
+    const seen = new Set<string>();
+    let clash = false;
+    for (const id of ids) {
+      const s = hex(id).slice(-len) || id;
+      if (seen.has(s)) { clash = true; break; }
+      seen.add(s);
+      out.set(id, s);
+    }
+    if (!clash) return out;
+  }
+  for (const id of ids) out.set(id, hex(id));
+  return out;
+}
+export const sessionShort = (id: string) => sessionShorts([id]).get(id)!;
+
 let bin: string | null = null;
 export function gbrainBin(): string {
   if (bin) return bin;
@@ -124,9 +149,10 @@ async function prepare(ctx: TrialContext, origin: OriginRun): Promise<{ notes: s
   fs.mkdirSync(stage, { recursive: true });
   const pages: Page[] = [];
   const ingested: { id: string; short: string; author: string; harness: string; events: number; pages: number }[] = [];
+  const shorts = sessionShorts(sessions.map((s) => s.id));
   for (const s of sessions) {
     const r = streamTranscript(s.transcript, 0, s.harness);
-    const short = s.id.slice(0, 8);
+    const short = shorts.get(s.id)!;
     const lines: string[] = [];
     let n = 0;
     r.events.forEach((e, i) => {
@@ -171,11 +197,16 @@ async function prepare(ctx: TrialContext, origin: OriginRun): Promise<{ notes: s
     }
   } else notes.push(`timeline entries skipped: ${pages.length} events exceed the ${TIMELINE_MAX_EVENTS}-event budget`);
 
-  // embeddings: optional; keyword search works without them
-  const emb = gb(ctx, ["embed", "--all"], { timeoutMs: 180_000 });
-  const embN = /Embedded (\d+) chunks/.exec(emb.stdout);
-  const embedOk = emb.ok && embN !== null && Number(embN[1]) > 0 && !/Error embedding/.test(emb.stdout + emb.stderr);
-  const embedWhy = embedOk ? "" : /OPENAI_API_KEY/.test(emb.stdout + emb.stderr) ? "no OPENAI_API_KEY" : (emb.stderr || emb.stdout).replace(/\s+/g, " ").slice(0, 160);
+  // embeddings: optional; keyword search works without them. Without a key `gbrain embed --all` sits for a
+  // minute and embeds nothing, so it is attempted only when a key is present (or forced with LEDGER_EVAL_GBRAIN_EMBED=1).
+  let embedOk = false;
+  let embedWhy = "skipped: no OPENAI_API_KEY";
+  if (process.env.OPENAI_API_KEY || process.env.LEDGER_EVAL_GBRAIN_EMBED === "1") {
+    const emb = gb(ctx, ["embed", "--all"], { timeoutMs: 180_000 });
+    const embN = /Embedded (\d+) chunks/.exec(emb.stdout);
+    embedOk = emb.ok && embN !== null && Number(embN[1]) > 0 && !/Error embedding/.test(emb.stdout + emb.stderr);
+    embedWhy = embedOk ? "" : /OPENAI_API_KEY/.test(emb.stdout + emb.stderr) ? "no OPENAI_API_KEY" : (emb.stderr || emb.stdout).replace(/\s+/g, " ").slice(0, 160);
+  }
 
   fs.writeFileSync(path.join(ctx.paths.homeDir, ".gbrain", INGEST_FILE), JSON.stringify({ sessions: ingested, pages: pages.length, session_pages: ingested.length, imported, timeline, embed_ok: embedOk, embed_note: embedWhy, at: new Date().toISOString() }, null, 2) + "\n");
   const secs = ((Date.now() - t0) / 1000).toFixed(1);
