@@ -76,8 +76,8 @@ function ensureBrain(ctx: TrialContext): void {
   const cfg = brainConfig(ctx);
   const dbPath = String(cfg?.database_path ?? "");
   const home = ctx.paths.homeDir;
-  const inside = (p: string) => p === home || p.startsWith(home.endsWith(path.sep) ? home : home + path.sep);
-  if (!cfg || !dbPath || !(inside(dbPath) || inside(realpath(dbPath)) || inside(realpath(home)) && realpath(dbPath).startsWith(realpath(home)))) {
+  const under = (p: string, root: string) => p.startsWith(root.endsWith(path.sep) ? root : root + path.sep);
+  if (!cfg || !dbPath || !(under(dbPath, home) || under(realpath(dbPath), realpath(home)))) {
     throw new Error(`gbrain brain is not isolated under the trial HOME (${home}): ${JSON.stringify(cfg)}`);
   }
 }
@@ -97,13 +97,13 @@ function eventBody(e: NormEvent): string {
 
 const yamlStr = (s: string) => JSON.stringify(s);
 
-interface Page { slug: string; kind: string; seq: number; body: string; at: string | undefined; session: string }
+interface Page { slug: string; kind: string; seq: number; text: string; body: string; at: string | undefined; session: string }
 
 function eventPage(e: NormEvent, seq: number, short: string, author: string, harness: string): Page {
-  const body = eventBody(e).slice(0, BODY_MAX);
+  const text = eventBody(e).slice(0, BODY_MAX);
   const at = e.occurred_at;
-  const md = `# ${e.kind} · session ${short} · seq ${seq}\n\n${body}\n\n(author: ${author}, harness: ${harness}, at: ${at ?? "unknown"})\n`;
-  return { slug: `s-${short}-${seq}`, kind: e.kind, seq, body: md, at, session: short };
+  const md = `# ${e.kind} · session ${short} · seq ${seq}\n\n${text}\n\n(author: ${author}, harness: ${harness}, at: ${at ?? "unknown"})\n`;
+  return { slug: `s-${short}-${seq}`, kind: e.kind, seq, text, body: md, at, session: short };
 }
 
 function writePage(dir: string, slug: string, title: string, type: string, tags: string[], body: string): void {
@@ -166,7 +166,7 @@ async function prepare(ctx: TrialContext, origin: OriginRun): Promise<{ notes: s
   if (pages.length <= TIMELINE_MAX_EVENTS) {
     for (const p of pages) {
       const date = (p.at ?? new Date().toISOString()).slice(0, 10);
-      const r = gb(ctx, ["timeline-add", p.slug, date, `${p.kind}: ${norm(eventBody({ kind: p.kind as NormEvent["kind"], producer_event_id: "", payload: {} })).slice(0, 0)}${norm(p.body.split("\n").slice(2).join(" ")).slice(0, 200)}`], { timeoutMs: 30_000 });
+      const r = gb(ctx, ["timeline-add", p.slug, date, `${p.kind}: ${norm(p.text).slice(0, 200)}`], { timeoutMs: 30_000 });
       if (r.ok) timeline++;
     }
   } else notes.push(`timeline entries skipped: ${pages.length} events exceed the ${TIMELINE_MAX_EVENTS}-event budget`);
