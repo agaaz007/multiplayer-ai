@@ -364,6 +364,210 @@ export function createMcpServer(cfg: Config) {
         }
       }
     );
+
+    // ---------- work records (spec §13a): retrieval by record across sessions and teammates ----------
+    const RECORD_KINDS = ["implementation", "investigation", "writing", "decision", "other"] as const;
+    const RECORD_STATUSES = ["open", "done", "archived"] as const;
+    const UPDATE_KINDS = ["progress", "decision", "hypothesis", "blocker", "next", "contradiction", "note"] as const;
+    const failed = (tool: string, e: any) => text(`${tool} failed: ${e?.message ?? String(e)}`);
+
+    server.registerTool(
+      "ledger_records",
+      {
+        title: "Open work records",
+        description: "List work records: the logical units of work that accumulate across sessions and teammates (a thread is one session's worktree; a record is one goal). One line each: kind · title · repo or non-code · updated · contributing sessions · proposed/confirmed updates · id. Records are cross-author by nature, so nobody is excluded. Pass cwd to see records on the repo you are in; q for a title/goal substring. Continue one with ledger_resume(record_id) or read it with ledger_record_get.",
+        inputSchema: {
+          cwd: z.string().optional().describe("A path inside the repo to filter by; defaults to all repos and non-code records"),
+          kind: z.enum(RECORD_KINDS).optional(),
+          status: z.enum(RECORD_STATUSES).default("open"),
+          author: z.string().optional().describe("Filter by the record's creator"),
+          q: z.string().optional().describe("Case-insensitive substring over title and goal"),
+          hours: z.number().int().min(1).max(24 * 365).default(336).describe("Only records updated within this many hours (default 14 days)"),
+          limit: z.number().int().min(1).max(50).default(15),
+        },
+        annotations: readOnly,
+      },
+      async ({ cwd, kind, status, author, q, hours, limit }) => {
+        try {
+          const root = cwd ? repoRoot(cwd) : null;
+          const rows = await listRecordSummaries(pool(), { repo: root ? repoIdentity(root) : undefined, kind, status, author, q, sinceHours: hours, limit });
+          return text(rows.length ? rows.map((r) => recordLine(r)).join("\n") : "No records match.");
+        } catch (e: any) {
+          return failed("ledger_records", e);
+        }
+      }
+    );
+
+    server.registerTool(
+      "ledger_record_get",
+      {
+        title: "Work record detail",
+        description: "The full record pack without claiming anything: state projection with [PROPOSED] items flagged and contradictions side by side, contributing sessions and authors, evidence across all of them in time order, the latest compaction summary as evidence, files touched, pending operations from the most recent contributing session, linked Ledger objects with supersession flags, unassigned spans that may belong, and the bootstrap when the record has a repo. Everything omitted for budget is named with the call that fetches it.",
+        inputSchema: {
+          record_id: z.string(),
+          budget_tokens: z.number().int().min(1500).max(40000).default(12000).describe("Raise to 20000 to see up to 50 state items per kind"),
+          cwd: z.string().optional().describe("Local checkout of the same repo, for the bootstrap rebase target"),
+        },
+        annotations: readOnly,
+      },
+      async ({ record_id, budget_tokens, cwd }) => {
+        try {
+          return text((await buildRecordPack(cfg, pool(), record_id, { mode: "inspect", author: cfg.author, repoPath: cwd, budgetTokens: budget_tokens })).text);
+        } catch (e: any) {
+          return failed("ledger_record_get", e);
+        }
+      }
+    );
+
+    server.registerTool(
+      "ledger_record_link",
+      {
+        title: "Link a span of a session to a record",
+        description: "Say that events from_seq..to_seq (inclusive) of a session contribute to a work record. The link is explicit (you named the record) and outranks any classifier suggestion over the same events. Use it for your own session's spans as you work, and for unassigned spans the brief or a record pack surfaced. Seqs are per session; see them with ledger_events(session_id).",
+        inputSchema: {
+          record_id: z.string(),
+          session_id: z.string().describe("The session whose events contribute; seq numbers are per session"),
+          from_seq: z.number().int().min(0),
+          to_seq: z.number().int().min(0),
+          note: z.string().max(500).optional().describe("Why this span belongs here"),
+        },
+      },
+      async ({ record_id, session_id, from_seq, to_seq, note }) => {
+        try {
+          const rec = await getRecord(pool(), record_id);
+          if (!rec) return text(`Not found: record ${record_id}`);
+          const l = await linkSpan(pool(), { record_id, session_id, from_seq, to_seq, source: "explicit", note: note ?? null, created_by: cfg.author });
+          return text(`Linked session ${session_id} seq ${from_seq}..${to_seq} to record "${rec.title}" (${rec.id}); link ${l.id}, explicit, by ${cfg.author}.`);
+        } catch (e: any) {
+          return failed("ledger_record_link", e);
+        }
+      }
+    );
+
+    server.registerTool(
+      "ledger_record_update",
+      {
+        title: "Propose, confirm, or reject a record state update",
+        description: "Append to a work record's state. action=propose adds a proposed update (kind: progress | decision | hypothesis | blocker | next | contradiction | note) with the exact events it rests on; it is never confirmed on propose and does not change state_version. action=confirm accepts a proposed update on the person's behalf and bumps state_version. action=reject declines one with a reason (kept in history). To replace an earlier update, propose a new one with supersedes; nothing is edited. A confirmed record state is still not a Ledger decision or finding; promote with ledger_record_decision / ledger_record_finding.",
+        inputSchema: {
+          record_id: z.string(),
+          action: z.enum(["propose", "confirm", "reject"]),
+          kind: z.enum(UPDATE_KINDS).optional().describe("propose: the update kind"),
+          text: z.string().max(4000).optional().describe("propose: the update, one or two sentences, stated so it could later be false"),
+          evidence: z.array(z.object({ session_id: z.string(), seq: z.number().int().min(0) })).optional().describe("propose: at least one exact event this update rests on"),
+          supersedes: z.string().optional().describe("propose: id of an earlier update this one replaces"),
+          update_id: z.string().optional().describe("confirm / reject: the update id"),
+          reason: z.string().max(1000).optional().describe("reject: why (required)"),
+        },
+      },
+      async ({ record_id, action, kind, text: body, evidence, supersedes, update_id, reason }) => {
+        try {
+          const rec = await getRecord(pool(), record_id);
+          if (!rec) return text(`Not found: record ${record_id}`);
+          if (action === "propose") {
+            if (!kind) return text("propose needs kind (progress | decision | hypothesis | blocker | next | contradiction | note).");
+            if (!body?.trim()) return text("propose needs text.");
+            if (!evidence?.length) return text("propose needs evidence: at least one { session_id, seq } the update rests on. A state update without evidence is a guess; find the event with ledger_events or ledger_evidence_search first.");
+            const u = await addStateUpdate(pool(), { record_id, kind, text: body, evidence, created_by: cfg.author, supersedes: supersedes ?? null });
+            return text(`Proposed ${u.kind} update ${u.id} on record "${rec.title}" (status proposed; state_version unchanged at ${rec.state_version}${u.supersedes ? `; supersedes ${u.supersedes}` : ""}). It renders as [PROPOSED] until a person confirms it: ledger_record_update(record_id: "${rec.id}", action: "confirm", update_id: "${u.id}").`);
+          }
+          if (!update_id) return text(`${action} needs update_id.`);
+          if (action === "confirm") {
+            const u = await confirmStateUpdate(pool(), update_id, cfg.author);
+            if (!u) return text(`Not found: update ${update_id}`);
+            const after = await getRecord(pool(), record_id);
+            return text(`Confirmed ${u.kind} update ${u.id} on record "${rec.title}" by ${u.confirmed_by} (state_version now ${after?.state_version ?? "?"}).`);
+          }
+          if (!reason?.trim()) return text("reject needs reason: say why the update is wrong or not durable; it is kept in history.");
+          const u = await rejectStateUpdate(pool(), update_id, cfg.author, reason);
+          if (!u) return text(`Not found: update ${update_id}`);
+          return text(`Rejected ${u.kind} update ${u.id} on record "${rec.title}": ${reason.trim()} (state_version unchanged at ${rec.state_version}).`);
+        } catch (e: any) {
+          return failed("ledger_record_update", e);
+        }
+      }
+    );
+
+    server.registerTool(
+      "ledger_record_start",
+      {
+        title: "Start a work record",
+        description: "Create a work record for a goal that will span sessions or teammates: an investigation, an implementation, a piece of writing, a decision in progress. Pass cwd inside a git repo for code work (the record gets that repo identity) or omit it for non-code work (hiring, copy, planning). Optionally link the span of your current session that already belongs to it.",
+        inputSchema: {
+          kind: z.enum(RECORD_KINDS),
+          title: z.string().min(3).max(200),
+          goal: z.string().max(2000).optional(),
+          cwd: z.string().optional().describe("A path inside the repo for code work; omit for non-code work"),
+          link: z.object({ session_id: z.string(), from_seq: z.number().int().min(0), to_seq: z.number().int().min(0) }).optional().describe("A span of a session to link explicitly at creation"),
+        },
+      },
+      async ({ kind, title, goal, cwd, link }) => {
+        try {
+          const root = cwd ? repoRoot(cwd) : null;
+          const repo = root ? repoIdentity(root) : null;
+          const rec = await createRecord(pool(), { kind, title, goal: goal ?? null, repo, created_by: cfg.author });
+          let linked = "";
+          if (link) {
+            const l = await linkSpan(pool(), { record_id: rec.id, session_id: link.session_id, from_seq: link.from_seq, to_seq: link.to_seq, source: "explicit", created_by: cfg.author });
+            linked = ` Linked session ${link.session_id} seq ${link.from_seq}..${link.to_seq} (link ${l.id}).`;
+          }
+          return text(`Record ${rec.id} "${rec.title}" (${rec.kind}) created${repo ? ` on ${repo}` : " as non-code work"} by ${cfg.author}.${linked} Propose state with ledger_record_update; link further spans with ledger_record_link.`);
+        } catch (e: any) {
+          return failed("ledger_record_start", e);
+        }
+      }
+    );
+
+    server.registerTool(
+      "ledger_unassigned",
+      {
+        title: "Unassigned spans",
+        description: "Spans of captured sessions that no work record claims (no explicit or suggested link): the material the classifier could not place and nobody linked. One line each with preview, seq range, author, harness, and time. Link a span with ledger_record_link or start a record for it with ledger_record_start; never invent what it is about.",
+        inputSchema: {
+          session_id: z.string().optional(),
+          author: z.string().optional(),
+          hours: z.number().int().min(1).max(24 * 365).default(48),
+          limit: z.number().int().min(1).max(50).default(10),
+        },
+        annotations: readOnly,
+      },
+      async ({ session_id, author, hours, limit }) => {
+        try {
+          const rows = await unassignedSpans(pool(), { session_id, author, sinceHours: hours, limit });
+          return text(rows.length ? rows.map((s) => unassignedLine(s)).join("\n") : "No unassigned spans match.");
+        } catch (e: any) {
+          return failed("ledger_unassigned", e);
+        }
+      }
+    );
+
+    server.registerTool(
+      "ledger_evidence_search",
+      {
+        title: "Full-text search over captured events",
+        description: "Postgres full-text search over captured evidence: human instructions, assistant messages, tool inputs, output previews, and compaction summaries, across every session. Narrow to a record's linked spans (record_id), one session, a repo (cwd), event kinds, or a time window. Returns ranked event lines with session, author, and harness; read one in full with ledger_events(session_id, after_seq, limit: 1, preview_chars). This searches evidence, not the knowledge ledger; use ledger_search for definitions, findings, changes, and decisions.",
+        inputSchema: {
+          q: z.string().min(2),
+          cwd: z.string().optional().describe("A path inside a repo to restrict to sessions on that repo"),
+          record_id: z.string().optional().describe("Restrict to events inside this record's linked spans"),
+          session_id: z.string().optional(),
+          kinds: z.array(z.string()).optional().describe('e.g. ["instruction.added","assistant.message"], ["compaction"], ["tool.requested"]'),
+          hours: z.number().int().min(1).max(24 * 365).optional(),
+          limit: z.number().int().min(1).max(200).default(20),
+        },
+        annotations: readOnly,
+      },
+      async ({ q, cwd, record_id, session_id, kinds, hours, limit }) => {
+        try {
+          const root = cwd ? repoRoot(cwd) : null;
+          const rows = await searchEvents(pool(), q, { repo: root ? repoIdentity(root) : undefined, record_id, session_id, kinds, sinceHours: hours, limit });
+          if (!rows.length) return text(`No events match "${q}"${record_id ? ` inside record ${record_id}` : ""}.`);
+          return text(rows.map((e) => `[${e.rank.toFixed(3)}] ${e.session_id.slice(0, 8)} ${e.author}/${e.harness} · ${eventLine(e)}`).join("\n"));
+        } catch (e: any) {
+          return failed("ledger_evidence_search", e);
+        }
+      }
+    );
   }
 
   return server;

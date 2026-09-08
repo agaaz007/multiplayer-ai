@@ -14,8 +14,10 @@ import { continuityConfigured, getPool, migrate, tableList, closePools } from ".
 import { listThreads, getThread, updateThread } from "./continuity/store.js";
 import { buildResumePack, threadLine } from "./continuity/resume.js";
 import { queryEvents, getArtifact } from "./continuity/evidence.js";
-import { checkoutWip, repoRoot } from "./continuity/shadow.js";
+import { checkoutWip, repoRoot, repoIdentity } from "./continuity/shadow.js";
 import { openThreadsText } from "./continuity/brief.js";
+import { buildRecordPack, listRecordSummaries, recordLine, unassignedLine } from "./continuity/recordpack.js";
+import { addStateUpdate, confirmStateUpdate, createRecord, getRecord, linkSpan, rejectStateUpdate, unassignedSpans, type RecordKind, type RecordStatus, type UpdateKind } from "./continuity/records.js";
 import { helperOnce, helperLoop, loadState } from "./helper/daemon.js";
 import { installHelper, helperStatus } from "./install.js";
 
@@ -46,7 +48,19 @@ const USAGE = `ledger — shared definitions, findings, changes, decisions for y
   ledger threads [--all] [--hours N]     open work threads (this repo by default)
   ledger resume <thread> [--mode continue|fork|inspect] [--checkout <dir>]
                                          claim + resume pack; --checkout creates a worktree at the saved snapshot
+  ledger resume --record <id> [--mode continue|inspect]
+                                         record pack: state across sessions and teammates; claims the latest contributing session's thread (code records)
   ledger thread show|close|title <id>
+  ledger records [--all] [--kind k] [--status s] [--q text] [--hours N] [--limit N]
+                                         open work records (this repo by default): kind · title · repo · updated · sessions · proposed/confirmed · id
+  ledger record show <id> [--budget N]   record pack without claiming: state (PROPOSED flagged), evidence, pending ops, unassigned, bootstrap
+  ledger record start <kind> <title…> [--goal g] [--link <session>:<from>:<to>]
+                                         new record (repo from cwd when inside a git repo, else non-code)
+  ledger record link <id> <session> <from> <to> [--note n]
+  ledger record propose <id> <kind> <text…> --evidence <session>:<seq>[,…] [--supersedes <update>]
+  ledger record confirm <update-id> | ledger record reject <update-id> --reason "..."
+  ledger unassigned [--hours N] [--session id] [--author a] [--limit N]
+                                         spans no record claims: preview, seq range, author, harness, time
   ledger events --thread <id> | --session <id> [--kinds a,b] [--path p] [--q text] [--after N] [--before N] [--limit N] [--chars N]
                                          evidence: one line per captured event (seq · HH:MM · kind · preview); --chars widens the preview
   ledger artifact <id|sha256> [--offset N] [--max N]
@@ -60,6 +74,26 @@ const USAGE = `ledger — shared definitions, findings, changes, decisions for y
 function flag(args: string[], name: string): string | undefined {
   const i = args.indexOf(name);
   return i === -1 ? undefined : args[i + 1];
+}
+
+const BOOL_FLAGS = new Set(["--all", "--plain", "--box", "--no-push", "--dry-run", "--show"]);
+/** Non-flag arguments, with `--name value` pairs and boolean flags removed. */
+function positionals(args: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a.startsWith("--")) { if (!BOOL_FLAGS.has(a)) i++; continue; }
+    out.push(a);
+  }
+  return out;
+}
+
+/** "<session>:<seq>" or "<session>:<from>:<to>", split from the right so session ids may contain colons. */
+function splitRef(s: string, n: number): { session_id: string; nums: number[] } {
+  const parts = s.split(":");
+  if (parts.length < n + 1) throw new Error(`expected <session>${":<n>".repeat(n)}, got ${s}`);
+  const nums = parts.slice(-n).map((x) => { const v = Number(x); if (!Number.isInteger(v) || v < 0) throw new Error(`not a seq: ${x}`); return v; });
+  return { session_id: parts.slice(0, -n).join(":"), nums };
 }
 
 function readStdin(): string {
@@ -298,9 +332,17 @@ async function main() {
       }
       case "resume": {
         const cfg = loadConfig();
-        const id = args[0];
-        if (!id) throw new Error("usage: ledger resume <thread-id> [--mode continue|fork|inspect] [--checkout <dir>]");
+        const recordId = flag(args, "--record");
         const mode = (flag(args, "--mode") ?? "continue") as "continue" | "fork" | "inspect";
+        if (recordId) {
+          if (mode === "fork") throw new Error("--mode fork applies to threads; use continue or inspect with --record");
+          const pack = await buildRecordPack(cfg, getPool(cfg), recordId, { mode, author: cfg.author, sessionId: `cli:${cfg.author}:${Date.now()}`, repoPath: process.cwd() });
+          console.log(pack.text);
+          await closePools();
+          return;
+        }
+        const id = args[0];
+        if (!id || id.startsWith("--")) throw new Error("usage: ledger resume <thread-id> [--mode continue|fork|inspect] [--checkout <dir>]  |  ledger resume --record <id> [--mode continue|inspect]");
         const pack = await buildResumePack(cfg, getPool(cfg), id, { mode, author: cfg.author, sessionId: `cli:${cfg.author}:${Date.now()}`, repoPath: process.cwd() });
         console.log(pack.text);
         const dest = flag(args, "--checkout");
