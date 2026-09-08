@@ -6,7 +6,7 @@ import { ledgerHome, type Config } from "../store.js";
 import { runExtractor } from "../extract.js";
 import * as S from "./store.js";
 import * as R from "./records.js";
-import type { RecordKind, UpdateKind, Span, WorkRecord, RecordLink, StateUpdate } from "./records.js";
+import type { RecordKind, UpdateKind, Span, WorkRecord, StateUpdate } from "./records.js";
 
 /**
  * Classifier (spec v1.2 §13a, D-009): runs at each `turn` checkpoint. Given the
@@ -44,6 +44,8 @@ export interface ClassifyResult {
   assignments_skipped: number;
   records_created: number;
   updates_proposed: number;
+  /** state updates this session already proposed with the same kind and text (idempotent re-run) */
+  updates_skipped: number;
   /** content events in the considered window not covered by any explicit/suggested link after apply, as contiguous spans */
   unassigned: (Span & { reason?: string })[];
   rejected: { item: unknown; reason: string }[];
@@ -162,7 +164,7 @@ function candidateLines(cands: Candidate[]): string {
   }).join("\n");
 }
 
-export function composeClassifyPrompt(cfg: Config, ctx: { session: S.SessionRow; thread: S.ThreadRow | null; candidates: Candidate[]; events: S.EventRow[]; sinceSeq: number; notes: string[]; today: string }): string {
+export function composeClassifyPrompt(ctx: { session: S.SessionRow; thread: S.ThreadRow | null; candidates: Candidate[]; events: S.EventRow[]; sinceSeq: number; notes: string[]; today: string }): string {
   const s = ctx.session;
   const run = [
     `# This run`,
@@ -224,7 +226,7 @@ export async function classifySession(cfg: Config, pool: pg.Pool, sessionId: str
   const dryRun = Boolean(opts.dryRun);
   const maxEvents = Math.max(1, opts.maxEvents ?? DEFAULT_MAX_EVENTS);
   const res: ClassifyResult = {
-    session_id: sessionId, events_considered: 0, candidates: 0, assignments_applied: 0, assignments_skipped: 0, records_created: 0, updates_proposed: 0,
+    session_id: sessionId, events_considered: 0, candidates: 0, assignments_applied: 0, assignments_skipped: 0, records_created: 0, updates_proposed: 0, updates_skipped: 0,
     unassigned: [], rejected: [], prompt_chars: 0, model_ok: false, notes: [], since_seq: 0, through_seq: 0, dry_run: dryRun,
   };
   const fail = (msg: string): ClassifyResult => { res.error = msg; return res; };
@@ -265,14 +267,14 @@ export async function classifySession(cfg: Config, pool: pg.Pool, sessionId: str
 
   // 3. prompt, trimmed from the oldest end to the size cap
   const today = now.toISOString().slice(0, 10);
-  let prompt = composeClassifyPrompt(cfg, { session, thread, candidates, events, sinceSeq, notes: res.notes, today });
+  let prompt = composeClassifyPrompt({ session, thread, candidates, events, sinceSeq, notes: res.notes, today });
   if (prompt.length > PROMPT_CHAR_CAP) {
     let dropped = 0;
     while (prompt.length > PROMPT_CHAR_CAP && events.length > 1) {
       events = events.slice(1);
       dropped++;
       const notes = [...res.notes, `${dropped} oldest event(s) dropped to fit the prompt cap; the window starts at seq ${events[0].seq}`];
-      prompt = composeClassifyPrompt(cfg, { session, thread, candidates, events, sinceSeq, notes, today });
+      prompt = composeClassifyPrompt({ session, thread, candidates, events, sinceSeq, notes, today });
     }
     res.notes.push(`${dropped} oldest event(s) dropped to fit the prompt cap; the window starts at seq ${events[0].seq}`);
   }
@@ -368,7 +370,7 @@ export async function classifySession(cfg: Config, pool: pg.Pool, sessionId: str
     // idempotent: the same proposal from this session on a candidate is not repeated
     if (target.record_id) {
       const c = byId.get(target.record_id)!;
-      if (c.updates.some((x) => x.session_id === sessionId && x.created_by === CREATED_BY && x.kind === u.kind && x.text === text)) { res.assignments_skipped += 0; continue; }
+      if (c.updates.some((x) => x.session_id === sessionId && x.created_by === CREATED_BY && x.kind === u.kind && x.text === text)) { res.updates_skipped++; continue; }
     }
     acceptedUpdates.push({ record_ref: ref, kind: u.kind, text, evidence_seqs, confidence: u.confidence, target });
   }
