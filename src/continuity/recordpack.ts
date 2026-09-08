@@ -308,7 +308,11 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
     fm.set(p, cur);
   }
   const files: RecordPack["files"] = [...fm].map(([p, v]) => ({ path: p, count: v.count, last_at: v.last ? new Date(v.last).toISOString() : null, recent: v.recent }))
-    .sort((a, b) => Number(b.recent) - Number(a.recent) || (a.recent && b.recent ? (b.last_at! > a.last_at! ? 1 : b.last_at! < a.last_at! ? -1 : 0) : 0) || b.count - a.count || a.path.localeCompare(b.path));
+    .sort((a, b) => {
+      if (a.recent !== b.recent) return a.recent ? -1 : 1;
+      if (a.recent && b.recent && a.last_at !== b.last_at) return (b.last_at ?? "") < (a.last_at ?? "") ? -1 : 1;
+      return b.count - a.count || a.path.localeCompare(b.path);
+    });
   const recentFiles = files.filter((f) => f.recent).map(({ path: p, count, last_at }) => ({ path: p, count, last_at }));
 
   // ----- pending operations from the most recent contributing session, inside its spans; last error inside any span -----
