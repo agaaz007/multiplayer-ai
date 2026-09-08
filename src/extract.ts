@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync, execSync } from "node:child_process";
+import { execFileSync, execSync, execFile, exec } from "node:child_process";
 import { type Config, loadAll, recordDraft } from "./store.js";
 import { TYPES, type LedgerType } from "./schema.js";
 import { type Journal, debt, loadJournal, saveJournal, sessionsDir, DEFAULT_DATA_TOOLS } from "./hooks.js";
@@ -156,6 +156,54 @@ export function runExtractor(prompt: string, cfg: Config): string {
     return fs.existsSync(outFile) ? fs.readFileSync(outFile, "utf8") : "";
   }
   throw new Error("no extractor available: install claude or codex, or set LEDGER_EXTRACTOR_CMD");
+}
+
+/**
+ * Same provider order and arguments as runExtractor, without blocking the event
+ * loop. The helper daemon uses this so a model call for classification never
+ * stalls tailing or snapshots for other sessions.
+ */
+export function runExtractorAsync(prompt: string, cfg: Config): Promise<string> {
+  const env = { ...process.env, LEDGER_HOOKS_OFF: "1" };
+  const run = (file: string, args: string[], captureStdout = true): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const child = execFile(file, args, { env, timeout: 300_000, maxBuffer: 8 << 20 }, (e: any, stdout, stderr) => {
+        if (e) {
+          const err = String(stderr ?? "").trim() || String(stdout ?? "").trim() || String(e?.message ?? e);
+          reject(new Error(`${file} ${args.slice(0, 2).join(" ")}: ${err.slice(0, 300)}`));
+        } else resolve(captureStdout ? String(stdout ?? "") : "");
+      });
+      child.stdin?.end(prompt);
+    });
+  const cmd = process.env.LEDGER_EXTRACTOR_CMD;
+  if (cmd) {
+    return new Promise((resolve, reject) => {
+      const child = exec(cmd, { env, timeout: 120_000, maxBuffer: 8 << 20 }, (e: any, stdout, stderr) => {
+        if (e) reject(new Error(`extractor cmd: ${String(stderr ?? e?.message ?? e).slice(0, 300)}`));
+        else resolve(String(stdout ?? ""));
+      });
+      child.stdin?.end(prompt);
+    });
+  }
+  const want = process.env.LEDGER_EXTRACTOR || cfg.extractor || "auto";
+  const has = (bin: string) => {
+    try {
+      execFileSync("sh", ["-c", `command -v ${bin}`], { stdio: "ignore" });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const useClaude = want === "claude" || (want === "auto" && has("claude"));
+  const useCodex = want === "codex" || (want === "auto" && !useClaude && has("codex"));
+  if (useClaude) return run("claude", ["-p", "--output-format", "text", "--no-session-persistence", "--tools", ""]);
+  if (useCodex) {
+    const outFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "ledger-x-")), "last.md");
+    return run("codex", ["exec", "--ephemeral", "--skip-git-repo-check", "-s", "read-only", "-o", outFile, "-"], false).then(() =>
+      fs.existsSync(outFile) ? fs.readFileSync(outFile, "utf8") : ""
+    );
+  }
+  return Promise.reject(new Error("no extractor available: install claude or codex, or set LEDGER_EXTRACTOR_CMD"));
 }
 
 export interface ExtractorOutput {
