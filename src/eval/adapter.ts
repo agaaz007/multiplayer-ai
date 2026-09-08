@@ -75,8 +75,12 @@ function cliVersion(h: Harness): string {
 /**
  * Real drivers and plugins live in sibling modules owned by the driver agents. They are loaded by
  * name at runtime so this file compiles before they land; the adaptation to their exports is here
- * and nowhere else. Expected exports: fixture.js { createTrial, cleanupTrial }, origin.js { runOrigin },
- * successor.js { runSuccessor }, harness.js { harnessVersion? }, conditions/<c>.js { default | plugin | <c>Plugin }.
+ * and nowhere else. Driver exports (per the drivers agent, 2026-09-08):
+ *   fixture.js   createTrial(request, condition, { log }) / cleanupTrial(ctx, { keep })
+ *   origin.js    runOrigin(ctx, events)
+ *   successor.js runSuccessor(ctx, setup, resumePrompt, answerKeys)
+ *   harness.js   harnessVersion(h)                       (optional; falls back to `<harness> --version`)
+ *   conditions/<c>.js  default | plugin | <c>Plugin | <c>   (a ConditionPlugin, optionally with bootstrapWorktree)
  */
 async function loadReal(condition: Condition): Promise<{ drivers: Drivers; plugin: EvalPlugin }> {
   const load = async (rel: string): Promise<any> => import(new URL(rel, import.meta.url).href);
@@ -94,10 +98,10 @@ async function loadReal(condition: Condition): Promise<{ drivers: Drivers; plugi
   const runSuccessor = successor.runSuccessor ?? successor.default;
   for (const [n, f] of Object.entries({ createTrial, cleanupTrial, runOrigin, runSuccessor })) if (typeof f !== "function") throw new Error(`driver export missing: ${n}`);
   const drivers: Drivers = {
-    createTrial: (request, cond, log) => createTrial(request, cond, log),
-    cleanupTrial: (ctx, keep) => cleanupTrial(ctx, keep),
+    createTrial: (request, cond, log) => createTrial(request, cond, { log }),
+    cleanupTrial: (ctx, keep) => cleanupTrial(ctx, { keep }),
     runOrigin: (ctx, events) => runOrigin(ctx, events),
-    runSuccessor: (ctx, setup) => runSuccessor(ctx, setup),
+    runSuccessor: (ctx, setup, resumePrompt, answerKeys) => runSuccessor(ctx, setup, resumePrompt, answerKeys),
     harnessVersion: (h) => { try { const v = harness?.harnessVersion?.(h); if (typeof v === "string" && v) return v; } catch { /* fall through */ } return cliVersion(h); },
   };
   return { drivers, plugin };
@@ -138,7 +142,7 @@ interface Timings { [k: string]: number }
 
 async function runTrial(request: AdapterRequest, args: Args, log: (l: string) => void, timings: Timings): Promise<Observation> {
   const runner: EvalCaseRunner = runnerFor(request.case.id);
-  const base: Observation["provenance"] = { mode: "live", system_revision: gitHead(REPO_ROOT), run_ref: request.trial_id, condition: args.condition, topology: "same-machine" };
+  const base = { mode: "live" as const, system_revision: gitHead(REPO_ROOT), run_ref: request.trial_id, condition: args.condition, topology: "same-machine" as const };
   if (runner.skip) {
     log(`case ${request.case.id} skipped: ${runner.skip}`);
     return { status: "skipped", reason: runner.skip, provenance: base };
@@ -190,7 +194,7 @@ async function runTrial(request: AdapterRequest, args: Args, log: (l: string) =>
 
     t = Date.now();
     const successorStartedAt = Date.now();
-    const successor: SuccessorRun = await drivers.runSuccessor(ctx, setup);
+    const successor: SuccessorRun = await drivers.runSuccessor(ctx, setup, request.case.resume_prompt, request.case.answer_keys);
     timings.successor_ms = Date.now() - t;
     log(`successor: ${successor.harness} session ${successor.sessionId}, ${successor.toolCalls.length} tool calls, boot ${successor.bootTokens ?? "?"} tokens, ${successor.wallMs} ms, output ${successor.output ? "parsed" : "NOT parsed"}`);
 

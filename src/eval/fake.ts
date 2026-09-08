@@ -22,7 +22,7 @@ export interface Drivers {
   createTrial(request: AdapterRequest, condition: Condition, log: (line: string) => void): Promise<TrialContext>;
   cleanupTrial(ctx: TrialContext, keep: boolean): Promise<void>;
   runOrigin(ctx: TrialContext, events: FixtureEvent[]): Promise<OriginRun>;
-  runSuccessor(ctx: TrialContext, setup: Awaited<ReturnType<ConditionPlugin["successorSetup"]>>): Promise<SuccessorRun>;
+  runSuccessor(ctx: TrialContext, setup: Awaited<ReturnType<ConditionPlugin["successorSetup"]>>, resumePrompt: string, answerKeys: string[]): Promise<SuccessorRun>;
   harnessVersion(h: Harness): string;
 }
 
@@ -95,11 +95,11 @@ export const fakeDrivers: Drivers = {
     fs.writeFileSync(path.join(ctx.paths.rawDir, "origin-fake.jsonl"), turns.map((t) => JSON.stringify({ session: t.sessionId, turn: t.turnIndex, event: t.fixtureEventId })).join("\n") + "\n");
     return { harness: ctx.originHarness, sessionIds: sessions.map((s) => `fake-origin-${s}`), turns, transcriptPaths: [], totalInputTokens: turns.reduce((a, t) => a + (t.usage?.input_tokens ?? 0), 0), compactions: 0, ...(Date.now() - t0 ? {} : {}) };
   },
-  async runSuccessor(ctx, setup) {
+  async runSuccessor(ctx, setup, resumePrompt, answerKeys) {
     const t0 = Date.now();
     const c = ctx.request.case;
     const by = (id: string) => c.events.find((e) => e.id === id)?.text ?? `(missing ${id})`;
-    const answers: Record<string, unknown> = scriptedAnswers(c.id, by, c.answer_keys);
+    const answers: Record<string, unknown> = scriptedAnswers(c.id, by, answerKeys);
     const wrong = process.env.LEDGER_EVAL_FAKE_WRONG;
     if (wrong) {
       const m = wrong.match(/^([^:]+):([^=]+)=([\s\S]*)$/);
@@ -112,7 +112,7 @@ export const fakeDrivers: Drivers = {
     const at = (ms: number) => new Date(t0 + ms).toISOString();
     const packLines = noRetrieval ? ["(no matching events)"] : c.events.slice(0, 60).map((e, i) => `#${i + 1} instruction.added ${e.author} ${e.session} "${e.text}"`);
     const toolCalls: SuccessorRun["toolCalls"] = [
-      { tool: "ledger_resume", input: JSON.stringify({ query: c.resume_prompt.slice(0, 60) }), output_preview: `Resume pack (fake)\ncwd: ${setup.cwd}\n${packLines.join("\n")}\n`, at: at(120), call_id: "fake-call-1" },
+      { tool: "ledger_resume", input: JSON.stringify({ query: resumePrompt.slice(0, 60) }), output_preview: `Resume pack (fake)\ncwd: ${setup.cwd}\n${packLines.join("\n")}\n`, at: at(120), call_id: "fake-call-1" },
       { tool: "ledger_events", input: JSON.stringify({ kinds: ["instruction.added"] }), output_preview: noRetrieval ? "[]" : JSON.stringify(c.events.slice(0, 60).map((e, i) => ({ seq: i + 1, kind: "instruction.added", text: e.text }))), at: at(240), call_id: "fake-call-2" },
     ];
     const idsFile = path.join(ctx.paths.rawDir, "ledger-ids.json");
@@ -120,7 +120,7 @@ export const fakeDrivers: Drivers = {
       const ids = JSON.parse(fs.readFileSync(idsFile, "utf8")) as Record<string, string>;
       toolCalls.push({ tool: "ledger_get", input: JSON.stringify({ id: ids["metric-v2"] }), output_preview: Object.entries(ids).map(([ev, id]) => `${id}\n  decision: ${by(ev)}`).join("\n\n") + "\n", at: at(360), call_id: "fake-call-3" });
     }
-    return { harness: ctx.successorHarness, sessionId: `fake-successor-${ctx.request.trial_id}`, transcriptPath: null, output, rawOutputPath, toolCalls, bootTokens: 4200 + c.resume_prompt.length, totalInputTokens: 9000 + c.events.length * 40, wallMs: Date.now() - t0 + 400 };
+    return { harness: ctx.successorHarness, sessionId: `fake-successor-${ctx.request.trial_id}`, transcriptPath: null, output, rawOutputPath, toolCalls, bootTokens: 4200 + resumePrompt.length, totalInputTokens: 9000 + c.events.length * 40, wallMs: Date.now() - t0 + 400 };
   },
   harnessVersion: () => "fake-harness-0",
 };
