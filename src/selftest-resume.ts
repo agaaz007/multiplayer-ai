@@ -92,7 +92,8 @@ const A = await fixture("forty", { lastSeen: T(40), events: forty });
 
 // ---------- artifact first, so a tool.finished event can reference it ----------
 const artText = Array.from({ length: 500 }, (_, i) => `line ${String(i + 1).padStart(4, "0")}: ${"x".repeat(40)}\n`).join("");
-assert.equal(artText.length, 25_500);
+const AL = artText.length;
+assert.equal(AL, 26_000);
 const artSha = crypto.createHash("sha256").update(artText).digest("hex");
 const art = await S.putArtifact(pool, { sha256: artSha, kind: "tool_output", bytes: Buffer.from(artText, "utf8"), session_id: null });
 assert.equal(art.existed, false);
@@ -182,7 +183,7 @@ const packB = await buildResumePack(cfg, pool, B.t.id, { mode: "inspect", author
   assert.equal(pack.files_touched.length, 4);
   const hdr = `## Files touched in the last ${RECENT_FILES_MINUTES} minutes of the source session (2)`;
   assert.ok(pack.text.includes(hdr) && pack.text.indexOf(hdr) < pack.text.indexOf("## Files touched (4)"), "recent subsection precedes the full list");
-  assert.ok(pack.text.includes("- src/also-recent.ts ×1 (02:59)") && pack.text.includes("- src/recent.ts ×2 (02:50)"));
+  assert.ok(pack.text.includes("- src/also-recent.ts ×1 (03:59)") && pack.text.includes("- src/recent.ts ×2 (03:50)"), "recent lines carry the last-change time");
   assert.equal(pack.session_summary, null, "a compaction event with empty text is not a summary");
   assert.ok(!pack.text.includes("## Session summary"));
   // thread B: the only recent file is also the top of the full list, so the subsection is skipped
@@ -232,7 +233,7 @@ const packB = await buildResumePack(cfg, pool, B.t.id, { mode: "inspect", author
   assert.equal(page1.truncated, true);
   assert.equal(page1.next_after_seq, 3);
   assert.deepEqual(page1.events.map((e) => e.seq), [1, 2, 3]);
-  assert.ok(page1.text.endsWith(`showing 3 of ${bEvents.length} matching; next: after_seq=3`), page1.text.split("\n").pop());
+  assert.ok(page1.text.endsWith(`showing 3 of ${bEvents.length} matching; next: after_seq=3`), page1.text.split("\n").pop() ?? "");
   const page2 = await queryEvents(pool, { session_id: B.sid, limit: 3, after_seq: page1.next_after_seq! });
   assert.deepEqual(page2.events.map((e) => e.seq), [4, 5, 6], "cursor continues");
   assert.equal((await queryEvents(pool, { session_id: B.sid, limit: 100_000 })).events.length, bEvents.length, "limit capped at 200 still returns everything here");
@@ -276,17 +277,17 @@ const packB = await buildResumePack(cfg, pool, B.t.id, { mode: "inspect", author
   const s1 = await getArtifact(pool, { id: art.id }, { offset: 0, max_chars: 10_000 });
   assert.equal(s1.found, true);
   assert.equal(s1.body, artText.slice(0, 10_000));
-  assert.ok(s1.text.startsWith(`artifact ${art.id} · tool_output · 25500 bytes · showing [0, 10000)\n`), s1.text.slice(0, 120));
-  assert.ok(s1.text.endsWith(`\nnext: offset=10000 (15500 of 25500 chars remain)`), s1.text.slice(-80));
+  assert.ok(s1.text.startsWith(`artifact ${art.id} · tool_output · ${AL} bytes · showing [0, 10000)\n`), s1.text.slice(0, 120));
+  assert.ok(s1.text.endsWith(`\nnext: offset=10000 (${AL - 10_000} of ${AL} chars remain)`), s1.text.slice(-80));
   assert.equal(s1.next_offset, 10_000);
   const s2 = await getArtifact(pool, { id: art.id }, { offset: s1.next_offset!, max_chars: 10_000 });
   assert.equal(s2.body, artText.slice(10_000, 20_000), "the next offset continues exactly");
-  assert.ok(s2.text.startsWith(`artifact ${art.id} · tool_output · 25500 bytes · showing [10000, 20000)\n`));
+  assert.ok(s2.text.startsWith(`artifact ${art.id} · tool_output · ${AL} bytes · showing [10000, 20000)\n`));
   assert.equal(s2.next_offset, 20_000);
   const s3 = await getArtifact(pool, { id: art.id }, { offset: s2.next_offset!, max_chars: 10_000 });
   assert.equal(s3.body, artText.slice(20_000));
   assert.equal(s3.next_offset, null);
-  assert.ok(s3.text.includes("showing [20000, 25500)") && s3.text.endsWith("end of artifact (25500 chars)"));
+  assert.ok(s3.text.includes(`showing [20000, ${AL})`) && s3.text.endsWith(`end of artifact (${AL} chars)`));
   assert.equal(s1.body! + s2.body! + s3.body!, artText, "three slices reassemble the artifact");
   const bySha = await getArtifact(pool, { sha256: artSha.toUpperCase() });
   assert.equal(bySha.id, art.id);
