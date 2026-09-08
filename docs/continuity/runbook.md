@@ -62,6 +62,10 @@ ledger resume <thread> --checkout ../wt-name       claim + pack + worktree at th
 ledger thread show|close|title <id>
 ```
 
+## Work inside a git checkout
+
+Threads, claims, and snapshots exist only for sessions whose working directory is inside a git repository with a remote. A session in a plain folder (a Downloads directory, a scratch dir) still uploads its events, but gets no thread, no claim, and no `refs/wip/` snapshot, so nobody can check out its code. For the pilot, run Codex or Claude from the HiAstro checkout.
+
 ## Check it is working
 
 ```
