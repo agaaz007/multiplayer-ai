@@ -98,6 +98,7 @@ const events: FixtureEvent[] = [
 ];
 const sidA = "0199eeee-1111-7222-8333-444444444441"; // codex, rachit
 const sidB = "0199eeee-2222-7222-8333-444444444442"; // claude, agaaz
+const shortA = sessionShort(sidA), shortB = sessionShort(sidB); // gbrain slugs use the id tail: both ids share a uuid-v7-style head
 const fakeRoots = { claude: path.join(root, "fake", "claude"), codex: path.join(root, "fake", ".codex", "sessions") };
 const dayDir = path.join(fakeRoots.codex, "2026", "09", "08");
 fs.mkdirSync(dayDir, { recursive: true });
@@ -347,10 +348,10 @@ console.log(prepG.notes.map((n) => `     · ${n}`).join("\n"));
 }
 {
   const list = gbrainTrial(homeDir, "list", "-n", "5");
-  assert.ok(/s-0199eeee-\d+/.test(list) || /session-0199eeee/.test(list), `list: ${list}`);
+  assert.ok(list.includes(`s-${shortA}-`) || list.includes(`s-${shortB}-`) || list.includes(`session-${shortA}`), `list: ${list}`);
   const search = gbrainTrial(homeDir, "call", "search", JSON.stringify({ query: "price_inr 199 layout", limit: 5 }));
-  assert.ok(search.includes(`s-${sidA.slice(0, 8)}-`), `search hit: ${search.slice(0, 300)}`);
-  const page = gbrainTrial(homeDir, "call", "get_page", JSON.stringify({ slug: `session-${sidA.slice(0, 8)}` }));
+  assert.ok(search.includes(`s-${shortA}-`), `search hit: ${search.slice(0, 300)}`);
+  const page = gbrainTrial(homeDir, "call", "get_page", JSON.stringify({ slug: `session-${shortA}` }));
   assert.ok(page.includes(CONSTRAINT.slice(0, 40)) && page.includes("seq"), "session page lists the events in order");
   const stats = gbrainTrial(homeDir, "stats");
   assert.ok(/Timeline:\s+\d+/.test(stats) && !/Timeline:\s+0\b/.test(stats), `timeline entries present: ${stats}`);
@@ -383,7 +384,7 @@ const setupG = await gbrain.successorSetup(ctxG);
   const page = gbrainTrial(homeDir, "call", "get_page", JSON.stringify({ slug }));
   assert.ok(JSON.parse(page.slice(page.indexOf("{"), page.lastIndexOf("}") + 1)).compiled_truth.includes(CONSTRAINT), "page body carries the exact text");
   const m = await gbrain.evidenceRef(ctxG, events[2]);
-  assert.ok(m && m.system_ref.startsWith(`gbrain:page:s-${sidB.slice(0, 8)}-`), JSON.stringify(m));
+  assert.ok(m && m.system_ref.startsWith(`gbrain:page:s-${shortB}-`), JSON.stringify(m));
   const none = await gbrain.evidenceRef(ctxG, { id: "x", topic: "x", text: "this sentence was never said by anyone zzqx", author: "rachit", session: "session-a" });
   assert.equal(none, null);
   ok("gbrain.evidenceRef returns gbrain:page:<slug> for ingested text and null for unknown text");
