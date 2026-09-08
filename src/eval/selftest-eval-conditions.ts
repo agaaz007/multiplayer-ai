@@ -337,8 +337,12 @@ console.log(prepG.notes.map((n) => `     · ${n}`).join("\n"));
   assert.ok(String(cfg.database_path).startsWith(homeDir + path.sep) || String(cfg.database_path).startsWith(fs.realpathSync(homeDir) + path.sep), `isolated brain: ${JSON.stringify(cfg)}`);
   assert.equal(cfg.engine, "pglite");
   const ingest = JSON.parse(fs.readFileSync(path.join(homeDir, ".gbrain", "eval-ingest.json"), "utf8"));
-  assert.equal(ingest.pages, 8 + 4, `event pages: ${JSON.stringify(ingest)}`); // A: 2 instr + 2 tool req + 2 tool fin + 1 file + 1 msg; B: 1 instr + 1 req + 1 fin + 1 file (+1 file from the result is deduplicated? no: counted below)
-  ok(`gbrain.prepare created an isolated PGLite brain under the trial HOME (${prepG.prepared_ms} ms)`);
+  // one page per content event: the same normalized events our helper uploaded
+  const contentEvents = (await pool.query(`select count(*)::int as n from cont_events where session_id = any($1) and kind = any($2)`, [[sidA, sidB], ["instruction.added", "assistant.message", "tool.requested", "tool.finished", "file.changed", "compaction"]])).rows[0].n;
+  assert.equal(ingest.pages, contentEvents, `event pages: ${JSON.stringify(ingest)} vs ${contentEvents} content events in the eval database`);
+  assert.equal(ingest.imported, ingest.pages + 2, "import wrote every event page plus the two session pages");
+  assert.equal(ingest.timeline, ingest.pages, "one timeline entry per event page");
+  ok(`gbrain.prepare created an isolated PGLite brain under the trial HOME with ${ingest.pages} event pages (${prepG.prepared_ms} ms)`);
 }
 {
   const list = gbrainTrial(homeDir, "list", "-n", "5");
