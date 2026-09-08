@@ -34,6 +34,8 @@ export interface ContinuityConfig {
   repos?: string[];
   /** Shadow commit cadence in seconds. Default 30. */
   snapshot_interval_s?: number;
+  /** Run the span→work-record classifier after turn checkpoints. Default true. LEDGER_CLASSIFY=0 also disables. */
+  classify?: boolean;
 }
 
 /**

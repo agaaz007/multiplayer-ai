@@ -368,6 +368,80 @@ async function main() {
         await closePools();
         return;
       }
+      case "records": {
+        const cfg = loadConfig();
+        const root = repoRoot(process.cwd());
+        const rows = await listRecordSummaries(getPool(cfg), {
+          repo: args.includes("--all") ? undefined : root ? repoIdentity(root) : undefined,
+          kind: flag(args, "--kind") as RecordKind | undefined,
+          status: (flag(args, "--status") ?? "open") as RecordStatus,
+          q: flag(args, "--q"),
+          sinceHours: Number(flag(args, "--hours") ?? 336),
+          limit: Number(flag(args, "--limit") ?? 20),
+        });
+        console.log(rows.length ? rows.map((r) => recordLine(r)).join("\n") : "no records");
+        await closePools();
+        return;
+      }
+      case "record": {
+        const cfg = loadConfig();
+        const pool = getPool(cfg);
+        const pos = positionals(args);
+        const sub = pos[0];
+        const usage = `usage: ledger record show <id> [--budget N] | start <kind> <title…> [--goal g] [--link <session>:<from>:<to>] | link <id> <session> <from> <to> [--note n] | propose <id> <kind> <text…> --evidence <session>:<seq>[,…] [--supersedes <update>] | confirm <update-id> | reject <update-id> --reason "..."`;
+        if (sub === "show") {
+          if (!pos[1]) throw new Error(usage);
+          console.log((await buildRecordPack(cfg, pool, pos[1], { mode: "inspect", author: cfg.author, repoPath: process.cwd(), budgetTokens: Number(flag(args, "--budget") ?? 12000) })).text);
+        } else if (sub === "start") {
+          const [, kind, ...title] = pos;
+          if (!kind || !title.length) throw new Error(usage);
+          const root = repoRoot(process.cwd());
+          const rec = await createRecord(pool, { kind: kind as RecordKind, title: title.join(" "), goal: flag(args, "--goal") ?? null, repo: root ? repoIdentity(root) : null, created_by: cfg.author });
+          let linked = "";
+          const link = flag(args, "--link");
+          if (link) {
+            const { session_id, nums } = splitRef(link, 2);
+            const l = await linkSpan(pool, { record_id: rec.id, session_id, from_seq: nums[0], to_seq: nums[1], source: "explicit", created_by: cfg.author });
+            linked = `; linked ${session_id} seq ${nums[0]}..${nums[1]} (${l.id})`;
+          }
+          console.log(`record ${rec.id} "${rec.title}" (${rec.kind}) created${rec.repo ? ` on ${rec.repo}` : " as non-code work"}${linked}`);
+        } else if (sub === "link") {
+          const [, id, session_id, from, to] = pos;
+          if (!id || !session_id || from == null || to == null) throw new Error(usage);
+          const rec = await getRecord(pool, id);
+          if (!rec) throw new Error(`not found: ${id}`);
+          const l = await linkSpan(pool, { record_id: id, session_id, from_seq: Number(from), to_seq: Number(to), source: "explicit", note: flag(args, "--note") ?? null, created_by: cfg.author });
+          console.log(`linked ${session_id} seq ${from}..${to} to "${rec.title}" (${l.id})`);
+        } else if (sub === "propose") {
+          const [, id, kind, ...textParts] = pos;
+          const ev = flag(args, "--evidence");
+          if (!id || !kind || !textParts.length || !ev) throw new Error(usage);
+          const evidence = ev.split(",").filter(Boolean).map((r) => { const { session_id, nums } = splitRef(r, 1); return { session_id, seq: nums[0] }; });
+          const u = await addStateUpdate(pool, { record_id: id, kind: kind as UpdateKind, text: textParts.join(" "), evidence, created_by: cfg.author, supersedes: flag(args, "--supersedes") ?? null });
+          console.log(`proposed ${u.kind} update ${u.id} (status ${u.status}; confirm with: ledger record confirm ${u.id})`);
+        } else if (sub === "confirm") {
+          if (!pos[1]) throw new Error(usage);
+          const u = await confirmStateUpdate(pool, pos[1], cfg.author);
+          if (!u) throw new Error(`not found: ${pos[1]}`);
+          const rec = await getRecord(pool, u.record_id);
+          console.log(`confirmed ${u.kind} update ${u.id} by ${u.confirmed_by}; record state_version ${rec?.state_version ?? "?"}`);
+        } else if (sub === "reject") {
+          const reason = flag(args, "--reason");
+          if (!pos[1] || !reason) throw new Error(usage);
+          const u = await rejectStateUpdate(pool, pos[1], cfg.author, reason);
+          if (!u) throw new Error(`not found: ${pos[1]}`);
+          console.log(`rejected ${u.kind} update ${u.id}: ${reason}`);
+        } else throw new Error(usage);
+        await closePools();
+        return;
+      }
+      case "unassigned": {
+        const cfg = loadConfig();
+        const rows = await unassignedSpans(getPool(cfg), { sinceHours: Number(flag(args, "--hours") ?? 48), session_id: flag(args, "--session"), author: flag(args, "--author"), limit: Number(flag(args, "--limit") ?? 10) });
+        console.log(rows.length ? rows.map((s) => unassignedLine(s)).join("\n") : "no unassigned spans");
+        await closePools();
+        return;
+      }
       case "events": {
         const cfg = loadConfig();
         const thread_id = flag(args, "--thread");
