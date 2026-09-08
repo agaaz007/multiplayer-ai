@@ -13,6 +13,7 @@ import { DEFAULT_QUIET_MS, pendingDrafts, reconcile } from "./extract.js";
 import { continuityConfigured, getPool, migrate, tableList, closePools } from "./continuity/db.js";
 import { listThreads, getThread, updateThread } from "./continuity/store.js";
 import { buildResumePack, threadLine } from "./continuity/resume.js";
+import { queryEvents, getArtifact } from "./continuity/evidence.js";
 import { checkoutWip, repoRoot } from "./continuity/shadow.js";
 import { openThreadsText } from "./continuity/brief.js";
 import { helperOnce, helperLoop, loadState } from "./helper/daemon.js";
@@ -46,6 +47,10 @@ const USAGE = `ledger — shared definitions, findings, changes, decisions for y
   ledger resume <thread> [--mode continue|fork|inspect] [--checkout <dir>]
                                          claim + resume pack; --checkout creates a worktree at the saved snapshot
   ledger thread show|close|title <id>
+  ledger events --thread <id> | --session <id> [--kinds a,b] [--path p] [--q text] [--after N] [--before N] [--limit N] [--chars N]
+                                         evidence: one line per captured event (seq · HH:MM · kind · preview); --chars widens the preview
+  ledger artifact <id|sha256> [--offset N] [--max N]
+                                         read a stored tool output (artifact) slice; the trailer gives the next offset
 
   search/get/record show boxed receipts in interactive terminals.
   --plain disables the box; --box enables it in captured/piped output.

@@ -11,6 +11,7 @@ import { RECEIPT_GUIDANCE, savedReceipt, receiptText } from "./receipts.js";
 import { continuityConfigured, getPool } from "./continuity/db.js";
 import { listThreads, createThread, getThread, claimThread, releaseClaim, upsertSession, appendEvents } from "./continuity/store.js";
 import { buildResumePack, threadLine } from "./continuity/resume.js";
+import { queryEvents, getArtifact, EVENTS_DEFAULT_LIMIT, EVENTS_MAX_LIMIT, PREVIEW_CHARS, PREVIEW_MAX_CHARS, ARTIFACT_DEFAULT_CHARS, ARTIFACT_MAX_CHARS } from "./continuity/evidence.js";
 import { repoRoot, repoIdentity, currentBranch } from "./continuity/shadow.js";
 import { openThreadsText } from "./continuity/brief.js";
 import { writeBinding, writeSignal } from "./helper/signals.js";
@@ -295,6 +296,58 @@ export function createMcpServer(cfg: Config) {
         const ok = await releaseClaim(pool(), thread_id, sid);
         writeSignal(sid, "checkpoint");
         return text(ok ? `Released ${thread_id}.` : `No live claim on ${thread_id} held by this session.`);
+      }
+    );
+
+    // ---------- evidence queries: the raw event stream and stored artifacts ----------
+    server.registerTool(
+      "ledger_events",
+      {
+        title: "Query thread or session events",
+        description: "Evidence query over a thread's or session's captured events: human instructions, assistant messages, tool calls and results, file changes, compaction summaries, capture gaps. One compact line per event (seq · HH:MM · kind · preview), ordered by seq; filter by kinds, a path substring, a case-insensitive text substring, or a seq range. Use it to fetch what a resume pack omitted for budget, to read a compaction summary in full (raise preview_chars), or to see exactly what a teammate's agent did around a file. Substring match only; not full-text search.",
+        inputSchema: {
+          thread_id: z.string().optional().describe("Thread to query; thread_id or session_id is required"),
+          session_id: z.string().optional().describe("Session to query; seq is per session, so pass this for an exact cursor on multi-session threads"),
+          kinds: z.array(z.string()).optional().describe('e.g. ["instruction.added"], ["tool.requested","tool.finished"], ["file.changed"], ["compaction"], ["assistant.message"]'),
+          path: z.string().optional().describe("Substring of payload.path (file.changed) or payload.input (tool events)"),
+          q: z.string().optional().describe("Case-insensitive substring over payload text / input / output_preview"),
+          after_seq: z.number().int().min(0).optional().describe("Only events with seq greater than this; use the trailer's next value to page"),
+          before_seq: z.number().int().min(0).optional(),
+          limit: z.number().int().min(1).max(EVENTS_MAX_LIMIT).default(EVENTS_DEFAULT_LIMIT),
+          preview_chars: z.number().int().min(20).max(PREVIEW_MAX_CHARS).default(PREVIEW_CHARS).describe("Per-line preview length; raise it with limit 1 to read one event in full"),
+        },
+        annotations: readOnly,
+      },
+      async (f) => {
+        if (!f.thread_id && !f.session_id) return text("thread_id or session_id is required.");
+        try {
+          return text((await queryEvents(pool(), f)).text);
+        } catch (e: any) {
+          return text(`ledger_events failed: ${e.message}`);
+        }
+      }
+    );
+
+    server.registerTool(
+      "ledger_artifact_get",
+      {
+        title: "Read a stored artifact",
+        description: "Read a slice of a stored artifact (a tool output longer than the event preview) by id or sha256. Event lines show `[artifact <id>]` when one exists. Returns a header (id, kind, byte size, the [offset, offset+n) window shown), the utf8 text slice, and the next offset when more remains.",
+        inputSchema: {
+          id: z.string().optional().describe("Artifact id (uuid) from an event line; id or sha256 is required"),
+          sha256: z.string().optional().describe("Artifact content hash, as stored on the event payload (artifact_sha256)"),
+          offset: z.number().int().min(0).default(0).describe("Character offset into the decoded text"),
+          max_chars: z.number().int().min(1).max(ARTIFACT_MAX_CHARS).default(ARTIFACT_DEFAULT_CHARS),
+        },
+        annotations: readOnly,
+      },
+      async ({ id, sha256, offset, max_chars }) => {
+        if (!id && !sha256) return text("id or sha256 is required.");
+        try {
+          return text((await getArtifact(pool(), { id, sha256 }, { offset, max_chars })).text);
+        } catch (e: any) {
+          return text(`ledger_artifact_get failed: ${e.message}`);
+        }
       }
     );
   }
