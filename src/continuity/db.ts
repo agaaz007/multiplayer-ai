@@ -155,6 +155,68 @@ create index if not exists cont_sessions_thread_idx on cont_sessions(thread_id);
 create index if not exists cont_sessions_seen_idx on cont_sessions(last_seen_at desc);
 create index if not exists cont_threads_repo_idx on cont_threads(repo, status, updated_at desc);
 create index if not exists cont_checkpoints_thread_idx on cont_checkpoints(thread_id, created_at desc);
+
+-- Work records (spec v1.2, D-009): the logical unit of work. A session contributes to many
+-- records through spans of its events; state updates are append-only with provenance.
+create table if not exists cont_records (
+  id uuid primary key default gen_random_uuid(),
+  kind text not null default 'other',
+  title text not null,
+  goal text,
+  repo text,
+  status text not null default 'open',
+  created_by text not null,
+  ledger_refs jsonb not null default '[]'::jsonb,
+  state_version int not null default 0,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists cont_record_links (
+  id uuid primary key default gen_random_uuid(),
+  record_id uuid not null references cont_records(id) on delete cascade,
+  session_id text not null references cont_sessions(id),
+  from_seq int not null,
+  to_seq int not null,
+  source text not null,
+  confidence real,
+  note text,
+  created_by text not null,
+  created_at timestamptz not null default now(),
+  check (from_seq <= to_seq)
+);
+
+create table if not exists cont_state_updates (
+  id uuid primary key default gen_random_uuid(),
+  record_id uuid not null references cont_records(id) on delete cascade,
+  session_id text,
+  from_seq int,
+  to_seq int,
+  status text not null default 'proposed',
+  kind text not null,
+  text text not null,
+  evidence jsonb not null default '[]'::jsonb,
+  created_by text not null,
+  created_at timestamptz not null default now(),
+  confirmed_by text,
+  confirmed_at timestamptz,
+  supersedes uuid references cont_state_updates(id),
+  reject_reason text
+);
+alter table cont_state_updates add column if not exists rejected_by text;
+alter table cont_state_updates add column if not exists rejected_at timestamptz;
+
+create index if not exists cont_records_repo_idx on cont_records(repo, status, updated_at desc);
+create index if not exists cont_records_updated_idx on cont_records(updated_at desc);
+create index if not exists cont_record_links_record_idx on cont_record_links(record_id);
+create index if not exists cont_record_links_session_idx on cont_record_links(session_id, from_seq, to_seq);
+create index if not exists cont_state_updates_record_idx on cont_state_updates(record_id, created_at);
+create index if not exists cont_state_updates_supersedes_idx on cont_state_updates(supersedes);
+
+-- Full-text search over event content. records.ts must use this exact expression so the planner matches the index.
+create index if not exists cont_events_fts_idx on cont_events using gin (
+  to_tsvector('english', coalesce(payload->>'text','') || ' ' || coalesce(payload->>'input','') || ' ' || coalesce(payload->>'output_preview',''))
+);
 `;
 
 export async function migrate(pool: pg.Pool): Promise<string[]> {

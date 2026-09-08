@@ -45,8 +45,32 @@ export interface ShadowResult {
   gaps: { kind: string; paths?: string[]; detail?: string }[];
 }
 
+/**
+ * Git without a terminal. The helper runs under launchd: no TTY, and macOS's
+ * osxkeychain credential helper returns nothing there, so an HTTPS push dies
+ * with "could not read Username". `gh auth git-credential` answers without a
+ * TTY, so remote operations use it when `gh` is installed. Prompts are always
+ * disabled so a failure is immediate and lands in capture_gaps, never a hang.
+ * Override with continuity.git_credential_helper (any git credential helper string, or "" for git's default).
+ */
+let credentialArgs: string[] | null = null;
+export function gitRemoteArgs(): string[] {
+  if (credentialArgs) return credentialArgs;
+  const override = process.env.LEDGER_GIT_CREDENTIAL_HELPER;
+  if (override !== undefined) return (credentialArgs = override ? ["-c", "credential.helper=", "-c", `credential.helper=${override}`] : []);
+  try {
+    execFileSync("sh", ["-c", "command -v gh"], { stdio: "ignore" });
+    credentialArgs = ["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential"];
+  } catch {
+    credentialArgs = [];
+  }
+  return credentialArgs;
+}
+
 function git(cwd: string, args: string[], env: NodeJS.ProcessEnv = {}): string {
-  return execFileSync("git", args, { cwd, env: { ...process.env, GIT_EDITOR: "true", ...env }, stdio: ["ignore", "pipe", "pipe"], timeout: 60_000, maxBuffer: 64 << 20 }).toString().trim();
+  const remote = /^(push|fetch|ls-remote|pull|clone)$/.test(args[0] ?? "");
+  const full = remote ? [...gitRemoteArgs(), ...args] : args;
+  return execFileSync("git", full, { cwd, env: { ...process.env, GIT_EDITOR: "true", GIT_TERMINAL_PROMPT: "0", ...env }, stdio: ["ignore", "pipe", "pipe"], timeout: 60_000, maxBuffer: 64 << 20 }).toString().trim();
 }
 
 export function repoRoot(cwd: string): string | null {

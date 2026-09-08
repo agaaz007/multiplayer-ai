@@ -11,6 +11,7 @@ import * as S from "../continuity/store.js";
 import { spoolAppend, spoolPending, spoolAck } from "./spool.js";
 import { readBinding, takeSignal, readIndex, appendLocalNotifications } from "./signals.js";
 import { redactText } from "../continuity/redact.js";
+import { classifySession, classifyAllowed } from "../continuity/classify.js";
 const putArtifact = S.putArtifact;
 
 /**
@@ -52,6 +53,10 @@ export interface SessState {
   unknown: Record<string, number>;
   ended?: boolean;
   firstInstruction?: string;
+  /** last time the classifier ran for this session (rate limit: one run per 120 s) */
+  lastClassifyAt?: number;
+  /** a classification is running detached for this session; never start a second one */
+  classifyInFlight?: boolean;
 }
 
 export interface HelperOpts {
@@ -65,7 +70,12 @@ export interface HelperOpts {
   log?: (s: string) => void;
   /** disable git push (tests) */
   push?: boolean;
+  /** how long helperOnce waits for detached classifications before returning; 0 (default) = do not wait. Tests set it so results are visible on return. */
+  classifyWaitMs?: number;
 }
+
+/** Detached classifications by session id; a pass never blocks on them, and a session never runs two. */
+const classifyInFlight = new Map<string, Promise<void>>();
 
 export interface PassSummary {
   at: string;
@@ -75,6 +85,8 @@ export interface PassSummary {
   snapshots: number;
   checkpoints: number;
   bound: number;
+  /** classifications started after a turn checkpoint; each runs detached and logs its outcome (or failure) when it returns */
+  classified: number;
   errors: string[];
 }
 
@@ -106,9 +118,14 @@ function defaultRoots() {
   return { claude: path.join(os.homedir(), ".claude", "projects"), codex: path.join(os.homedir(), ".codex", "sessions") };
 }
 
+/**
+ * Session identity is the FILE, not the sessionId the lines carry. Claude subagent transcripts
+ * (<session>/subagents/agent-<id>.jsonl) carry the parent's sessionId; keying on it collided a
+ * subagent with its parent, thrashed the shared offset, and re-spooled hundreds of events per pass.
+ */
 function sessionIdFor(file: string, harness: "claude" | "codex", parsedId?: string): string {
-  if (parsedId) return parsedId;
   if (harness === "claude") return path.basename(file, ".jsonl");
+  if (parsedId) return parsedId;
   const m = path.basename(file).match(/([0-9a-f]{8}-[0-9a-f-]{27,})\.jsonl$/i);
   return m?.[1] ?? path.basename(file, ".jsonl");
 }
@@ -141,6 +158,35 @@ async function structuredState(pool: pg.Pool, sessionId: string, threadId: strin
     last_error: lastErr ? { seq: lastErr.seq, ...lastErr.payload } : null,
     decisions: [],
   };
+}
+
+/**
+ * After a `turn` checkpoint: classify the session's new events into work records
+ * (spec §13a). Gated by config/env and a per-session rate limit; contained by its
+ * own try/catch so a model failure never touches capture or checkpoints.
+ */
+function classifyAfterTurn(cfg: Config, pool: pg.Pool, sid: string, s: SessState, now: Date, sum: PassSummary, log: (m: string) => void): void {
+  const gate = classifyAllowed(cfg, { now: now.getTime(), lastClassifyAt: s.lastClassifyAt });
+  if (!gate.ok) return;
+  if (classifyInFlight.has(sid)) return; // a model call is still running for this session
+  s.lastClassifyAt = now.getTime();
+  s.classifyInFlight = true;
+  sum.classified++; // counts starts; the outcome is logged when the detached call returns
+  const p = classifySession(cfg, pool, sid, { now, log })
+    .then((r) => {
+      if (!r.model_ok) { log(`classify ${sid.slice(0, 8)}: ${r.error}`); return; }
+      if (!r.events_considered) return;
+      log(`classify ${sid.slice(0, 8)}: ${r.events_considered} events → ${r.assignments_applied} span(s) linked, ${r.records_created} new record(s), ${r.updates_proposed} update(s) proposed, ${r.unassigned.length} unassigned${r.rejected.length ? `, ${r.rejected.length} rejected` : ""}`);
+    })
+    .catch((e: any) => log(`classify ${sid.slice(0, 8)} failed: ${String(e?.message ?? e).slice(0, 200)}`))
+    .finally(() => { classifyInFlight.delete(sid); s.classifyInFlight = false; });
+  classifyInFlight.set(sid, p);
+}
+
+/** Wait up to `ms` for detached classifications (tests; a daemon pass passes 0 and moves on). */
+async function awaitClassifications(ms: number): Promise<void> {
+  if (ms <= 0 || !classifyInFlight.size) return;
+  await Promise.race([Promise.allSettled([...classifyInFlight.values()]), new Promise((r) => setTimeout(r, ms))]);
 }
 
 /**
@@ -178,7 +224,7 @@ async function materializeArtifacts(pool: pg.Pool, sessionId: string, events: No
 export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<PassSummary> {
   const now = opts.now ?? new Date();
   const log = opts.log ?? (() => {});
-  const sum: PassSummary = { at: now.toISOString(), sessions: 0, events_spooled: 0, events_uploaded: 0, snapshots: 0, checkpoints: 0, bound: 0, errors: [] };
+  const sum: PassSummary = { at: now.toISOString(), sessions: 0, events_spooled: 0, events_uploaded: 0, snapshots: 0, checkpoints: 0, bound: 0, classified: 0, errors: [] };
   if (!cfg.continuity) throw new Error("continuity not configured");
   const pool = getPool(cfg);
   const author = cfg.author;
@@ -218,7 +264,8 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
       s.lastSeenMtime = mtime;
       if (r.cwd) s.cwd = r.cwd;
       if (r.branch) s.branch = r.branch;
-      if ((r as any).sidechain) s.sidechain = true;
+      // derived every pass from the path (self-healing: an earlier build mis-set this from mirrored lines)
+      s.sidechain = s.file.includes(`${path.sep}subagents${path.sep}`) || path.basename(s.file).startsWith("agent-") || Boolean(r.sidechain);
       for (const [k, v] of Object.entries(r.unknown)) s.unknown[k] = (s.unknown[k] ?? 0) + v;
       if (s.cwd && s.root === undefined) {
         s.root = repoRoot(s.cwd);
@@ -234,7 +281,17 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
       if (r.events.length) {
         spoolAppend(sid, { offset: r.offset, events: r.events, at: now.toISOString() });
         sum.events_spooled += r.events.length;
-        if (s.ended) { s.ended = false; log(`session ${sid.slice(0, 8)} resumed after end/quiet; capture continues (routing may be a fork)`); }
+        if (s.ended) {
+          s.ended = false;
+          log(`session ${sid.slice(0, 8)} resumed after end/quiet; capture continues (routing may be a fork)`);
+          // the quiet-end released our claim; take it back if nobody else has, so checkpoints advance the head again
+          if (s.threadId) {
+            try {
+              const c = await S.claimThread(pool, s.threadId, sid, author);
+              log(c.ok ? `session ${sid.slice(0, 8)} re-claimed thread ${s.threadId.slice(0, 8)} (gen ${c.generation})` : `thread ${s.threadId.slice(0, 8)} now held by ${c.holder.holder_author}; this session's uploads will route to a fork`);
+            } catch (e: any) { log(`re-claim failed for ${sid.slice(0, 8)}: ${String(e?.message ?? e).slice(0, 120)}`); }
+          }
+        }
       }
       sum.sessions++;
 
@@ -295,10 +352,12 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
       const cpSignal = takeSignal(sid, "checkpoint") || endSignal;
       const quiet = now.getTime() - mtime > quietMs;
       const due = !s.lastShadowAt || now.getTime() - s.lastShadowAt >= snapEvery;
-      if (s.root && s.wipRef && (due || cpSignal) && !s.ended) {
+      // subagent transcripts share the parent's worktree; the parent session snapshots it
+      if (s.root && s.wipRef && (due || cpSignal) && !s.ended && !s.sidechain) {
         const sh = shadowCommit(s.root, { ref: s.wipRef, parent: s.lastCommit ?? undefined, lastTree: s.lastTree, deny: cfg.continuity.deny, include: cfg.continuity.include, push: opts.push ?? true, now, message: `wip ${sid.slice(0, 8)} ${now.toISOString()}` });
         s.lastShadowAt = now.getTime();
-        if (sh.error && !sh.commit) sum.errors.push(`shadow ${sid.slice(0, 8)}: ${sh.error}`);
+        // a push or verify failure is a pass error even when the local commit exists: the snapshot is not saved until the remote has it
+        if (sh.error) sum.errors.push(`shadow ${sid.slice(0, 8)}: ${sh.error.replace(/\s+/g, " ").trim()}`);
         if (sh.tree) s.lastTree = sh.tree;
         if (sh.commit) {
           s.lastCommit = sh.commit;
@@ -315,12 +374,14 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
             });
             sum.checkpoints++;
             if (!cp.advanced) log(`checkpoint ${cp.id.slice(0, 8)} did not advance head: ${cp.reason}`);
+            if (cpSignal) classifyAfterTurn(cfg, pool, sid, s, now, sum, log);
           }
         } else if (cpSignal && routing.thread_id) {
           // nothing new on disk but a turn ended: still record the turn boundary
           const cp = await S.publishCheckpoint(pool, { thread_id: routing.thread_id, session_id: sid, generation: routing.generation, kind: "turn", through_event_seq: (await S.appendEvents(pool, sid, [], null, null)).lastSeq, base_commit: s.baseCommit, wip_ref: s.wipRef, wip_commit: s.lastCommit ?? null, verified_events_at: now, structured_state: await structuredState(pool, sid, routing.thread_id, []), capture_gaps: sh.gaps });
           sum.checkpoints++;
           if (!cp.advanced) log(`turn checkpoint did not advance head: ${cp.reason}`);
+          classifyAfterTurn(cfg, pool, sid, s, now, sum, log);
         }
       }
 
@@ -332,7 +393,14 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
           s.ended = true;
           log(`session ${sid.slice(0, 8)} ${endSignal ? "ended" : "went quiet"}; claim released`);
         } else if (!s.lastHeartbeatAt || now.getTime() - s.lastHeartbeatAt > 30_000) {
-          await S.heartbeatClaim(pool, s.threadId, sid);
+          // hold the claim while live: if the heartbeat finds none (released by a quiet-end, an expiry, or a restart), take it back
+          const held = await S.heartbeatClaim(pool, s.threadId, sid);
+          if (!held) {
+            try {
+              const c = await S.claimThread(pool, s.threadId, sid, author);
+              log(c.ok ? `session ${sid.slice(0, 8)} claimed thread ${s.threadId.slice(0, 8)} (gen ${c.generation})` : `thread ${s.threadId.slice(0, 8)} held by ${c.holder.holder_author} (${c.holder.holder_session_id.slice(0, 8)}); this session routes to a fork`);
+            } catch (e: any) { log(`claim failed for ${sid.slice(0, 8)}: ${String(e?.message ?? e).slice(0, 120)}`); }
+          }
           s.lastHeartbeatAt = now.getTime();
         }
       }
@@ -349,6 +417,7 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
 
   // prune ended sessions from state after a day
   for (const [sid, s] of Object.entries(st)) if (s.ended && now.getTime() - s.lastSeenMtime > 86_400_000) delete st[sid];
+  await awaitClassifications(opts.classifyWaitMs ?? 0);
   saveState(st);
   return sum;
 }
@@ -363,7 +432,7 @@ export async function helperLoop(cfg: Config, opts: HelperOpts & { intervalMs?: 
     const t0 = Date.now();
     try {
       const s = await helperOnce(cfg, { ...opts, log });
-      if (s.events_spooled || s.events_uploaded || s.snapshots || s.errors.length) log(`pass: ${s.sessions} sessions, ${s.events_spooled} spooled, ${s.events_uploaded} uploaded, ${s.snapshots} snapshots, ${s.checkpoints} checkpoints${s.errors.length ? `, errors: ${s.errors.join(" | ")}` : ""}`);
+      if (s.events_spooled || s.events_uploaded || s.snapshots || s.classified || s.errors.length) log(`pass: ${s.sessions} sessions, ${s.events_spooled} spooled, ${s.events_uploaded} uploaded, ${s.snapshots} snapshots, ${s.checkpoints} checkpoints, ${s.classified} classified${s.errors.length ? `, errors: ${s.errors.join(" | ")}` : ""}`);
     } catch (e: any) {
       log(`pass failed: ${String(e?.message ?? e).slice(0, 300)}`);
     }

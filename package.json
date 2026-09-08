@@ -18,6 +18,12 @@
     "dev": "tsc -p tsconfig.json --watch",
     "test": "npm run build && node dist/selftest.js",
     "test:continuity": "npm run build && node dist/selftest-continuity.js",
+    "test:records": "npm run build && node dist/selftest-records.js",
+    "test:events": "npm run build && node dist/selftest-events.js",
+    "test:resume": "npm run build && node dist/selftest-resume.js",
+    "test:classify": "npm run build && node dist/selftest-classify.js",
+    "test:recordpack": "npm run build && node dist/selftest-recordpack.js",
+    "test:all": "npm run build && node dist/selftest.js && node dist/selftest-events.js && node dist/selftest-continuity.js && node dist/selftest-records.js && node dist/selftest-resume.js && node dist/selftest-classify.js && node dist/selftest-recordpack.js",
     "preview:ui": "npm run build && node scripts/preview-ui.mjs",
     "prepare": "npm run build"
   },

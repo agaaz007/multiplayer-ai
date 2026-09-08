@@ -40,11 +40,12 @@ export function spoolPending(sessionId: string): { batches: SpoolBatch[]; acked:
 export function spoolAck(sessionId: string, throughCount: number): void {
   fs.mkdirSync(spoolDir(), { recursive: true });
   fs.writeFileSync(ackFile(sessionId), String(throughCount) + "\n");
-  // compact when everything is acked and the file has grown
+  // compact when everything is acked and the file has grown, by batch count or by bytes
   const f = eventsFile(sessionId);
   try {
+    const size = fs.statSync(f).size;
     const lines = fs.readFileSync(f, "utf8").split("\n").filter(Boolean);
-    if (throughCount >= lines.length && lines.length > 200) {
+    if (throughCount >= lines.length && (lines.length > 200 || size > 1_000_000)) {
       fs.writeFileSync(f, "");
       fs.writeFileSync(ackFile(sessionId), "0\n");
     }

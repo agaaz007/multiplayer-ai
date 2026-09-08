@@ -13,8 +13,11 @@ import { DEFAULT_QUIET_MS, pendingDrafts, reconcile } from "./extract.js";
 import { continuityConfigured, getPool, migrate, tableList, closePools } from "./continuity/db.js";
 import { listThreads, getThread, updateThread } from "./continuity/store.js";
 import { buildResumePack, threadLine } from "./continuity/resume.js";
-import { checkoutWip, repoRoot } from "./continuity/shadow.js";
+import { queryEvents, getArtifact } from "./continuity/evidence.js";
+import { checkoutWip, repoRoot, repoIdentity } from "./continuity/shadow.js";
 import { openThreadsText } from "./continuity/brief.js";
+import { buildRecordPack, listRecordSummaries, recordLine, unassignedLine } from "./continuity/recordpack.js";
+import { addStateUpdate, confirmStateUpdate, createRecord, getRecord, linkSpan, rejectStateUpdate, unassignedSpans, type RecordKind, type RecordStatus, type UpdateKind } from "./continuity/records.js";
 import { helperOnce, helperLoop, loadState } from "./helper/daemon.js";
 import { installHelper, helperStatus } from "./install.js";
 
@@ -45,7 +48,23 @@ const USAGE = `ledger — shared definitions, findings, changes, decisions for y
   ledger threads [--all] [--hours N]     open work threads (this repo by default)
   ledger resume <thread> [--mode continue|fork|inspect] [--checkout <dir>]
                                          claim + resume pack; --checkout creates a worktree at the saved snapshot
+  ledger resume --record <id> [--mode continue|inspect]
+                                         record pack: state across sessions and teammates; claims the latest contributing session's thread (code records)
   ledger thread show|close|title <id>
+  ledger records [--all] [--kind k] [--status s] [--q text] [--hours N] [--limit N]
+                                         open work records (this repo by default): kind · title · repo · updated · sessions · proposed/confirmed · id
+  ledger record show <id> [--budget N]   record pack without claiming: state (PROPOSED flagged), evidence, pending ops, unassigned, bootstrap
+  ledger record start <kind> <title…> [--goal g] [--link <session>:<from>:<to>]
+                                         new record (repo from cwd when inside a git repo, else non-code)
+  ledger record link <id> <session> <from> <to> [--note n]
+  ledger record propose <id> <kind> <text…> --evidence <session>:<seq>[,…] [--supersedes <update>]
+  ledger record confirm <update-id> | ledger record reject <update-id> --reason "..."
+  ledger unassigned [--hours N] [--session id] [--author a] [--limit N]
+                                         spans no record claims: preview, seq range, author, harness, time
+  ledger events --thread <id> | --session <id> [--kinds a,b] [--path p] [--q text] [--after N] [--before N] [--limit N] [--chars N]
+                                         evidence: one line per captured event (seq · HH:MM · kind · preview); --chars widens the preview
+  ledger artifact <id|sha256> [--offset N] [--max N]
+                                         read a stored tool output (artifact) slice; the trailer gives the next offset
 
   search/get/record show boxed receipts in interactive terminals.
   --plain disables the box; --box enables it in captured/piped output.
@@ -55,6 +74,26 @@ const USAGE = `ledger — shared definitions, findings, changes, decisions for y
 function flag(args: string[], name: string): string | undefined {
   const i = args.indexOf(name);
   return i === -1 ? undefined : args[i + 1];
+}
+
+const BOOL_FLAGS = new Set(["--all", "--plain", "--box", "--no-push", "--dry-run", "--show"]);
+/** Non-flag arguments, with `--name value` pairs and boolean flags removed. */
+function positionals(args: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a.startsWith("--")) { if (!BOOL_FLAGS.has(a)) i++; continue; }
+    out.push(a);
+  }
+  return out;
+}
+
+/** "<session>:<seq>" or "<session>:<from>:<to>", split from the right so session ids may contain colons. */
+function splitRef(s: string, n: number): { session_id: string; nums: number[] } {
+  const parts = s.split(":");
+  if (parts.length < n + 1) throw new Error(`expected <session>${":<n>".repeat(n)}, got ${s}`);
+  const nums = parts.slice(-n).map((x) => { const v = Number(x); if (!Number.isInteger(v) || v < 0) throw new Error(`not a seq: ${x}`); return v; });
+  return { session_id: parts.slice(0, -n).join(":"), nums };
 }
 
 function readStdin(): string {
@@ -193,7 +232,9 @@ async function main() {
       }
       case "record": {
         const type = args[0] as LedgerType;
-        if (!TYPES.includes(type)) throw new Error(`type must be one of ${TYPES.join("|")}`);
+        // `ledger record show|start|link|propose|confirm|reject …` are the work-record commands (continuity);
+        // `ledger record <type> < fields.json` records a Ledger object, as before.
+        if (!TYPES.includes(type)) { await workRecordCommand(args); return; }
         const fields = JSON.parse(readStdin() || "{}");
         const cfg = loadConfig();
         const res = record(cfg, { type, fields });
@@ -293,9 +334,17 @@ async function main() {
       }
       case "resume": {
         const cfg = loadConfig();
-        const id = args[0];
-        if (!id) throw new Error("usage: ledger resume <thread-id> [--mode continue|fork|inspect] [--checkout <dir>]");
+        const recordId = flag(args, "--record");
         const mode = (flag(args, "--mode") ?? "continue") as "continue" | "fork" | "inspect";
+        if (recordId) {
+          if (mode === "fork") throw new Error("--mode fork applies to threads; use continue or inspect with --record");
+          const pack = await buildRecordPack(cfg, getPool(cfg), recordId, { mode, author: cfg.author, sessionId: `cli:${cfg.author}:${Date.now()}`, repoPath: process.cwd() });
+          console.log(pack.text);
+          await closePools();
+          return;
+        }
+        const id = args[0];
+        if (!id || id.startsWith("--")) throw new Error("usage: ledger resume <thread-id> [--mode continue|fork|inspect] [--checkout <dir>]  |  ledger resume --record <id> [--mode continue|inspect]");
         const pack = await buildResumePack(cfg, getPool(cfg), id, { mode, author: cfg.author, sessionId: `cli:${cfg.author}:${Date.now()}`, repoPath: process.cwd() });
         console.log(pack.text);
         const dest = flag(args, "--checkout");
@@ -321,6 +370,50 @@ async function main() {
         await closePools();
         return;
       }
+      case "records": {
+        const cfg = loadConfig();
+        const root = repoRoot(process.cwd());
+        const rows = await listRecordSummaries(getPool(cfg), {
+          repo: args.includes("--all") ? undefined : root ? repoIdentity(root) : undefined,
+          kind: flag(args, "--kind") as RecordKind | undefined,
+          status: (flag(args, "--status") ?? "open") as RecordStatus,
+          q: flag(args, "--q"),
+          sinceHours: Number(flag(args, "--hours") ?? 336),
+          limit: Number(flag(args, "--limit") ?? 20),
+        });
+        console.log(rows.length ? rows.map((r) => recordLine(r)).join("\n") : "no records");
+        await closePools();
+        return;
+      }
+      case "unassigned": {
+        const cfg = loadConfig();
+        const rows = await unassignedSpans(getPool(cfg), { sinceHours: Number(flag(args, "--hours") ?? 48), session_id: flag(args, "--session"), author: flag(args, "--author"), limit: Number(flag(args, "--limit") ?? 10) });
+        console.log(rows.length ? rows.map((s) => unassignedLine(s)).join("\n") : "no unassigned spans");
+        await closePools();
+        return;
+      }
+      case "events": {
+        const cfg = loadConfig();
+        const thread_id = flag(args, "--thread");
+        const session_id = flag(args, "--session");
+        if (!thread_id && !session_id) throw new Error("usage: ledger events --thread <id> | --session <id> [--kinds a,b] [--path p] [--q text] [--after N] [--before N] [--limit N] [--chars N]");
+        const n = (s: string | undefined) => (s == null ? undefined : Number(s));
+        const r = await queryEvents(getPool(cfg), { thread_id, session_id, kinds: flag(args, "--kinds")?.split(",").map((k) => k.trim()).filter(Boolean), path: flag(args, "--path"), q: flag(args, "--q"), after_seq: n(flag(args, "--after")), before_seq: n(flag(args, "--before")), limit: n(flag(args, "--limit")), preview_chars: n(flag(args, "--chars")) });
+        console.log(r.text);
+        await closePools();
+        return;
+      }
+      case "artifact": {
+        const cfg = loadConfig();
+        const ref = args[0];
+        if (!ref || ref.startsWith("--")) throw new Error("usage: ledger artifact <id|sha256> [--offset N] [--max N]");
+        const bySha = /^[0-9a-f]{64}$/i.test(ref);
+        const r = await getArtifact(getPool(cfg), bySha ? { sha256: ref } : { id: ref }, { offset: Number(flag(args, "--offset") ?? 0), max_chars: Number(flag(args, "--max") ?? 20_000) });
+        console.log(r.text);
+        await closePools();
+        if (!r.found) process.exit(1);
+        return;
+      }
       case "sync": {
         const r = pull(loadConfig(), true);
         console.log(r ?? "synced");
@@ -338,6 +431,59 @@ async function main() {
     console.error(`ledger: ${e.message}`);
     process.exit(1);
   }
+}
+
+/** `ledger record show|start|link|propose|confirm|reject …`: the work-record commands (spec §13a). */
+async function workRecordCommand(args: string[]): Promise<void> {
+  const cfg = loadConfig();
+  const pool = getPool(cfg);
+  const pos = positionals(args);
+  const sub = pos[0];
+  const usage = `usage: ledger record <definition|finding|change|decision> < fields.json  |  ledger record show <id> [--budget N] | start <kind> <title…> [--goal g] [--link <session>:<from>:<to>] | link <id> <session> <from> <to> [--note n] | propose <id> <kind> <text…> --evidence <session>:<seq>[,…] [--supersedes <update>] | confirm <update-id> | reject <update-id> --reason "..."`;
+  if (sub === "show") {
+    if (!pos[1]) throw new Error(usage);
+    console.log((await buildRecordPack(cfg, pool, pos[1], { mode: "inspect", author: cfg.author, repoPath: process.cwd(), budgetTokens: Number(flag(args, "--budget") ?? 12000) })).text);
+  } else if (sub === "start") {
+    const [, kind, ...title] = pos;
+    if (!kind || !title.length) throw new Error(usage);
+    const root = repoRoot(process.cwd());
+    const rec = await createRecord(pool, { kind: kind as RecordKind, title: title.join(" "), goal: flag(args, "--goal") ?? null, repo: root ? repoIdentity(root) : null, created_by: cfg.author });
+    let linked = "";
+    const link = flag(args, "--link");
+    if (link) {
+      const { session_id, nums } = splitRef(link, 2);
+      const l = await linkSpan(pool, { record_id: rec.id, session_id, from_seq: nums[0], to_seq: nums[1], source: "explicit", created_by: cfg.author });
+      linked = `; linked ${session_id} seq ${nums[0]}..${nums[1]} (${l.id})`;
+    }
+    console.log(`record ${rec.id} "${rec.title}" (${rec.kind}) created${rec.repo ? ` on ${rec.repo}` : " as non-code work"}${linked}`);
+  } else if (sub === "link") {
+    const [, id, session_id, from, to] = pos;
+    if (!id || !session_id || from == null || to == null) throw new Error(usage);
+    const rec = await getRecord(pool, id);
+    if (!rec) throw new Error(`not found: ${id}`);
+    const l = await linkSpan(pool, { record_id: id, session_id, from_seq: Number(from), to_seq: Number(to), source: "explicit", note: flag(args, "--note") ?? null, created_by: cfg.author });
+    console.log(`linked ${session_id} seq ${from}..${to} to "${rec.title}" (${l.id})`);
+  } else if (sub === "propose") {
+    const [, id, kind, ...textParts] = pos;
+    const ev = flag(args, "--evidence");
+    if (!id || !kind || !textParts.length || !ev) throw new Error(usage);
+    const evidence = ev.split(",").filter(Boolean).map((r) => { const { session_id, nums } = splitRef(r, 1); return { session_id, seq: nums[0] }; });
+    const u = await addStateUpdate(pool, { record_id: id, kind: kind as UpdateKind, text: textParts.join(" "), evidence, created_by: cfg.author, supersedes: flag(args, "--supersedes") ?? null });
+    console.log(`proposed ${u.kind} update ${u.id} (status ${u.status}; confirm with: ledger record confirm ${u.id})`);
+  } else if (sub === "confirm") {
+    if (!pos[1]) throw new Error(usage);
+    const u = await confirmStateUpdate(pool, pos[1], cfg.author);
+    if (!u) throw new Error(`not found: ${pos[1]}`);
+    const rec = await getRecord(pool, u.record_id);
+    console.log(`confirmed ${u.kind} update ${u.id} by ${u.confirmed_by}; record state_version ${rec?.state_version ?? "?"}`);
+  } else if (sub === "reject") {
+    const reason = flag(args, "--reason");
+    if (!pos[1] || !reason) throw new Error(usage);
+    const u = await rejectStateUpdate(pool, pos[1], cfg.author, reason);
+    if (!u) throw new Error(`not found: ${pos[1]}`);
+    console.log(`rejected ${u.kind} update ${u.id}: ${reason}`);
+  } else throw new Error(usage);
+  await closePools();
 }
 
 function loadAuthorFallback(): string {
