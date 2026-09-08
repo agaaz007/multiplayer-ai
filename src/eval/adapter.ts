@@ -13,7 +13,7 @@ import { redactText } from "../continuity/redact.js";
 /**
  * The executable the continuity kit runs once per trial:
  *
- *   node dist/eval/adapter.js --condition ours|gbrain [--fake] [--keep]
+ *   node dist/eval/adapter.js --condition ours|gbrain [--fake | --fake-harness] [--keep]
  *
  * One JSON request on stdin, exactly one JSON observation on stdout. Every log line goes to
  * stderr and to <output_dir>/raw/controller.log (redacted). Flow per trial: pick the CaseRunner;
@@ -23,6 +23,9 @@ import { redactText } from "../continuity/redact.js";
  *
  * `--fake` sets LEDGER_EVAL_FAKE_HARNESS=1 and swaps in the fake drivers and plugin from fake.ts so
  * the pipeline runs without a model; status stays "completed" so the kit scores it.
+ * `--fake-harness` keeps the REAL drivers (fixture/origin/successor under LEDGER_EVAL_FAKE_HARNESS=1,
+ * so no harness process is spawned but the trial repo, ledger and eval database are exercised) and
+ * uses the fake plugin; the drivers' canned successor answers fail honestly.
  * LEDGER_EVAL_KEEP=1 (or --keep) keeps the trial root after the run.
  *
  * A thrown error anywhere yields status "error" with the message; the process still exits 0 with
@@ -32,22 +35,24 @@ import { redactText } from "../continuity/redact.js";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, "..", "..");
 
-interface Args { condition: Condition; fake: boolean; keep: boolean }
+interface Args { condition: Condition; fake: boolean; fakeHarness: boolean; keep: boolean }
 
 function parseArgs(argv: string[]): Args {
   let condition: Condition | null = null;
   let fake = false;
+  let fakeHarness = false;
   let keep = false;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--condition") { const v = argv[++i]; if (v !== "ours" && v !== "gbrain") throw new Error(`--condition must be ours|gbrain, got ${v}`); condition = v; }
     else if (a.startsWith("--condition=")) { const v = a.slice("--condition=".length); if (v !== "ours" && v !== "gbrain") throw new Error(`--condition must be ours|gbrain, got ${v}`); condition = v; }
     else if (a === "--fake") fake = true;
+    else if (a === "--fake-harness") fakeHarness = true;
     else if (a === "--keep") keep = true;
     else throw new Error(`unknown argument ${a}`);
   }
   if (!condition) throw new Error("--condition ours|gbrain is required");
-  return { condition, fake, keep: keep || process.env.LEDGER_EVAL_KEEP === "1" };
+  return { condition, fake, fakeHarness, keep: keep || process.env.LEDGER_EVAL_KEEP === "1" };
 }
 
 function readStdin(): Promise<string> {
@@ -82,16 +87,20 @@ function cliVersion(h: Harness): string {
  *   harness.js   harnessVersion(h)                       (optional; falls back to `<harness> --version`)
  *   conditions/<c>.js  default | plugin | <c>Plugin | <c>   (a ConditionPlugin, optionally with bootstrapWorktree)
  */
-async function loadReal(condition: Condition): Promise<{ drivers: Drivers; plugin: EvalPlugin }> {
+async function loadReal(condition: Condition, fakePluginOnly: boolean): Promise<{ drivers: Drivers; plugin: EvalPlugin }> {
   const load = async (rel: string): Promise<any> => import(new URL(rel, import.meta.url).href);
   const fixture = await load("./fixture.js");
   const origin = await load("./origin.js");
   const successor = await load("./successor.js");
   let harness: any = null;
   try { harness = await load("./harness.js"); } catch { /* optional */ }
-  const mod = await load(`./conditions/${condition}.js`);
-  const plugin: EvalPlugin = mod.default ?? mod.plugin ?? mod[`${condition}Plugin`] ?? mod[condition];
-  if (!plugin || typeof plugin.prepare !== "function") throw new Error(`conditions/${condition}.js exports no ConditionPlugin`);
+  let plugin: EvalPlugin;
+  if (fakePluginOnly) plugin = fakePlugin(condition);
+  else {
+    const mod = await load(`./conditions/${condition}.js`);
+    plugin = mod.default ?? mod.plugin ?? mod[`${condition}Plugin`] ?? mod[condition];
+    if (!plugin || typeof plugin.prepare !== "function") throw new Error(`conditions/${condition}.js exports no ConditionPlugin`);
+  }
   const createTrial = fixture.createTrial ?? fixture.default?.createTrial;
   const cleanupTrial = fixture.cleanupTrial ?? fixture.default?.cleanupTrial;
   const runOrigin = origin.runOrigin ?? origin.default;
@@ -147,14 +156,14 @@ async function runTrial(request: AdapterRequest, args: Args, log: (l: string) =>
     log(`case ${request.case.id} skipped: ${runner.skip}`);
     return { status: "skipped", reason: runner.skip, provenance: base };
   }
-  const { drivers, plugin } = args.fake ? { drivers: fakeDrivers, plugin: fakePlugin(args.condition) } : await loadReal(args.condition);
+  const { drivers, plugin } = args.fake ? { drivers: fakeDrivers, plugin: fakePlugin(args.condition) } : await loadReal(args.condition, args.fakeHarness);
   const started = Date.now();
   const ctx = await drivers.createTrial(request, args.condition, log);
   timings.create_trial_ms = Date.now() - started;
   let obs: Observation | null = null;
   try {
     fs.mkdirSync(ctx.paths.rawDir, { recursive: true });
-    log(`trial ${request.trial_id}: case ${request.case.id} (${request.case.title}), ${request.direction}, rep ${request.repetition}, condition ${args.condition}${args.fake ? " [fake]" : ""}`);
+    log(`trial ${request.trial_id}: case ${request.case.id} (${request.case.title}), ${request.direction}, rep ${request.repetition}, condition ${args.condition}${args.fake ? " [fake drivers+plugin]" : args.fakeHarness ? " [real drivers, fake harness, fake plugin]" : ""}`);
     log(`paths: repo=${ctx.paths.repo} successor=${ctx.paths.successorRepo} ledger=${ctx.paths.ledgerDir} config=${ctx.paths.configDir}`);
 
     if (runner.before) { const t = Date.now(); await runner.before(ctx); timings.before_ms = Date.now() - t; }
@@ -242,7 +251,7 @@ async function main(): Promise<void> {
   let obs: Observation;
   try {
     args = parseArgs(process.argv.slice(2));
-    if (args.fake) process.env.LEDGER_EVAL_FAKE_HARNESS = "1";
+    if (args.fake || args.fakeHarness) process.env.LEDGER_EVAL_FAKE_HARNESS = "1";
     request = JSON.parse(await readStdin()) as AdapterRequest;
     if (request.protocol_version !== 1) throw new Error(`unsupported adapter protocol ${String((request as any).protocol_version)}`);
     if (!request.output_dir || !path.isAbsolute(request.output_dir)) throw new Error("request.output_dir must be absolute");

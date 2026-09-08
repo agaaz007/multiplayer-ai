@@ -92,7 +92,15 @@ function cellLabel(c: MatrixCell, reason?: string): string {
     const missing = c.checks.filter((k) => k.status === "missing").map((k) => (k.key ? `${k.type}:${k.key}` : k.type));
     return `unverified (${missing.join(", ") || reason || "see report"})`;
   }
-  return reason ? `not_run (${reason.slice(0, 60)})` : "not_run";
+  return reason ? `not_run (${clip(reason, 56)})` : "not_run";
+}
+
+/** Cut at a word boundary with an ellipsis; the full reason stays in report.json and matrix.json. */
+function clip(s: string, n: number): string {
+  const t = s.replace(/\s+/g, " ").trim();
+  if (t.length <= n) return t;
+  const cut = t.slice(0, n);
+  return cut.slice(0, Math.max(cut.lastIndexOf(" "), 24)).replace(/[,:;]$/, "") + "…";
 }
 
 function counts(cells: MatrixCell[]) {
