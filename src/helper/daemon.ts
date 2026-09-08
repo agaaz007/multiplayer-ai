@@ -339,12 +339,17 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
       const idx = readIndex(sid);
       const seen = new Set(s.seenCallIds);
       const confirmed: NormEvent[] = [];
+      let subcalls = 0;
       for (const e of idx) {
         if (seen.has(e.id) || s.reconciled.includes(e.id)) continue;
+        // Codex's hook reports each shell sub-command of the `exec` JS wrapper under its own `exec-<uuid>` id;
+        // the transcript carries the wrapper call as `call_…`. A sub-call id is not a missed event.
+        if (/^exec-[0-9a-f-]{8,}/i.test(e.id)) { s.reconciled.push(e.id); subcalls++; continue; }
         if (now.getTime() - new Date(e.at).getTime() < 60_000) continue; // still arriving
         s.reconciled.push(e.id);
         confirmed.push({ producer_event_id: `gap:${e.id}`, kind: "capture.gap", occurred_at: e.at, payload: { kind: "hook_saw_tool_transcript_did_not", tool: e.tool, tool_use_id: e.id, status: "confirmed" } });
       }
+      if (subcalls) log(`${subcalls} hook sub-call id(s) matched to exec wrapper calls in ${sid.slice(0, 8)} (not gaps)`);
       if (confirmed.length) { await S.appendEvents(pool, sid, confirmed, routing.thread_id, routing.generation); sum.events_uploaded += confirmed.length; log(`${confirmed.length} confirmed capture gap(s) in ${sid.slice(0, 8)}`); }
 
       // ---- signals & snapshot ----
