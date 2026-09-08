@@ -219,8 +219,8 @@ function streamClaude(file: string, fromOffset: number, dataTools: string[]): St
     if (j.sessionId) res.session_id = String(j.sessionId);
     if (j.cwd) res.cwd = String(j.cwd);
     if (j.gitBranch) res.branch = String(j.gitBranch);
-    if (res.sidechain === undefined && j.message) {
-      // first message line decides; later lines in a parent transcript may be mirrored subagent lines
+    if (res.sidechain === undefined && fromOffset === 0 && j.message) {
+      // the file's first message line decides; an incremental read may start on a mirrored subagent line
       res.sidechain = Boolean(j.isSidechain);
       if (typeof j.agentId === "string" && j.agentId) res.agent_id = j.agentId;
       if (j.sessionId) res.parent_session_id = String(j.sessionId);
