@@ -228,16 +228,18 @@ export async function collectCommon(ctx: TrialContext, origin: OriginRun | null,
   for (const id of cited) {
     const e = events.find((x) => x.id === id);
     if (!e) continue;
-    let found: { o: ToolOutput; kind: string } | null = null;
-    for (const o of outputs) { const kind = outputContains(o.output, e.text); if (kind) { found = { o, kind }; break; } }
-    if (!found) { log(`collector: evidence ${id} cited but no successor tool output contained its text; left out`); continue; }
+    const candidates = outputs.map((o) => ({ o, kind: outputContains(o.output, e.text) })).filter((c): c is { o: ToolOutput; kind: NonNullable<ReturnType<typeof outputContains>> } => c.kind !== null);
+    if (!candidates.length) { log(`collector: evidence ${id} cited but no successor tool output contained its text; left out`); continue; }
+    const pluginRef = await refOf(e);
+    // Without a plugin ref, prefer the output that also carries the ledger object id from the sidecar (D02), else the first hit.
+    const found = (!pluginRef && ledgerIds[id] && candidates.find((c) => c.o.output.includes(ledgerIds[id]))) || candidates[0];
     let rawRef = rawFiles.get(found.o.n);
     if (!rawRef) {
       rawRef = `raw/retrieval-${found.o.n}.json`;
       fs.writeFileSync(path.join(ctx.paths.outputDir, rawRef), JSON.stringify({ n: found.o.n, tool: found.o.tool, call_id: found.o.call_id, at: found.o.at, input: found.o.input, output: found.o.output, source: found.o.source }, null, 2) + "\n");
       rawFiles.set(found.o.n, rawRef);
     }
-    let systemRef = await refOf(e);
+    let systemRef = pluginRef;
     if (!systemRef && ledgerIds[id] && found.o.output.includes(ledgerIds[id])) systemRef = ledgerIds[id];
     if (!systemRef) systemRef = `${ctx.condition}:${found.o.tool}:${found.o.call_id ?? `call-${found.o.n}`}`;
     retrieved[id] = { text: e.text, system_ref: systemRef, raw_ref: rawRef };
