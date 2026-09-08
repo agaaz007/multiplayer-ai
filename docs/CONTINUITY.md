@@ -49,7 +49,11 @@ Documents:
 | Helper git operations work without a terminal: `gh auth git-credential` when `gh` is installed, prompts disabled, override via `LEDGER_GIT_CREDENTIAL_HELPER` | landed (8 Sep, after the launchd push failure) | `src/continuity/shadow.ts` |
 | Resumed sessions re-acquire their thread claim; subagent transcripts have their own identity and never snapshot the parent's worktree; push/verify failures surface in the pass log | landed (8 Sep) | `src/helper/daemon.ts`, `src/continuity/events.ts` |
 | Live classifier run on this session: 251 events → 15 spans linked, 3 records created, 7 updates proposed, 4 unassigned, 0 rejected, 229 s | done once, 8 Sep | Neon |
-| Rachit's machine enrolled; real interrupted handoff test | pending Rachit | runbook |
+| Classifier lag disclosed in every resume and record pack ("captured through seq N, classified through seq M") | landed (8 Sep, required by eval L02) | `src/continuity/resume.ts`, `src/continuity/recordpack.ts` |
+| Helper ignores repo roots under `continuity.exclude_paths` (evaluation fixtures) | landed (8 Sep) | `src/helper/daemon.ts`, `src/store.ts` |
+| Continuity evaluation adapter for the kit: fixture, origin and successor drivers, collector, case runners, condition plugins (ours, gbrain), matrix comparison | **in progress** (three agents, 8 Sep) | `src/eval/`, `eval/kit/` |
+| Rachit's helper enrolled and uploading (Codex 0.153.4, MacBook-Pro.local); first sessions were in a non-repo folder | done 8 Sep; real handoff test pending a session in the HiAstro checkout | Neon |
+| Real interrupted handoff test across two machines | pending Rachit's next HiAstro session | runbook |
 | Postgres backup and restore drill | planned | |
 
 ---
@@ -87,6 +91,9 @@ From the "shared accumulation, then task-directed retrieval" review. Threads rem
 
 ### D-010 · 2026-09-08 · Postgres + git stay the stores; no graph database
 The record graph is small and shallow: five or six edge types, one or two joins per question, recursive CTE for anything deeper. Retrieval is the hard part and lives in Postgres (FTS now, `pgvector` if needed). Git keeps accepted knowledge and code. A graph view for humans may be derived; a graph store is not the system of record. Revisit trigger: hundreds of records with dense dependency edges and routine five-hop questions; first stop would be Apache AGE on the same Postgres.
+
+### D-012 · 2026-09-08 · Adopt the continuity evaluation kit as the acceptance gate; first benchmark is ours vs gbrain
+The kit (`eval/kit/`, 12 cases in 5 levels, private oracle, exact-evidence scoring, level-gated report) replaces the "3 of 3 handoffs" gate in D-003's confirmation. The first benchmark compares two memory substrates for a fresh successor with the same model, prompt, and repo: **ours** (27 Ledger tools, brief, snapshot worktree) versus **gbrain** (the same normalized origin events ingested into an isolated PGLite brain, gbrain MCP tools, repo at master). Options that lost for the first round: mem0 (not installed, no key), legacy-Ledger and GitHub-only and last-summary-only baselines (deferred to keep the first matrix small; the adapter's condition plugin makes them cheap to add later). Phase 1 scope: D01 to D03, R01, R02, E01, Codex to Claude, one repetition; C01, C02, L02 are ours-only by construction; L01 waits on forced compaction. Adapter lives in `src/eval/`, TypeScript, invoked by the kit as an argv. Successor model held fixed (Sonnet 5 for Claude; Codex default), origin turns on Haiku 4.5.
 
 ### D-011 · 2026-09-08 · Build in waves with parallel agents on partitioned files
 Wave 1: records layer, emitter improvements, evidence query tools. Wave 2: classifier and record-level retrieval, which depend on the records interface. Interface fixed first in `src/continuity/records.ts` so consumers and implementers share one contract. Each agent builds to its own `dist-<x>/` and tests against its own local database to avoid clobbering.

@@ -15,6 +15,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json && tsc -p tsconfig.ui.json && node scripts/build-ui.mjs && chmod +x dist/cli.js",
+    "build:core": "tsc -p tsconfig.core.json && tsc -p tsconfig.ui.json && node scripts/build-ui.mjs && chmod +x dist/cli.js",
     "dev": "tsc -p tsconfig.json --watch",
     "test": "npm run build && node dist/selftest.js",
     "test:continuity": "npm run build && node dist/selftest-continuity.js",
