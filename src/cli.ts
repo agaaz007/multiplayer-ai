@@ -326,6 +326,28 @@ async function main() {
         await closePools();
         return;
       }
+      case "events": {
+        const cfg = loadConfig();
+        const thread_id = flag(args, "--thread");
+        const session_id = flag(args, "--session");
+        if (!thread_id && !session_id) throw new Error("usage: ledger events --thread <id> | --session <id> [--kinds a,b] [--path p] [--q text] [--after N] [--before N] [--limit N] [--chars N]");
+        const n = (s: string | undefined) => (s == null ? undefined : Number(s));
+        const r = await queryEvents(getPool(cfg), { thread_id, session_id, kinds: flag(args, "--kinds")?.split(",").map((k) => k.trim()).filter(Boolean), path: flag(args, "--path"), q: flag(args, "--q"), after_seq: n(flag(args, "--after")), before_seq: n(flag(args, "--before")), limit: n(flag(args, "--limit")), preview_chars: n(flag(args, "--chars")) });
+        console.log(r.text);
+        await closePools();
+        return;
+      }
+      case "artifact": {
+        const cfg = loadConfig();
+        const ref = args[0];
+        if (!ref || ref.startsWith("--")) throw new Error("usage: ledger artifact <id|sha256> [--offset N] [--max N]");
+        const bySha = /^[0-9a-f]{64}$/i.test(ref);
+        const r = await getArtifact(getPool(cfg), bySha ? { sha256: ref } : { id: ref }, { offset: Number(flag(args, "--offset") ?? 0), max_chars: Number(flag(args, "--max") ?? 20_000) });
+        console.log(r.text);
+        await closePools();
+        if (!r.found) process.exit(1);
+        return;
+      }
       case "sync": {
         const r = pull(loadConfig(), true);
         console.log(r ?? "synced");

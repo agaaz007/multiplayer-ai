@@ -381,7 +381,7 @@ export async function addStateUpdate(q: Q, u: { record_id: string; session_id?: 
   // Evidence is exactly what the caller names. A span without evidence stays without evidence; nothing is fabricated.
   const evidence = normalizeEvidence(u.evidence);
   const sessionId = u.session_id ?? null;
-  if ((from != null || evidence.length) && !sessionId && from != null) throw new Error("session_id is required when from_seq/to_seq are given");
+  if (from != null && !sessionId) throw new Error("session_id is required when from_seq/to_seq are given");
   await requireRecord(q, u.record_id);
   if (sessionId && !(await sessionExists(q, sessionId))) throw new Error(`session not found: ${sessionId}`);
   const supersedes = u.supersedes ?? null;
