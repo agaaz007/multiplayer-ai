@@ -7,6 +7,7 @@ import { listRecords, recordEvidence, recordLinks, recordState, unassignedSpans,
 import { clipSummary, INSTRUCTIONS_HEAD, RECENT_FILES_MINUTES, SUMMARY_BUDGET_SHARE, SUMMARY_MAX_TOKENS } from "./resume.js";
 import { eventLine, PREVIEW_MAX_CHARS } from "./evidence.js";
 import { defaultRemoteBranch, repoIdentity, repoRoot } from "./shadow.js";
+import { readProgress } from "./classify.js";
 
 /**
  * The record pack (spec §13a, "Retrieval by record"): the active context for
