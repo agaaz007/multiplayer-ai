@@ -11,10 +11,12 @@ import { RECEIPT_GUIDANCE, savedReceipt, receiptText } from "./receipts.js";
 import { continuityConfigured, getPool } from "./continuity/db.js";
 import { listThreads, createThread, getThread, claimThread, releaseClaim, upsertSession, appendEvents } from "./continuity/store.js";
 import { buildResumePack, threadLine } from "./continuity/resume.js";
-import { queryEvents, getArtifact, EVENTS_DEFAULT_LIMIT, EVENTS_MAX_LIMIT, PREVIEW_CHARS, PREVIEW_MAX_CHARS, ARTIFACT_DEFAULT_CHARS, ARTIFACT_MAX_CHARS } from "./continuity/evidence.js";
+import { queryEvents, getArtifact, eventLine, EVENTS_DEFAULT_LIMIT, EVENTS_MAX_LIMIT, PREVIEW_CHARS, PREVIEW_MAX_CHARS, ARTIFACT_DEFAULT_CHARS, ARTIFACT_MAX_CHARS } from "./continuity/evidence.js";
 import { repoRoot, repoIdentity, currentBranch } from "./continuity/shadow.js";
 import { openThreadsText } from "./continuity/brief.js";
 import { writeBinding, writeSignal } from "./helper/signals.js";
+import { buildRecordPack, listRecordSummaries, recordLine, unassignedLine } from "./continuity/recordpack.js";
+import { addStateUpdate, confirmStateUpdate, createRecord, getRecord, linkSpan, rejectStateUpdate, searchEvents, unassignedSpans } from "./continuity/records.js";
 
 const text = (s: string) => ({ content: [{ type: "text" as const, text: s }] });
 
@@ -234,18 +236,30 @@ export function createMcpServer(cfg: Config) {
     server.registerTool(
       "ledger_resume",
       {
-        title: "Resume a thread",
-        description: "Continue a teammate's thread. mode=continue claims it (advisory) and returns the resume pack with worktree bootstrap commands; mode=fork creates a linked fork you own; mode=inspect reads without claiming. Pass cwd (a checkout of the same repo) to get the diff of what changed since the checkpoint. Your first turn must inspect the worktree, state confirmed vs uncertain progress, and never blindly rerun a pending operation.",
+        title: "Resume a thread or a work record",
+        description: "Continue a teammate's work. Pass thread_id for a thread (one session's worktree and claim) or record_id for a work record (one goal accumulated across sessions and teammates: state with proposed items flagged, evidence from every contributing session in time order, pending operations, contradictions, linked Ledger objects with supersession flags, unassigned spans that may belong, and the bootstrap for the latest snapshot). mode=continue claims the thread (advisory; for a record, the thread of its most recent contributing session; a non-code record has no claim) and returns the pack with worktree bootstrap commands; mode=fork (threads only) creates a linked fork you own; mode=inspect reads without claiming. Pass cwd (a checkout of the same repo) to get the diff of what changed since the checkpoint. Your first turn must inspect the worktree, state confirmed vs uncertain progress, never treat a proposed update as decided, and never blindly rerun a pending operation.",
         inputSchema: {
-          thread_id: z.string(),
+          thread_id: z.string().optional().describe("Thread to resume; thread_id or record_id is required"),
+          record_id: z.string().optional().describe("Work record to resume instead of a thread (from ledger_records or the brief's Open work section)"),
           mode: z.enum(["continue", "fork", "inspect"]).default("continue"),
           cwd: z.string().optional().describe("Local checkout of the same repo, for the intervening-change diff"),
           session_id: z.string().optional().describe("Your harness session id if known; binds this session to the thread"),
           budget_tokens: z.number().int().min(1500).max(20000).default(6000),
         },
       },
-      async ({ thread_id, mode, cwd, session_id, budget_tokens }) => {
+      async ({ thread_id, record_id, mode, cwd, session_id, budget_tokens }) => {
         const sid = sessionOf(session_id);
+        if (record_id) {
+          if (mode === "fork") return text("mode=fork applies to threads; use mode=continue or mode=inspect with record_id (fork the underlying thread with thread_id if you need parallel work).");
+          try {
+            const pack = await buildRecordPack(cfg, pool(), record_id, { mode, author: cfg.author, sessionId: sid, repoPath: cwd, budgetTokens: budget_tokens });
+            if (mode === "continue" && pack.claim.acquired && pack.claim.thread_id) writeBinding(sid, { thread_id: pack.claim.thread_id });
+            return text(pack.text);
+          } catch (e: any) {
+            return text(`ledger_resume failed: ${e.message}`);
+          }
+        }
+        if (!thread_id) return text("thread_id or record_id is required.");
         const pack = await buildResumePack(cfg, pool(), thread_id, { mode, author: cfg.author, sessionId: sid, repoPath: cwd, budgetTokens: budget_tokens });
         if (mode !== "inspect" && pack.claim.acquired) writeBinding(sid, { thread_id: pack.fork?.id ?? thread_id });
         return text(pack.text);
