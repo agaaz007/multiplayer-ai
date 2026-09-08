@@ -89,11 +89,10 @@ export const fakeDrivers: Drivers = {
     fs.rmSync(ctx.paths.root, { recursive: true, force: true });
   },
   async runOrigin(ctx, events) {
-    const t0 = Date.now();
     const sessions = [...new Set(events.map((e) => e.session))];
     const turns = events.map((e, i) => ({ harness: ctx.originHarness, sessionId: `fake-origin-${e.session}`, transcriptPath: null, turnIndex: i, fixtureEventId: e.id, assistantText: "Noted.", usage: { input_tokens: Math.ceil(e.text.length / 4) + 800, output_tokens: 4 }, wallMs: 1 }));
     fs.writeFileSync(path.join(ctx.paths.rawDir, "origin-fake.jsonl"), turns.map((t) => JSON.stringify({ session: t.sessionId, turn: t.turnIndex, event: t.fixtureEventId })).join("\n") + "\n");
-    return { harness: ctx.originHarness, sessionIds: sessions.map((s) => `fake-origin-${s}`), turns, transcriptPaths: [], totalInputTokens: turns.reduce((a, t) => a + (t.usage?.input_tokens ?? 0), 0), compactions: 0, ...(Date.now() - t0 ? {} : {}) };
+    return { harness: ctx.originHarness, sessionIds: sessions.map((s) => `fake-origin-${s}`), turns, transcriptPaths: [], totalInputTokens: turns.reduce((a, t) => a + (t.usage?.input_tokens ?? 0), 0), compactions: 0 };
   },
   async runSuccessor(ctx, setup, resumePrompt, answerKeys) {
     const t0 = Date.now();
