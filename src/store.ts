@@ -36,6 +36,8 @@ export interface ContinuityConfig {
   snapshot_interval_s?: number;
   /** Run the span→work-record classifier after turn checkpoints. Default true. LEDGER_CLASSIFY=0 also disables. */
   classify?: boolean;
+  /** Sessions whose repo root is under one of these path prefixes are ignored by this machine's helper (e.g. evaluation fixtures). */
+  exclude_paths?: string[];
 }
 
 /**

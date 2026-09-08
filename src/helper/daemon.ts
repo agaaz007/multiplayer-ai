@@ -131,6 +131,9 @@ function sessionIdFor(file: string, harness: "claude" | "codex", parsedId?: stri
 }
 
 function repoAllowed(cfg: Config, repo: string, root: string | null): boolean {
+  // excluded prefixes win (evaluation fixtures, scratch dirs); then the optional allowlist
+  const excl = cfg.continuity?.exclude_paths ?? [];
+  if (root && excl.some((p) => p && (root === p || root.startsWith(p.endsWith(path.sep) ? p : p + path.sep)))) return false;
   const allow = cfg.continuity?.repos ?? [];
   if (!allow.length) return true;
   return allow.some((a) => repo === a || repo.endsWith(a) || (root && (root === a || root.endsWith(a))));
