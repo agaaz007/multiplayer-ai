@@ -55,8 +55,16 @@ export interface StreamResult {
   session_id?: string;
   cwd?: string;
   branch?: string;
-  /** Claude subagent transcript (isSidechain); never auto-bound to a thread */
+  /**
+   * Claude subagent transcript: decided by the FIRST message line only. A parent transcript also
+   * contains isSidechain lines (the subagent's messages are mirrored into it), so "any line" is wrong.
+   * Subagent files live at <session>/subagents/agent-<agentId>.jsonl and share the parent's sessionId.
+   */
   sidechain?: boolean;
+  /** Claude subagent id (agentId on its lines), when this file is a subagent transcript */
+  agent_id?: string;
+  /** the sessionId the lines carry; for a subagent file this is the PARENT session, not this file's identity */
+  parent_session_id?: string;
   /** shapes we did not recognize, for coverage reporting */
   unknown: Record<string, number>;
 }
@@ -211,7 +219,12 @@ function streamClaude(file: string, fromOffset: number, dataTools: string[]): St
     if (j.sessionId) res.session_id = String(j.sessionId);
     if (j.cwd) res.cwd = String(j.cwd);
     if (j.gitBranch) res.branch = String(j.gitBranch);
-    if (j.isSidechain) res.sidechain = true;
+    if (res.sidechain === undefined && j.message) {
+      // first message line decides; later lines in a parent transcript may be mirrored subagent lines
+      res.sidechain = Boolean(j.isSidechain);
+      if (typeof j.agentId === "string" && j.agentId) res.agent_id = j.agentId;
+      if (j.sessionId) res.parent_session_id = String(j.sessionId);
+    }
     const ts: string | undefined = j.timestamp;
     const content = j.message?.content;
 

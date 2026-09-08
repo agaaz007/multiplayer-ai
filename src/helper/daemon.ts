@@ -118,9 +118,14 @@ function defaultRoots() {
   return { claude: path.join(os.homedir(), ".claude", "projects"), codex: path.join(os.homedir(), ".codex", "sessions") };
 }
 
+/**
+ * Session identity is the FILE, not the sessionId the lines carry. Claude subagent transcripts
+ * (<session>/subagents/agent-<id>.jsonl) carry the parent's sessionId; keying on it collided a
+ * subagent with its parent, thrashed the shared offset, and re-spooled hundreds of events per pass.
+ */
 function sessionIdFor(file: string, harness: "claude" | "codex", parsedId?: string): string {
-  if (parsedId) return parsedId;
   if (harness === "claude") return path.basename(file, ".jsonl");
+  if (parsedId) return parsedId;
   const m = path.basename(file).match(/([0-9a-f]{8}-[0-9a-f-]{27,})\.jsonl$/i);
   return m?.[1] ?? path.basename(file, ".jsonl");
 }
