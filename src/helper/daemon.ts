@@ -55,6 +55,8 @@ export interface SessState {
   firstInstruction?: string;
   /** last time the classifier ran for this session (rate limit: one run per 120 s) */
   lastClassifyAt?: number;
+  /** a classification is running detached for this session; never start a second one */
+  classifyInFlight?: boolean;
 }
 
 export interface HelperOpts {
@@ -68,7 +70,12 @@ export interface HelperOpts {
   log?: (s: string) => void;
   /** disable git push (tests) */
   push?: boolean;
+  /** how long helperOnce waits for detached classifications before returning; 0 (default) = do not wait. Tests set it so results are visible on return. */
+  classifyWaitMs?: number;
 }
+
+/** Detached classifications by session id; a pass never blocks on them, and a session never runs two. */
+const classifyInFlight = new Map<string, Promise<void>>();
 
 export interface PassSummary {
   at: string;

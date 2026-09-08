@@ -3,7 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type pg from "pg";
 import { ledgerHome, type Config } from "../store.js";
-import { runExtractor } from "../extract.js";
+import { runExtractorAsync } from "../extract.js";
 import * as S from "./store.js";
 import * as R from "./records.js";
 import type { RecordKind, UpdateKind, Span, WorkRecord, StateUpdate } from "./records.js";
@@ -287,7 +287,7 @@ export async function classifySession(cfg: Config, pool: pg.Pool, sessionId: str
   // 4. model
   let out: ModelOutput;
   try {
-    out = parseClassifyOutput(runExtractor(prompt, cfg));
+    out = parseClassifyOutput(await runExtractorAsync(prompt, cfg));
   } catch (e: any) {
     return fail(`classifier failed: ${String(e?.message ?? e).slice(0, 300)}`);
   }
