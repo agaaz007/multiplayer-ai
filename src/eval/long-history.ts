@@ -162,6 +162,9 @@ export async function runLongHistoryOrigin(ctx: TrialContext): Promise<OriginRun
     const invocationFile = path.join(rawDir, "origin-invocations.json");
     const invocation = JSON.parse(fs.readFileSync(invocationFile, "utf8")).invocations[0];
     if (invocation?.resume !== false || invocation.harness !== ctx.originHarness) throw new Error(`L01 epoch ${epoch + 1} first invocation was not a fresh origin-harness session`);
+    const firstStart = Date.parse(turns[0].startedAt);
+    const lastEnd = Date.parse(turns[turns.length - 1].endedAt);
+    if (!Number.isFinite(firstStart) || !Number.isFinite(lastEnd) || lastEnd < firstStart) throw new Error(`L01 epoch ${epoch + 1} has invalid observed runtime timestamps`);
     if (previousEnd) {
       const nextStart = turns[0].startedAt;
       if (!Number.isFinite(Date.parse(nextStart)) || Date.parse(nextStart) < Date.parse(previousEnd)) throw new Error("L01 reset trace has invalid or overlapping epoch timestamps");
@@ -197,6 +200,7 @@ export async function runLongHistoryOrigin(ctx: TrialContext): Promise<OriginRun
 }
 
 export function collectLongHistory(ctx: TrialContext, origin: OriginRun, successor: SuccessorRun): { stress_file: string } {
+  if (successor.bootTokens === null || !Number.isFinite(successor.bootTokens) || successor.bootTokens < 1) throw new Error("L01 successor boot token count is unmeasured; refusing an unverifiable stress artifact");
   const measured = JSON.parse(fs.readFileSync(path.join(ctx.paths.rawDir, "long-history-measurement.json"), "utf8"));
   if (measured.verified_original_events.length !== ctx.request.case.events.length) throw new Error("L01 stress data omits original source events");
   verifyObservedHistory(ctx.request.case.events, origin);
