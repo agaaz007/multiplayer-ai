@@ -1,5 +1,5 @@
 {
   "extends": "./tsconfig.json",
   "include": ["src"],
-  "exclude": ["src/eval"]
+  "exclude": ["src/eval", "src/selftest-eval-*.ts"]
 }
