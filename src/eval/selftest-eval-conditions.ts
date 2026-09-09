@@ -350,7 +350,8 @@ let oursServer: { command: string; args: string[]; env: Record<string, string> }
   assert.equal(setup.env.LEDGER_EVAL, "1");
   assert.ok(setup.allowedTools.includes("mcp__ledger__*") && setup.allowedTools.includes("Read"));
   assert.equal(setup.cwd, successorRepo);
-  assert.equal(setup.preamble, "");
+  assert.equal(setup.preamble, fs.readFileSync(path.join(rawDir, "ours-startup-brief.txt"), "utf8").trim());
+  assert.ok(setup.preamble.includes(sessA.thread_id!), "explicit startup brief includes the trial origin thread");
   ok("ours.successorSetup: MCP config runs `node cli.js mcp` against the trial config dir as agaaz with LEDGER_EVAL=1; author switched with fs");
 }
 {
