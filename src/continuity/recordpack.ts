@@ -7,6 +7,7 @@ import { listRecords, recordEvidence, recordLinks, recordState, unassignedSpans,
 import { clipSummary, INSTRUCTIONS_HEAD, RECENT_FILES_MINUTES, SUMMARY_BUDGET_SHARE, SUMMARY_MAX_TOKENS } from "./resume.js";
 import { eventLine, PREVIEW_MAX_CHARS } from "./evidence.js";
 import { defaultRemoteBranch, repoIdentity, repoRoot } from "./shadow.js";
+import { readProgress } from "./classify.js";
 
 /**
  * The record pack (spec §13a, "Retrieval by record"): the active context for
@@ -360,6 +361,14 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
   // ----- render within budget; softer sections shrink first, each drop named -----
   const stateCap = budget >= STATE_WIDE_BUDGET ? STATE_MAX_PER_KIND_WIDE : STATE_MAX_PER_KIND;
   const stateFetch = `ledger_record_get(record_id: ${q(rec.id)}${budget < STATE_WIDE_BUDGET ? `, budget_tokens: ${STATE_WIDE_BUDGET}` : ""})`;
+  // classifier lag per contributing session: organization into records may trail raw capture; say so
+  const lagLines: string[] = [];
+  for (const s of sessions.slice(0, 3)) {
+    const cap = (await pool.query<{ m: number }>(`select coalesce(max(seq),0)::int as m from cont_events where session_id = $1`, [s.session_id])).rows[0].m;
+    const cls = readProgress(s.session_id)?.last_seq ?? 0;
+    lagLines.push(`Classifier: session ${short(s.session_id)} captured through seq ${cap}, classified through seq ${cls}${cap > cls ? ` (lag ${cap - cls} events; later work may be unassigned to any record yet; see ledger_unassigned)` : " (current)"}.`);
+  }
+
   const render = (level: number): { text: string; omitted: string[]; evidence: RecordPack["evidence_summary"] } => {
     const om = [...omitted];
     const L: string[] = [];
@@ -381,6 +390,7 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
     else L.push(`No verified code snapshot among contributing sessions: treat the code state as unverified.`);
     L.push(`Sources: ${sources.instructions} instructions, ${sources.assistant_messages} assistant messages, ${sources.tool_calls} tool calls, ${sources.compaction_summaries} compaction summaries across ${sources.sessions} sessions in ${sources.spans} spans; ${sources.proposed_updates} proposed and ${sources.confirmed_updates} confirmed state updates.`);
     L.push(`The claim is advisory. It protects the shared record, not the other machine. Proposed items are unconfirmed: nobody has accepted them. Narrative-free: everything below is machine-assembled from evidence; nothing was summarized by this tool.`);
+    for (const l of lagLines) L.push(l);
     L.push(``);
 
     // state

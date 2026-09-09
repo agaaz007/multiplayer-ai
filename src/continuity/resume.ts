@@ -5,6 +5,7 @@ import { TYPES } from "../schema.js";
 import { claimThread, createThread, getClaim, getThread, headCheckpoint, latestCheckpointAny, pendingOperations, sessionEvents, threadEvents, getSession, summarizeThread, type ClaimRow, type SessionRow, type ThreadRow, type ThreadSummary } from "./store.js";
 import { defaultRemoteBranch, diffStat, fetchQuiet, repoRoot, repoIdentity } from "./shadow.js";
 import { PREVIEW_MAX_CHARS, sourcesLine, threadSourceCounts, type SourceCounts } from "./evidence.js";
+import { readProgress } from "./classify.js";
 
 /**
  * The resume pack (spec §7). Built mechanically from the store and git; the
@@ -241,6 +242,14 @@ export async function buildResumePack(cfg: Config, pool: pg.Pool, threadId: stri
   }
 
   // ----- render within budget; softer sections shrink first, each drop named -----
+  // classifier lag is disclosed, never hidden: organization into work records may trail raw capture
+  let lagLine: string | null = null;
+  if (srcSession) {
+    const cap = (await pool.query<{ m: number }>(`select coalesce(max(seq),0)::int as m from cont_events where session_id = $1`, [srcSession.id])).rows[0].m;
+    const cls = readProgress(srcSession.id)?.last_seq ?? 0;
+    lagLine = `Classifier: session ${srcSession.id.slice(0, 8)} captured through seq ${cap}, classified through seq ${cls}${cap > cls ? ` (lag ${cap - cls} events; work after seq ${cls} may be unassigned to any record yet)` : " (current)"}.`;
+  }
+
   const render = (level: number): { text: string; omitted: string[] } => {
     const om = [...omitted];
     const L: string[] = [];
@@ -255,6 +264,7 @@ export async function buildResumePack(cfg: Config, pool: pg.Pool, threadId: stri
     else L.push(`No verified snapshot timestamp: treat the code state as unverified.`);
     L.push(`The claim is advisory. It protects the shared record, not the other machine. Any narrative below is generated and unreviewed; machine fields are the evidence.`);
     L.push(sourcesLine(sources));
+    if (lagLine) L.push(lagLine);
     if (gaps.length) L.push(`Capture gaps (${gaps.length}): ${JSON.stringify(gaps.slice(0, 6))}${gaps.length > 6 ? " …" : ""}`);
     L.push(``);
     L.push(`## Goal`);
