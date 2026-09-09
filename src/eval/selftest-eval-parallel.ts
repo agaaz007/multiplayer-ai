@@ -100,6 +100,7 @@ if (live) {
     assert.equal(verifiedAttributionToolOperation(batchTurn([{ exit_code: 1, output: beforeReport }, checksum])), false, "a failed check cannot borrow a sibling command's exit status");
     assert.equal(verifiedAttributionToolOperation(batchTurn([{ session_id: 45, output: beforeReport }, checksum])), false, "an unfinished check cannot borrow a sibling command's exit status");
     assert.equal(verifiedAttributionToolOperation(batchTurn([{ status: "rejected", value: { exit_code: 0, output: beforeReport } }, checksum])), false);
+    assert.equal(verifiedAttributionToolOperation(batchTurn([{ exit_code: 0, output: JSON.stringify({ phase: "after", success: true }) }])), false, "a successful after-phase result cannot replace the required before-phase operation");
     ok("batched adjacent/array results retain every operation and its own status; successful siblings cannot validate failed or unfinished checks");
     await C02.before!(ctx);
     assert.equal(git(paths.repo, "status", "--porcelain"), "");

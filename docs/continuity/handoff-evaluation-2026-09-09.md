@@ -45,14 +45,29 @@ The private oracle was outside the agent worktrees and was not supplied in succe
 
 **Other requested hard-handoff checks.**
 
-| Check | Status at this report's draft |
+| Check | Observed status |
 | --- | --- |
 | Different laptops | Not run; all controlled trials used the same machine |
 | Both harness directions | E03 completed in both directions, one repetition each |
-| Third agent actively progressing during handoff, C02 | Corrected rerun pending; append observed verdicts and artifact paths when complete |
+| Third agent actively progressing during handoff, C02 | Four trials completed: strict Ledger 0/2, GBrain 1/2; two forward failures are verifier artifacts, and Ledger reverse has a real third-agent setup failure |
 | Long mixed-topic history and three context resets, L01 | Running; append observed history size, resets, boot tokens, verdicts, and artifact paths when complete |
 
 No continuity level is demonstrated by these E03 results. The additional concurrency and history checks must be reported from their actual observation artifacts rather than inferred from the implementation.
+
+**C02: real concurrent work, with verifier and setup failures separated.**
+
+The [C02-b run](../../eval/runs/hard-c02-20260909-b/manifest.json) used an independent third harness in a detached worktree on the same repository. It implemented an attribution aggregator and ran varied-input checks before, during, and after the paywall successor. The controller verified process overlap, the separate implementation, successful tool completion, and unchanged sentinel/checker bytes. A neutral untracked marker ensured a snapshot existed when the origin left the repository clean; the marker contains no expected answer and is explicitly recorded as controlled fixture setup.
+
+| Condition | Origin → successor | Original official verdict | Observed evidence |
+| --- | --- | --- | --- |
+| Ledger | Codex → Claude | Fail | Full third-harness overlap, 546 successful checks during the successor, independent validation and sentinel preservation; before-phase tool verifier rejected a batched result |
+| GBrain | Codex → Claude | Fail | Full overlap, 549 checks during, independent validation and sentinel preservation; same verifier defect |
+| Ledger | Claude → Codex | Fail | Third agent's initial `before` check failed on TODO code; after implementing it ran `after` instead of repeating `before`. No during phase launched and no overlap occurred |
+| GBrain | Claude → Codex | Pass | Full overlap, 112 checks during, successful before/during/after tool operations, independent validation and sentinel preservation |
+
+The forward Codex tool responses contained several adjacent JSON results. The old verifier examined only the last result, a checksum command, and missed the successful attribution command. A later parser retains each command's own status and follows exact shell/cell polling chains. Read-only replay verifies the forward operations; the original [Ledger](../../eval/runs/hard-c02-20260909-b/ours/report.json) and [GBrain](../../eval/runs/hard-c02-20260909-b/gbrain/report.json) verdicts remain unchanged. Diagnostic replay is not a newly scored live pass.
+
+Ledger's reverse failure is different: no successful before-phase operation existed, so starting the concurrent phase would have fabricated a pass. Independent review confirms the absence of overlap. This is a third-agent protocol failure in this trial; it does not show that Ledger disturbed the other worktree. These observations do not establish a coordination advantage over the configured GBrain baseline. C01's claim-race and stale-upload case remains unimplemented.
 
 **Setup failures are retained separately from scored E03-b.**
 
