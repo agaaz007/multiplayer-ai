@@ -33,7 +33,7 @@ const ok = (message: string) => console.log(`  ok ${++checks}. ${message}`);
 
 try {
   const suite = path.join(tmp, "suite");
-  execFileSync(py, [kit, "prepare", "--out", suite, "--noise-events", "1"], { env, stdio: "pipe" });
+  execFileSync(py, [kit, "prepare", "--out", suite, "--noise-events", "2"], { env, stdio: "pipe" });
   const fixture = readJson(path.join(suite, "public/E03.json")) as PublicCase;
   const seed = fixture.seed_files!["layout.json"];
   const seedConfig = JSON.parse(seed);
@@ -113,9 +113,9 @@ try {
     const extra = await E03.collect!(ctx, origin, successor);
     assert.equal(extra.final_files, "final", `${name} must remain scoreable`);
     assert.equal(readJson(path.join(ctx.paths.rawDir, "e03-validation.json")).completion_passed, false, name);
-    assert.equal(officialScore(ctx, extra).status, "fail", name);
+    assert.equal(officialScore(ctx, extra).status, ["invalid_json", "array"].includes(name) ? "unverified" : "fail", name);
   }
-  ok("11 incomplete/invalid/unrelated-change outputs fail official scoring despite successor claiming all tests passed");
+  ok("11 incomplete/invalid/unrelated-change outputs cannot pass official scoring despite successor claiming all tests passed");
 
   {
     const ctx = context("already-fixed");
@@ -139,7 +139,7 @@ try {
     fs.symlinkSync(path.join(ctx.paths.repo, "layout.json"), path.join(linked.paths.outputDir, "final/layout.json"));
     const extra = await E03.collect!(linked, origin, successor);
     assert.equal(readJson(path.join(linked.paths.rawDir, "e03-validation.json")).final.sha256, null);
-    assert.equal(officialScore(linked, extra).status, "fail");
+    assert.equal(officialScore(linked, extra).status, "unverified");
   }
   ok("missing controller bundle and symlink escapes do not produce false completion");
 

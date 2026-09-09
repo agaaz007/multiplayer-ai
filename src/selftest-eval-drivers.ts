@@ -358,7 +358,8 @@ if (!REAL) {
     const ra = streamTranscript(ta.path, 0, "codex");
     const instrA = ra.events.filter((e) => e.kind === "instruction.added").map((e) => String(e.payload.text));
     assert.equal(instrA.length, 2);
-    assert.ok(instrA[0].startsWith(O.ORIGIN_PROMPT_PREFIX) && instrA[0].endsWith(events[0].text) && instrA[1].endsWith(events[1].text));
+    assert.equal(instrA[0], events[0].text);
+    assert.equal(instrA[1], events[1].text);
     assert.equal(ra.session_id, run.sessionIds[0]);
     assert.equal(ra.cwd, ctxF.paths.repo);
     const rb = streamTranscript(tb.path, 0, "claude");
