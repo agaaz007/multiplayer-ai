@@ -52,7 +52,8 @@ Documents:
 | Classifier lag disclosed in every resume and record pack ("captured through seq N, classified through seq M") | landed (8 Sep, required by eval L02) | `src/continuity/resume.ts`, `src/continuity/recordpack.ts` |
 | Helper ignores repo roots under `continuity.exclude_paths` (evaluation fixtures) | landed (8 Sep) | `src/helper/daemon.ts`, `src/store.ts` |
 | Continuity evaluation adapter for the kit: fixture, real Claude/Codex origin and successor drivers, collector, six phase-1 case runners, condition plugins (ours, gbrain), matrix comparison, `eval/run-phase1.sh` | landed 9 Sep, commit `1c93563`; drivers 30 fake + 12 real-smoke checks, conditions 26, adapter 12 | `src/eval/`, `eval/kit/`, `eval/run-phase1.sh` |
-| First live benchmark trial (D01, ours vs gbrain, Codex→Claude) | **running** 9 Sep | `eval/runs/smoke-d01/` |
+| First live benchmark trial (D01, ours vs gbrain, Codex→Claude) | done 9 Sep: both failed on answer phrasing, then both passed all three checks after the shared contract fix (`dd545c9`) | `eval/runs/smoke-d01/`, `eval/runs/smoke-d01-v2/` |
+| Phase-1 matrix: D01–D03, R01, R02, E01 × ours, gbrain × Codex→Claude × 1 rep | **running** 9 Sep | `eval/runs/phase1-a/` |
 | Rachit's helper enrolled and uploading (Codex 0.153.4, MacBook-Pro.local); first sessions were in a non-repo folder | done 8 Sep; real handoff test pending a session in the HiAstro checkout | Neon |
 | Real interrupted handoff test across two machines | pending Rachit's next HiAstro session | runbook |
 | Postgres backup and restore drill | planned | |

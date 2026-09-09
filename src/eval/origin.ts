@@ -56,13 +56,20 @@ export function authorFor(ctx: TrialContext, sessionLabel: string, primaryLabel 
   return !sessionLabel || sessionLabel === primaryLabel ? ctx.originAuthor : ctx.successorAuthor;
 }
 
+/**
+ * The origin receives the fixture event text VERBATIM as its user turn. The framing line goes
+ * to Claude as an appended system prompt and is omitted for Codex (the events are imperative
+ * already). Putting the framing inside the user turn contaminated the captured instruction:
+ * the exact fixture text then existed only as a substring of a longer prompt, which is what
+ * evidence validation compares against.
+ */
 export function originPrompt(text: string): string {
-  return `${ORIGIN_PROMPT_PREFIX}\n\n${text}`;
+  return text;
 }
 
 /** Claude argv. The prompt sits right after -p because --add-dir / --allowedTools / --mcp-config are variadic and would swallow it. */
 export function claudeOriginArgs(prompt: string, sessionId: string, resume: boolean, model: string, addDir: string, mcpConfigPath: string | null, allowedTools?: string[]): string[] {
-  const a = ["-p", prompt, ...(resume ? ["--resume", sessionId] : ["--session-id", sessionId]), "--model", model, "--output-format", "json", "--dangerously-skip-permissions"];
+  const a = ["-p", prompt, ...(resume ? ["--resume", sessionId] : ["--session-id", sessionId]), "--model", model, "--output-format", "json", "--dangerously-skip-permissions", "--append-system-prompt", ORIGIN_PROMPT_PREFIX];
   if (mcpConfigPath) a.push("--mcp-config", mcpConfigPath, "--strict-mcp-config");
   a.push("--add-dir", addDir);
   if (allowedTools?.length) a.push("--allowedTools", ...allowedTools);

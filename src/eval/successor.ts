@@ -56,7 +56,9 @@ export function answerContract(answerKeys: string[]): string {
     "Value format: each value is the shortest identifier that names the fact, not a sentence: a number as a JSON number (199, not \"₹199\"), otherwise a single word or a short snake_case noun phrase naming the thing itself (a component, a status, a reason word, a next step). " +
     "Do not add qualifiers (\"only\", \"currently\"), attribution (\"by X\", \"according to\"), reasons, or units to a value; put those in evidence or notes. " +
     "If the source states a reason, the value is the reason word itself. If a question asks for a status such as resolved or unresolved, answer with that word. " +
-    "Use null when a value is genuinely unknown or unresolved; never guess. `evidence` must quote the retrieved source text exactly."
+    "For an action or next step, use verb_object form with the verb first (validate_x, check_y). For selected_topic, use one lowercase word naming the work area. " +
+    "Use null when a value is genuinely unknown or unresolved; never guess. " +
+    "`evidence` must be the exact text of the original human instruction or message as you retrieved it through a tool, copied verbatim, never paraphrased and never a summary line; if a tool showed only a preview or clipped line, fetch the full text first (for example with a larger preview or by reading the page or event) and quote from that."
   );
 }
 
