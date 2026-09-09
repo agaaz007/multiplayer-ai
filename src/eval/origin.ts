@@ -5,6 +5,7 @@ import { appendJsonl, codexModelArgs, countCompactions, defaultModel, envKeys, i
 import { prepareCodexHome } from "./successor.js";
 import { trialEnv, writeEmptyMcpConfig, writeTrialConfig } from "./fixture.js";
 import { claudeIsolationArgs } from "./claude-isolation.js";
+import { retainTranscript } from "./transcript-evidence.js";
 
 /**
  * Origin driver: one real harness turn per fixture event, in fixture order, each event
@@ -211,13 +212,14 @@ export async function runOrigin(ctx: TrialContext, events: FixtureEvent[], opts:
       transcriptNotes.push({ label: s.label, harness: s.harness, session_id: s.sessionId, transcript: null });
       continue;
     }
-    transcriptPaths.push(found.path);
-    const r = streamTranscript(found.path, 0, s.harness);
+    const retained = retainTranscript(raw, found.path, { role: "origin", harness: s.harness, sessionId: s.sessionId, synthetic: isFakeHarness() });
+    transcriptPaths.push(retained.path);
+    const r = streamTranscript(retained.path, 0, s.harness);
     const n = countCompactions(r.events, s.harness);
     compactions += n;
-    for (const t of turns) if (t.sessionId === s.sessionId) t.transcriptPath = found.path;
-    transcriptNotes.push({ label: s.label, harness: s.harness, session_id: s.sessionId, transcript: found.path, events: r.events.length, compactions: n, unknown_shapes: r.unknown });
-    ctx.log(`session ${s.label}: transcript ${found.path} (${r.events.length} events, ${n} compactions)`);
+    for (const t of turns) if (t.sessionId === s.sessionId) t.transcriptPath = retained.path;
+    transcriptNotes.push({ label: s.label, harness: s.harness, session_id: s.sessionId, transcript: retained.path, source_transcript: found.path, provenance: retained.provenancePath, sha256: retained.sha256, events: r.events.length, compactions: n, unknown_shapes: r.unknown });
+    ctx.log(`session ${s.label}: retained transcript ${retained.path} (${r.events.length} events, ${n} compactions)`);
   }
   const totalInputTokens = turns.reduce((n, t) => n + (t.usage?.input_tokens ?? 0) + (t.usage?.cache_read ?? 0), 0);
   const run: OriginRun = { harness: ctx.originHarness, sessionIds, turns, transcriptPaths, totalInputTokens, compactions };

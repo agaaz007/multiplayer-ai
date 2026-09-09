@@ -5,6 +5,7 @@ import type { Harness, SuccessorRun, TrialContext } from "./types.js";
 import { appendJsonl, codexHome, codexModelArgs, defaultModel, envKeys, isFakeHarness, newSessionId, runHarnessTurn, transcriptUsage, waitForTranscript, writeJson, type TurnSpec } from "./harness.js";
 import { trialEnv, writeEmptyMcpConfig } from "./fixture.js";
 import { claudeIsolationArgs } from "./claude-isolation.js";
+import { retainTranscript } from "./transcript-evidence.js";
 
 /**
  * Successor driver: one fresh harness session that receives only the condition's
@@ -255,11 +256,12 @@ export async function runSuccessor(ctx: TrialContext, setup: SuccessorSetup, res
 
   const roots = codexHomeInfo && !isFakeHarness() ? { codex: path.join(codexHomeInfo.home, "sessions") } : undefined;
   const found = sessionId ? await waitForTranscript(sessionId, 10_000, roots) : null;
+  const retained = found ? retainTranscript(raw, found.path, { role: "successor", harness, sessionId: sessionId!, synthetic: isFakeHarness() }) : null;
   let toolCalls: SuccessorToolCall[] = [];
   let tUsage: ReturnType<typeof transcriptUsage> | null = null;
   let transcriptEvents = 0;
-  if (found) {
-    const r = streamTranscript(found.path, 0, harness);
+  if (retained) {
+    const r = streamTranscript(retained.path, 0, harness);
     transcriptEvents = r.events.length;
     const collected = collectToolCalls(r.events);
     toolCalls = collected.calls;
@@ -267,7 +269,7 @@ export async function runSuccessor(ctx: TrialContext, setup: SuccessorSetup, res
     if (fs.existsSync(toolsFile)) fs.rmSync(toolsFile);
     for (const c of collected.full) appendJsonl(toolsFile, { session_id: sessionId, harness, ...c });
     if (!collected.full.length) fs.writeFileSync(toolsFile, "");
-    tUsage = transcriptUsage(harness, found.path);
+    tUsage = transcriptUsage(harness, retained.path);
   } else {
     ctx.log(`successor: transcript not found for ${sessionId ?? "(no session id)"}`);
   }
@@ -289,16 +291,18 @@ export async function runSuccessor(ctx: TrialContext, setup: SuccessorSetup, res
     wall_ms: out.spawn.wallMs, started_at: out.spawn.startedAt, ended_at: out.spawn.endedAt,
     stdout: out.spawn.stdout, stderr_tail: out.spawn.stderr.slice(-4000), assistant_text: out.assistantText, parsed_output: parsed,
     usage: out.usage, boot_tokens: bootTokens, boot_tokens_source: bootSource, boot_tokens_transcript: bootFromTranscript, boot_tokens_json: bootFromStdout,
-    total_input_tokens: totalInputTokens, transcript_usage: tUsage, transcript: found?.path ?? null, transcript_events: transcriptEvents, tool_calls: toolCalls.length,
+    total_input_tokens: totalInputTokens, transcript_usage: tUsage, transcript: retained?.path ?? null,
+    source_transcript: found?.path ?? null, transcript_provenance: retained?.provenancePath ?? null, transcript_sha256: retained?.sha256 ?? null,
+    transcript_events: transcriptEvents, tool_calls: toolCalls.length,
     claude: out.claude ? { subtype: out.claude.subtype, num_turns: out.claude.num_turns, duration_ms: out.claude.duration_ms, duration_api_ms: out.claude.duration_api_ms, total_cost_usd: out.claude.total_cost_usd, usage: out.claude.usage, modelUsage: out.claude.modelUsage } : null,
     codex: out.codex ? { turns: out.codex.turns, errors: out.codex.errors, types: out.codex.types, lines: out.codex.lines } : null,
   });
-  ctx.log(`successor done: ${out.ok ? "ok" : `FAILED (${out.failure})`} wall_ms=${out.spawn.wallMs} boot=${bootTokens ?? "null"} total_in=${totalInputTokens ?? "null"} tools=${toolCalls.length} parsed=${parsed ? "yes" : "no"} transcript=${found?.path ?? "none"}`);
+  ctx.log(`successor done: ${out.ok ? "ok" : `FAILED (${out.failure})`} wall_ms=${out.spawn.wallMs} boot=${bootTokens ?? "null"} total_in=${totalInputTokens ?? "null"} tools=${toolCalls.length} parsed=${parsed ? "yes" : "no"} transcript=${retained?.path ?? "none"}`);
   if (!out.ok) throw new Error(`successor harness failed: ${out.failure}; see raw/successor-output.json`);
   return {
     harness,
     sessionId: sessionId ?? "",
-    transcriptPath: found?.path ?? null,
+    transcriptPath: retained?.path ?? null,
     output: parsed,
     rawOutputPath,
     toolCalls,

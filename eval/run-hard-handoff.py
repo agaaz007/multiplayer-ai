@@ -163,6 +163,7 @@ def main():
     shutil.copytree(ROOT / args.build_dir, build)
     shutil.copytree(ROOT / "prompts", out / "prompts")
     shutil.copytree(ROOT / "template", out / "template")
+    shutil.copytree(ROOT / "guides", out / "guides")
     # Encoding data is immutable and hash-checked by tiktoken. Freeze an already
     # populated cache so parallel trials need no network fetch on first use.
     tokenizer_cache = ROOT / ".context/eval-tokenizer/cache"
@@ -187,6 +188,7 @@ def main():
         "build_files": {str(p.relative_to(build)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(build.rglob("*.js"))},
         "prompt_files": {str(p.relative_to(out)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted((out / "prompts").rglob("*")) if p.is_file()},
         "template_files": {str(p.relative_to(out)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted((out / "template").rglob("*")) if p.is_file()},
+        "guide_files": {str(p.relative_to(out)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted((out / "guides").rglob("*")) if p.is_file()},
         "tokenizer_cache_files": {str(p.relative_to(out)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted((out / ".context/eval-tokenizer/cache").glob("*")) if p.is_file()},
         "limitations": ["Controlled fixture, not a real interrupted teammate task", "No second laptop involved", "One repetition is not a reliability estimate"],
     }

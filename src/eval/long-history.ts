@@ -152,13 +152,7 @@ export async function runLongHistoryOrigin(ctx: TrialContext): Promise<OriginRun
     const turns = run.turns as OriginTurnDetail[];
     if (turns.some((turn) => !turn.ok)) throw new Error(`L01 epoch ${epoch + 1} had unsuccessful origin turns; refusing a partial history`);
     if (run.sessionIds.length !== 1 || run.transcriptPaths.length !== 1 || merged.sessionIds.includes(run.sessionIds[0])) throw new Error(`L01 epoch ${epoch + 1} did not produce one distinct real origin session and transcript`);
-    const source = run.transcriptPaths[0];
-    const transcriptDir = path.join(rawDir, "transcripts");
-    fs.mkdirSync(transcriptDir, { recursive: true });
-    const copied = path.join(transcriptDir, path.basename(source));
-    fs.copyFileSync(source, copied);
-    run.transcriptPaths = [copied];
-    for (const turn of run.turns) turn.transcriptPath = copied;
+    // runOrigin retains each complete transcript and its provenance in this epoch's rawDir.
     const invocationFile = path.join(rawDir, "origin-invocations.json");
     const invocation = JSON.parse(fs.readFileSync(invocationFile, "utf8")).invocations[0];
     if (invocation?.resume !== false || invocation.harness !== ctx.originHarness) throw new Error(`L01 epoch ${epoch + 1} first invocation was not a fresh origin-harness session`);
