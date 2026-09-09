@@ -39,6 +39,8 @@ The adapter copied `recovered/` before the successor and `final/` afterward. It 
 
 The run manifest identifies Git revision `230eddf76de543059a80d2a38f4b08284d1ee97d`, a working-diff hash, and a SHA-256 for every frozen JavaScript file. The exact executable tree is under `build/`; `source.diff` preserves tracked changes. E03-b's prompt assets were added at 11:30:04 UTC while origins were running, before Ledger preparation/classification, and their hashes and timing are disclosed in its manifest. Subsequent runner versions freeze prompts, templates, and available tokenizer cache before starting trials.
 
+E03-b predates the explicit classifier MCP-isolation change. Its classifier used the default Claude extractor configuration; later C02-b and L01 runs use an empty strict MCP configuration and retain classifier execution traces. This limits reproducibility of the earlier classifier boundary.
+
 The private oracle was outside the agent worktrees and was not supplied in successor prompts. This was logical separation, not an operating-system guarantee that the agents could not read the controller bundle. The run therefore does not prove isolation against deliberate oracle access.
 
 **Other requested hard-handoff checks.**
@@ -81,4 +83,4 @@ python3 eval/run-hard-handoff.py \
 
 This command runs the current source with the E03-b model assignments; it does not recreate stochastic responses. Use E03-b's preserved `build/`, manifest, suite, and raw bundles to audit the historical run. Models were held fixed between conditions within each direction; the reverse direction used a different successor model. No latency or token advantage is claimed from these four trials.
 
-For a subsequent complete matrix, select `--cases E03 C02 L01` and a new output directory, retain both directions, and increase to three repetitions. L01 additionally needs the pinned `tiktoken==0.12.0` environment and cached `o200k_base` encoding under `.context/eval-tokenizer/`, or `LEDGER_EVAL_TOKENIZER_PYTHON` pointing to that Python environment. Its token count is explicitly a tokenizer proxy, not verified provider-native token accounting; three fresh origin sessions after the first establish resets, not automatic compactions. Neither more repetitions nor these local runs replace the missing two-laptop test.
+For a subsequent matrix of these three cases, select `--cases E03 C02 L01` and a new output directory, retain both directions, and increase to three repetitions. L01 additionally needs the pinned `tiktoken==0.12.0` environment and cached `o200k_base` encoding under `.context/eval-tokenizer/`, or `LEDGER_EVAL_TOKENIZER_PYTHON` pointing to that Python environment. Its token count is explicitly a tokenizer proxy, not verified provider-native token accounting; three fresh origin sessions after the first establish resets, not automatic compactions. Neither more repetitions nor these local runs replace the missing two-laptop test.
