@@ -170,7 +170,7 @@ async function runTrial(request: AdapterRequest, args: Args, log: (l: string) =>
 
     const events = runner.originEvents?.(ctx) ?? request.case.events;
     let t = Date.now();
-    const origin: OriginRun = await drivers.runOrigin(ctx, events);
+    const origin: OriginRun = runner.runOrigin ? await runner.runOrigin(ctx) : await drivers.runOrigin(ctx, events);
     timings.origin_ms = Date.now() - t;
     log(`origin: ${origin.harness}, ${origin.turns.length} turns over ${origin.sessionIds.length} session(s), ${origin.totalInputTokens} input tokens, ${origin.compactions} compactions`);
     fs.writeFileSync(path.join(ctx.paths.rawDir, "origin-run.json"), JSON.stringify({ harness: origin.harness, sessionIds: origin.sessionIds, transcriptPaths: origin.transcriptPaths, totalInputTokens: origin.totalInputTokens, compactions: origin.compactions, turns: origin.turns.map((x) => ({ turn: x.turnIndex, event: x.fixtureEventId, session: x.sessionId, wall_ms: x.wallMs, usage: x.usage ?? null, assistant: x.assistantText.slice(0, 2000) })) }, null, 2) + "\n");

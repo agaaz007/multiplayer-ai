@@ -184,6 +184,8 @@ export interface CaseRunner {
   before?(ctx: TrialContext): Promise<void>;
   /** Origin turns are the fixture events in order unless overridden. */
   originEvents?(ctx: TrialContext): FixtureEvent[];
+  /** Cases with real context resets may own the origin lifecycle and retain every epoch trace. */
+  runOrigin?(ctx: TrialContext): Promise<OriginRun>;
   /** Controller fixture work after real origin turns, before capture. Record any mutations in raw traces. */
   afterOrigin?(ctx: TrialContext, origin: OriginRun): Promise<void>;
   /** Start concurrent work or verify the recovered starting state immediately before the successor. */
