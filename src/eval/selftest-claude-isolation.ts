@@ -9,7 +9,7 @@ import { claudeClassifierArgs, claudeIsolationArgs } from "./claude-isolation.js
 import { claudeOriginArgs } from "./origin.js";
 import { answerContract, claudeSuccessorArgs } from "./successor.js";
 import { explicitStartupBrief } from "./conditions/ours.js";
-import { freezeLedgerGuide, GLOBAL_GUIDE_POINTER, localizeBriefGuide } from "./ledger-guide.js";
+import { assertLocalBriefGuide, freezeLedgerGuide, GLOBAL_GUIDE_POINTER } from "./ledger-guide.js";
 import { evalTmpRoot, harnessEnv, newSessionId, spawnHarness, writeJson } from "./harness.js";
 import type { TrialContext } from "./types.js";
 
@@ -53,7 +53,7 @@ if (process.argv.includes("--fixture-mcp")) {
     writeJson(path.join(fakeBuild, "package.json"), { type: "module" });
     fs.writeFileSync(path.join(fakeBuild, "cli.js"), "// entry point identity for this frozen test build\n");
     fs.writeFileSync(path.join(fakeBuild, "store.js"), `import fs from 'node:fs';import path from 'node:path';export const loadConfig=()=>JSON.parse(fs.readFileSync(path.join(process.env.LEDGER_CONFIG_DIR,'config.json'),'utf8'));`);
-    fs.writeFileSync(path.join(fakeBuild, "query.js"), `export const brief=cfg=>'# Ledger brief (fixture)\\n\\nRules: Fixture rules. ${GLOBAL_GUIDE_POINTER}\\n\\nLedger trial marker: '+cfg.marker;`);
+    fs.writeFileSync(path.join(fakeBuild, "query.js"), `export const brief=(cfg,opts)=>'# Ledger brief (fixture)\\n\\nRules: Fixture rules. Full format in '+String.fromCharCode(96)+opts.guidePath+String.fromCharCode(96)+'.\\n\\nLedger trial marker: '+cfg.marker;`);
     fs.writeFileSync(path.join(fakeBuild, "continuity/brief.js"), `export const openThreadsText=async(cfg,opts)=>{if(process.env.LEDGER_AUTHOR!=='trial-successor'||process.env.LEDGER_CONTINUITY_DB!==cfg.continuity.database_url||opts.cwd!==process.cwd())throw Error('wrong trial pins');return 'Open threads: trial-only-thread';};`);
     fs.writeFileSync(path.join(fakeBuild, "continuity/db.js"), "export const closePools=async()=>{};\n");
     writeJson(path.join(configDir, "config.json"), { marker: "TRIAL_ONLY_CANARY", continuity: { database_url: "postgresql://localhost/isolated_fixture" } });
@@ -86,11 +86,13 @@ if (process.argv.includes("--fixture-mcp")) {
       assert.deepEqual(fs.readFileSync(guidePath), sourceBytes);
       assert.deepEqual(fs.readFileSync(guideTrace.retained_path), sourceBytes);
       assert.equal(trace.guide.sha256, guideTrace.sha256);
-      assert.ok(trace.stdout.includes(GLOBAL_GUIDE_POINTER) && !trace.preamble.includes(GLOBAL_GUIDE_POINTER));
-      // Stored records can contain the same words; only the generated header may change.
+      assert.equal(trace.stdout, trace.preamble, "generated brief text is retained without rewriting source text");
+      assert.ok(!trace.preamble.includes(GLOBAL_GUIDE_POINTER));
+      // Stored records can contain the same words; validation only checks the generated header.
       const withRecord = trace.stdout + `\nRecorded source: ${GLOBAL_GUIDE_POINTER}\n`;
-      assert.ok(localizeBriefGuide(withRecord, guidePath).endsWith(`Recorded source: ${GLOBAL_GUIDE_POINTER}\n`));
-      assert.throws(() => localizeBriefGuide("unknown generator format", guidePath), /unrecognized/);
+      assert.doesNotThrow(() => assertLocalBriefGuide(withRecord, guidePath));
+      assert.throws(() => assertLocalBriefGuide("unknown generator format", guidePath), /unrecognized/);
+      assert.throws(() => assertLocalBriefGuide(`# Ledger brief (fixture)\n\nRules: Fixture rules. ${GLOBAL_GUIDE_POINTER}`, guidePath), /unrecognized/);
       assert.throws(() => freezeLedgerGuide(context, path.join(root, "missing-package", "build")), /no packaged guide/);
       fs.appendFileSync(guideSource, "\nChanged packaged guide fixture.\n");
       assert.throws(() => freezeLedgerGuide(context, fakeBuild), /frozen guide differs/);
