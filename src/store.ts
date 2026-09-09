@@ -83,6 +83,13 @@ function continuityFrom(cfg: Partial<Config>): ContinuityConfig | undefined {
 }
 
 export function saveConfig(cfg: Config) {
+  // Evaluation and test code must never write the real machine config. Any process that sets
+  // LEDGER_EVAL=1 (or LEDGER_SELFTEST=1) has to point LEDGER_CONFIG_DIR at a disposable dir first.
+  // On 2026-09-09 an eval test called initLedger() without it and repointed ~/.ledger/config.json
+  // at a temp ledger for hours; real records went there and the live helper ran as another author.
+  if ((process.env.LEDGER_EVAL === "1" || process.env.LEDGER_SELFTEST === "1") && !process.env.LEDGER_CONFIG_DIR) {
+    throw new Error("refusing to write the real ~/.ledger/config.json from an eval/test process: set LEDGER_CONFIG_DIR to a disposable directory");
+  }
   fs.mkdirSync(ledgerHome(), { recursive: true });
   fs.writeFileSync(configFile(), JSON.stringify(cfg, null, 2) + "\n");
 }
