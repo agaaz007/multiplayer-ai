@@ -85,6 +85,8 @@ The [runner](../../eval/run-hard-handoff.py) refuses to reuse an output director
 
 ```sh
 node_modules/.bin/tsc -p tsconfig.json --outDir dist-handoff
+env -u ANTHROPIC_API_KEY \
+PATH="$PWD/.context/eval-codex-cli/node_modules/.bin:$PATH" \
 LEDGER_EVAL_ORIGIN_MODEL='claude=claude-haiku-4-5-20251001,codex=gpt-6-astra' \
 LEDGER_EVAL_SUCCESSOR_MODEL='claude=claude-sonnet-5,codex=gpt-6-astra' \
 python3 eval/run-hard-handoff.py \
@@ -96,6 +98,6 @@ python3 eval/run-hard-handoff.py \
   --repetitions 1 --workers 2
 ```
 
-This command runs the current source with the E03-b model assignments; it does not recreate stochastic responses. Use E03-b's preserved `build/`, manifest, suite, and raw bundles to audit the historical run. Models were held fixed between conditions within each direction; the reverse direction used a different successor model. No latency or token advantage is claimed from these four trials.
+This command uses the session-local Codex 0.153.4 installation and the Claude subscription authentication selected for these runs; the machine-wide Codex installation was not upgraded. It runs the current source with the E03-b model assignments; it does not recreate stochastic responses. Use E03-b's preserved `build/`, manifest, suite, and raw bundles to audit the historical run. Models were held fixed between conditions within each direction; the reverse direction used a different successor model. No latency or token advantage is claimed from these four trials.
 
 For a subsequent matrix of these three cases, select `--cases E03 C02 L01` and a new output directory, retain both directions, and increase to three repetitions. L01 additionally needs the pinned `tiktoken==0.12.0` environment and cached `o200k_base` encoding under `.context/eval-tokenizer/`, or `LEDGER_EVAL_TOKENIZER_PYTHON` pointing to that Python environment. Its token count is explicitly a tokenizer proxy, not verified provider-native token accounting; three fresh origin sessions after the first establish resets, not automatic compactions. Neither more repetitions nor these local runs replace the missing two-laptop test.
