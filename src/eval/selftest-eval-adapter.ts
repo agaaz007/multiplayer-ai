@@ -213,7 +213,7 @@ ok("a retrieved_evidence entry whose raw_ref file is missing scores fail");
   const cell = (c: string, cs: string) => m.cells.find((x: any) => x.condition === c && x.case === cs && x.direction === "codex-to-claude" && x.repetition === 1);
   assert.equal(cell("ours", "E01").status, "pass");
   assert.equal(cell("gbrain", "E01").status, "fail");
-  assert.equal(cell("ours", "L01").status, "error");
+  assert.equal(cell("ours", "L01").status, "not_run"); // kit maps an infrastructure error to not_run
   assert.ok(cell("ours", "D01").checks.some((k: any) => k.type === "answer" && k.key === "price_inr" && k.status === "pass"));
   assert.equal(typeof cell("ours", "D01").metrics.successor_boot_tokens, "number");
   assert.deepEqual(m.levels.ours[1], { passed: 3, total: 3, qualified: true });

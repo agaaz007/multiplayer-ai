@@ -75,14 +75,29 @@ def main():
                    "direction": direction, "repetition": repetition, "trial_id": run_id, "output_dir": str(bundle)}
         print(f"start {condition} {case} {direction} #{repetition}", flush=True)
         # Adapter retains raw traces and uses bounded process groups for harness turns.
+        timed_out = False
         with (bundle / "adapter.stderr.log").open("w") as stderr:
-            result = subprocess.run(["node", str(adapter), "--condition", condition], input=json.dumps(request), text=True,
-                                    stdout=subprocess.PIPE, stderr=stderr, cwd=ROOT, env=env, timeout=args.timeout)
-        (bundle / "adapter.stdout.json").write_text(result.stdout)
+            process = subprocess.Popen(["node", str(adapter), "--condition", condition], text=True,
+                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr, cwd=ROOT, env=env)
+            try:
+                stdout, _ = process.communicate(json.dumps(request), timeout=args.timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                # Give the adapter's signal handler time to stop its owned, detached
+                # harness groups. subprocess.run(timeout) would SIGKILL it directly.
+                process.terminate()
+                try:
+                    stdout, _ = process.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    stdout, _ = process.communicate()
+        (bundle / "adapter.stdout.json").write_text(stdout)
         try:
-            observation = json.loads(result.stdout)
+            observation = json.loads(stdout)
         except ValueError:
             observation = {"status": "error", "reason": "adapter returned invalid JSON; see adapter stdout/stderr"}
+        if timed_out:
+            observation = {"status": "error", "reason": "adapter timed out; SIGTERM cleanup requested; inspect retained raw traces"}
         (bundle / "observation.json").write_text(json.dumps(observation, indent=2) + "\n")
         print(f"done {condition} {case} {direction}: {observation.get('status')} {observation.get('reason', '')}", flush=True)
 
