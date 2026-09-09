@@ -153,6 +153,10 @@ def main():
     if not adapter.is_file():
         parser.error("build first: node_modules/.bin/tsc -p tsconfig.json --outDir " + args.build_dir)
     out.mkdir(parents=True)
+    controller_source = Path(__file__).resolve().read_bytes()
+    (out / "controller.py").write_bytes(controller_source)
+    controller_provenance = {"file": "controller.py", "sha256": hashlib.sha256(controller_source).hexdigest(),
+                             "copied_at": datetime.datetime.now(datetime.timezone.utc).isoformat()}
     # Freeze executable bytes: rebuilding the workspace during a run cannot alter a
     # later dynamic import or the MCP server that a successor is about to start.
     build = out / "build"
@@ -170,6 +174,7 @@ def main():
     # Retain the full oracle unchanged; omitted cases remain not_run in level reports.
     manifest = {
         "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "controller": controller_provenance,
         "topology": "same-machine", "cases": args.cases, "conditions": args.conditions,
         "anthropic_api_key_present": bool(os.environ.get("ANTHROPIC_API_KEY")),
         "classifier": {"provider": "claude", "model": "CLI configured default (not independently resolved)", "custom_extractor_override": False},
