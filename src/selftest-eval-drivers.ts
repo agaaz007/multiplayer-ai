@@ -354,7 +354,12 @@ if (!REAL) {
     assert.ok(path.basename(ta.path).startsWith("rollout-") && ta.path.startsWith(process.env.LEDGER_EVAL_FAKE_ROOT!));
     assert.equal(tb.agent, "claude");
     assert.ok(tb.path.endsWith(`${run.sessionIds[1]}.jsonl`) && tb.path.startsWith(process.env.LEDGER_EVAL_FAKE_ROOT!));
-    assert.deepEqual(run.turns.map((t) => t.transcriptPath), [ta.path, ta.path, tb.path]);
+    assert.deepEqual(run.turns.map((t) => t.transcriptPath), [run.transcriptPaths[0], run.transcriptPaths[0], run.transcriptPaths[1]]);
+    for (const [index, source] of [ta.path, tb.path].entries()) {
+      assert.ok(run.transcriptPaths[index].startsWith(ctxF.paths.rawDir));
+      assert.deepEqual(fs.readFileSync(run.transcriptPaths[index]), fs.readFileSync(source));
+      assert.equal(readJson(run.transcriptPaths[index] + ".provenance.json").source_path, source);
+    }
     const ra = streamTranscript(ta.path, 0, "codex");
     const instrA = ra.events.filter((e) => e.kind === "instruction.added").map((e) => String(e.payload.text));
     assert.equal(instrA.length, 2);
@@ -399,7 +404,7 @@ if (!REAL) {
     assert.equal(sr.output?.notes, "fake successor: no retrieval performed");
     assert.ok(sr.wallMs >= 1);
     ok("runSuccessor (claude): fresh session; JSON answer object parsed leniently from the reply");
-    assert.ok(sr.transcriptPath && sr.transcriptPath.startsWith(process.env.LEDGER_EVAL_FAKE_ROOT!) && sr.transcriptPath.endsWith(`${sr.sessionId}.jsonl`));
+    assert.ok(sr.transcriptPath && sr.transcriptPath.startsWith(ctxF.paths.rawDir) && sr.transcriptPath.endsWith(`${sr.sessionId}.jsonl`));
     assert.equal(sr.toolCalls.length, 1);
     assert.equal(sr.toolCalls[0].tool, "mcp__ledger__ledger_records");
     assert.ok(sr.toolCalls[0].input.includes(ctxF.paths.successorRepo), sr.toolCalls[0].input);

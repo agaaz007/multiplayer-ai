@@ -9,6 +9,7 @@ import { claudeClassifierArgs, claudeIsolationArgs } from "./claude-isolation.js
 import { claudeOriginArgs } from "./origin.js";
 import { answerContract, claudeSuccessorArgs } from "./successor.js";
 import { explicitStartupBrief } from "./conditions/ours.js";
+import { freezeLedgerGuide, GLOBAL_GUIDE_POINTER, localizeBriefGuide } from "./ledger-guide.js";
 import { evalTmpRoot, harnessEnv, newSessionId, spawnHarness, writeJson } from "./harness.js";
 import type { TrialContext } from "./types.js";
 
@@ -46,10 +47,13 @@ if (process.argv.includes("--fixture-mcp")) {
 
     const fakeBuild = path.join(root, "frozen-build");
     fs.mkdirSync(path.join(fakeBuild, "continuity"), { recursive: true });
+    const guideSource = path.join(root, "guides", "ledger.md");
+    fs.mkdirSync(path.dirname(guideSource));
+    fs.copyFileSync(fileURLToPath(new URL("../../guides/ledger.md", import.meta.url)), guideSource);
     writeJson(path.join(fakeBuild, "package.json"), { type: "module" });
     fs.writeFileSync(path.join(fakeBuild, "cli.js"), "// entry point identity for this frozen test build\n");
     fs.writeFileSync(path.join(fakeBuild, "store.js"), `import fs from 'node:fs';import path from 'node:path';export const loadConfig=()=>JSON.parse(fs.readFileSync(path.join(process.env.LEDGER_CONFIG_DIR,'config.json'),'utf8'));`);
-    fs.writeFileSync(path.join(fakeBuild, "query.js"), `export const brief=cfg=>'Ledger trial marker: '+cfg.marker;`);
+    fs.writeFileSync(path.join(fakeBuild, "query.js"), `export const brief=cfg=>'# Ledger brief (fixture)\\n\\nRules: Fixture rules. ${GLOBAL_GUIDE_POINTER}\\n\\nLedger trial marker: '+cfg.marker;`);
     fs.writeFileSync(path.join(fakeBuild, "continuity/brief.js"), `export const openThreadsText=async(cfg,opts)=>{if(process.env.LEDGER_AUTHOR!=='trial-successor'||process.env.LEDGER_CONTINUITY_DB!==cfg.continuity.database_url||opts.cwd!==process.cwd())throw Error('wrong trial pins');return 'Open threads: trial-only-thread';};`);
     fs.writeFileSync(path.join(fakeBuild, "continuity/db.js"), "export const closePools=async()=>{};\n");
     writeJson(path.join(configDir, "config.json"), { marker: "TRIAL_ONLY_CANARY", continuity: { database_url: "postgresql://localhost/isolated_fixture" } });
@@ -65,7 +69,8 @@ if (process.argv.includes("--fixture-mcp")) {
     process.env.LEDGER_EVAL_CLI_JS = path.join(fakeBuild, "cli.js");
     try {
       const brief = await explicitStartupBrief(context);
-      assert.equal(brief, "Ledger trial marker: TRIAL_ONLY_CANARY\n\nOpen threads: trial-only-thread");
+      const guidePath = path.join(configDir, "condition-guides", "ledger.md");
+      assert.equal(brief, `# Ledger brief (fixture)\n\nRules: Fixture rules. Full format in \`${guidePath}\`.\n\nLedger trial marker: TRIAL_ONLY_CANARY\n\nOpen threads: trial-only-thread`);
       assert.equal(fs.readFileSync(path.join(rawDir, "ours-startup-brief.txt"), "utf8").trim(), brief);
       const trace = JSON.parse(fs.readFileSync(path.join(rawDir, "ours-startup-brief.json"), "utf8"));
       assert.equal(trace.build, fakeBuild);
@@ -74,6 +79,25 @@ if (process.argv.includes("--fixture-mcp")) {
       assert.equal(trace.exit_code, 0);
       assert.ok(!trace.args.includes("hook"));
       ok("startup brief comes from the selected frozen build with exact trial config/DB/author pins, without hooks");
+      const guideTrace = JSON.parse(fs.readFileSync(path.join(rawDir, "ours-guide.json"), "utf8"));
+      assert.equal(guideTrace.source_path, guideSource);
+      assert.deepEqual(guideTrace.content_transformations, []);
+      const sourceBytes = fs.readFileSync(guideSource);
+      assert.deepEqual(fs.readFileSync(guidePath), sourceBytes);
+      assert.deepEqual(fs.readFileSync(guideTrace.retained_path), sourceBytes);
+      assert.equal(trace.guide.sha256, guideTrace.sha256);
+      assert.ok(trace.stdout.includes(GLOBAL_GUIDE_POINTER) && !trace.preamble.includes(GLOBAL_GUIDE_POINTER));
+      // Stored records can contain the same words; only the generated header may change.
+      const withRecord = trace.stdout + `\nRecorded source: ${GLOBAL_GUIDE_POINTER}\n`;
+      assert.ok(localizeBriefGuide(withRecord, guidePath).endsWith(`Recorded source: ${GLOBAL_GUIDE_POINTER}\n`));
+      assert.throws(() => localizeBriefGuide("unknown generator format", guidePath), /unrecognized/);
+      assert.throws(() => freezeLedgerGuide(context, path.join(root, "missing-package", "build")), /no packaged guide/);
+      fs.appendFileSync(guideSource, "\nChanged packaged guide fixture.\n");
+      assert.throws(() => freezeLedgerGuide(context, fakeBuild), /frozen guide differs/);
+      fs.writeFileSync(guideSource, sourceBytes);
+      fs.rmSync(path.dirname(guidePath), { recursive: true });
+      assert.deepEqual(fs.readFileSync(guideTrace.retained_path), sourceBytes, "raw guide survives removal of the trial's config copy");
+      ok("exact packaged guide is retained with provenance; only the generated pointer changes, and missing/drifting guides fail closed");
     } finally {
       if (previousCli === undefined) delete process.env.LEDGER_EVAL_CLI_JS;
       else process.env.LEDGER_EVAL_CLI_JS = previousCli;

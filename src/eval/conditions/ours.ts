@@ -16,6 +16,7 @@ import { loadAll, type Config } from "../../store.js";
 import { spawnHarness } from "../harness.js";
 import { trialEnv, writeEmptyMcpConfig } from "../fixture.js";
 import { claudeClassifierArgs } from "../claude-isolation.js";
+import { freezeLedgerGuide, GLOBAL_GUIDE_POINTER, localizeBriefGuide } from "../ledger-guide.js";
 
 /**
  * Condition "ours": the successor gets what the production system would give it.
@@ -393,6 +394,7 @@ export function mcpServerConfig(ctx: TrialContext) {
 /** Render the ordinary Ledger startup brief from the frozen build, without invoking SessionStart hooks. */
 export async function explicitStartupBrief(ctx: TrialContext): Promise<string> {
   const build = path.dirname(cliPath());
+  const guide = freezeLedgerGuide(ctx, build);
   const moduleUrl = (relative: string) => JSON.stringify(pathToFileURL(path.join(build, relative)).href);
   const script = [
     `import { loadConfig } from ${moduleUrl("store.js")};`,
@@ -405,15 +407,22 @@ export async function explicitStartupBrief(ctx: TrialContext): Promise<string> {
   const result = await spawnHarness({ cmd: process.execPath, args, cwd: ctx.paths.successorRepo,
     env: trialEnv(ctx, { LEDGER_AUTHOR: ctx.successorAuthor, LEDGER_CONTINUITY_DB: ctx.evalDatabaseUrl, LEDGER_HOOKS_OFF: "1" }),
     timeoutMs: 30_000, log: ctx.log });
-  fs.writeFileSync(path.join(ctx.paths.rawDir, "ours-startup-brief.json"), JSON.stringify({
+  const trace = {
     source: "explicit-frozen-build-render", build, cwd: ctx.paths.successorRepo, args,
     config_dir: ctx.paths.configDir, author: ctx.successorAuthor,
     started_at: result.startedAt, ended_at: result.endedAt, exit_code: result.exitCode, timed_out: result.timedOut,
     stdout: result.stdout, stderr: result.stderr,
-  }, null, 2) + "\n");
+    guide,
+  };
+  const tracePath = path.join(ctx.paths.rawDir, "ours-startup-brief.json");
+  fs.writeFileSync(tracePath, JSON.stringify(trace, null, 2) + "\n");
   if (result.exitCode !== 0 || result.timedOut || result.spawnError) throw new Error("ours startup brief failed; see raw/ours-startup-brief.json");
-  fs.writeFileSync(path.join(ctx.paths.rawDir, "ours-startup-brief.txt"), result.stdout);
-  return result.stdout.trim();
+  const preamble = localizeBriefGuide(result.stdout, guide.path);
+  fs.writeFileSync(tracePath, JSON.stringify({ ...trace, preamble,
+    guide_pointer_rewrite: { generated_line_number: 3, original: GLOBAL_GUIDE_POINTER, replacement: `Full format in \`${guide.path}\`.` },
+  }, null, 2) + "\n");
+  fs.writeFileSync(path.join(ctx.paths.rawDir, "ours-startup-brief.txt"), preamble);
+  return preamble.trim();
 }
 
 async function successorSetup(ctx: TrialContext) {
