@@ -532,6 +532,14 @@ if (!REAL) {
 
   // ---------- cleanup ----------
   {
+    const { retainTranscript } = await import("./eval/transcript-evidence.js");
+    const producer = path.join(ctxF.paths.homeDir, "startup-evidence.jsonl");
+    const producerBytes = Buffer.from('{"type":"startup","text":"full context omitted by normalizer"}\n');
+    fs.writeFileSync(producer, producerBytes);
+    const kept = retainTranscript(ctxF.paths.rawDir, producer, { role: "origin", harness: "codex", sessionId: "retention-canary", synthetic: true });
+    const originalProvenance = fs.readFileSync(kept.provenancePath);
+    assert.equal(retainTranscript(ctxF.paths.rawDir, kept.path, { role: "origin", harness: "codex", sessionId: "retention-canary", synthetic: true }).path, kept.path);
+    assert.deepEqual(fs.readFileSync(kept.provenancePath), originalProvenance, "re-retaining an already copied file preserves its original producer provenance");
     const rootF = ctxF.paths.root;
     const rootR = ctxR.paths.root;
     const ctxK = await F.createTrial(request("keep", "codex-to-claude"), "gbrain", { log: () => {}, migrate: false });
@@ -545,6 +553,9 @@ if (!REAL) {
     assert.ok(!fs.existsSync(ctxK.paths.root));
     assert.ok((await F.cleanupTrial(ctxF)).removed && (await F.cleanupTrial(ctxR)).removed);
     assert.ok(!fs.existsSync(rootF) && !fs.existsSync(rootR));
+    assert.ok(!fs.existsSync(producer), "cleanup removed the private producer location");
+    assert.deepEqual(fs.readFileSync(kept.path), producerBytes, "full startup evidence survives private-home cleanup");
+    assert.deepEqual(fs.readFileSync(kept.provenancePath), originalProvenance);
     assert.ok(fs.existsSync(path.join(ctxF.paths.rawDir, "controller.log")) && fs.existsSync(ctxR.paths.rawDir), "the evidence bundle (output_dir) survives cleanup");
     assert.ok(fs.readFileSync(path.join(ctxF.paths.rawDir, "controller.log"), "utf8").includes("cleanup: removed"));
     ok("cleanupTrial removes the trial root (keep option and LEDGER_EVAL_KEEP honoured); output_dir preserved");
