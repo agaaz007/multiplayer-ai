@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { initLedger, type Config } from "../store.js";
 import { closePools, getPool, migrate } from "../continuity/db.js";
@@ -168,6 +169,37 @@ export function writeEmptyMcpConfig(ctx: TrialContext, name = "mcp-empty.json"):
   return file;
 }
 
+/**
+ * Read-only preflight: does the machine-level helper daemon (the one running against the real
+ * ~/.ledger/config.json, not the trial config) exclude this eval root? Claude Code records a
+ * realpath'd cwd (`/private/var/…` for a `$TMPDIR` under `/var/folders` on macOS) and the daemon
+ * matches `continuity.exclude_paths` by string prefix, so both spellings have to be listed or the
+ * trial's harness sessions are uploaded to the production continuity database. On 2026-09-09 the
+ * real smoke's origin session was captured this way (`bound 6fa25b36 → thread 20d975a5` in
+ * ~/.ledger/helper.log) with only the `/var/folders/…` spelling excluded. Reads exclude_paths and
+ * whether continuity is configured; never touches database_url.
+ */
+export function productionHelperExclusion(evalRoot: string, configPath = path.join(os.homedir(), ".ledger", "config.json")): { configPath: string; configured: boolean; missing: string[] } {
+  const wanted = new Set<string>([evalRoot]);
+  try {
+    wanted.add(fs.realpathSync(evalRoot));
+  } catch {
+    /* not created yet: only the literal spelling can be checked */
+  }
+  let excl: string[] = [];
+  let configured = false;
+  try {
+    const cfg = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    configured = Boolean(cfg?.continuity?.database_url);
+    excl = Array.isArray(cfg?.continuity?.exclude_paths) ? cfg.continuity.exclude_paths.map(String) : [];
+  } catch {
+    return { configPath, configured: false, missing: [] };
+  }
+  if (!configured) return { configPath, configured, missing: [] };
+  const covers = (p: string) => excl.some((e) => e && (p === e || p.startsWith(e.endsWith(path.sep) ? e : e + path.sep)));
+  return { configPath, configured, missing: [...wanted].filter((p) => !covers(p)) };
+}
+
 const migrated = new Set<string>();
 
 /** Idempotent schema migration on the eval database, once per process per URL. */
@@ -246,6 +278,8 @@ export async function createTrial(request: AdapterRequest, condition: Condition,
     log,
   };
   log(`trial ${trialId}: case=${request.case.id} direction=${request.direction} condition=${condition} origin=${harnesses.origin}/${authors.origin}/${ctx.originModel} successor=${harnesses.successor}/${authors.successor}/${ctx.successorModel} root=${root}`);
+  const excl = productionHelperExclusion(evalRoot);
+  if (excl.missing.length) log(`WARNING: the machine-level helper config ${excl.configPath} does not exclude ${excl.missing.map((m) => JSON.stringify(m)).join(", ")}; harness sessions run in this trial will be captured into the production continuity database. Add every spelling to continuity.exclude_paths before running real harnesses.`);
 
   // origin worktree with its initial commit
   const c = request.case;

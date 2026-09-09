@@ -245,6 +245,20 @@ const request = (n: string, direction: Direction, c: PublicCase = kase): Adapter
   assert.ok(toml.includes('[mcp_servers.ledger.env]\nLEDGER_CONFIG_DIR = "/t/config"'), toml);
   assert.ok(toml.includes('[mcp_servers."odd name"]\nurl = "http://localhost:1/mcp"'), toml);
   ok("MCP JSON → Codex config.toml [mcp_servers.<name>] blocks with env tables");
+  // production-helper exclusion preflight against a synthetic machine config (never the real one)
+  const fakeCfg = path.join(base, "fake-machine-config.json");
+  const realRoot = fs.realpathSync(base);
+  fs.writeFileSync(fakeCfg, JSON.stringify({ ledger_dir: "/x", author: "a", continuity: { database_url: "postgresql://fake/db", exclude_paths: ["/var/nowhere/ledger-eval"] } }));
+  const miss = F.productionHelperExclusion(base, fakeCfg);
+  assert.equal(miss.configured, true);
+  assert.ok(miss.missing.includes(base) && (realRoot === base || miss.missing.includes(realRoot)), JSON.stringify(miss));
+  fs.writeFileSync(fakeCfg, JSON.stringify({ ledger_dir: "/x", author: "a", continuity: { database_url: "postgresql://fake/db", exclude_paths: [path.dirname(base), path.dirname(realRoot)] } }));
+  assert.deepEqual(F.productionHelperExclusion(base, fakeCfg).missing, []);
+  fs.writeFileSync(fakeCfg, JSON.stringify({ ledger_dir: "/x", author: "a" }));
+  assert.deepEqual(F.productionHelperExclusion(base, fakeCfg), { configPath: fakeCfg, configured: false, missing: [] });
+  assert.equal(F.productionHelperExclusion(base, path.join(base, "absent.json")).configured, false);
+  fs.rmSync(fakeCfg);
+  ok("productionHelperExclusion: flags an eval root (literal and realpath) missing from the machine helper's exclude_paths; silent when continuity is unconfigured");
 }
 
 if (!REAL) {
