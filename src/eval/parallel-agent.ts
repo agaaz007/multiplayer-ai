@@ -6,7 +6,7 @@ import { findTranscript } from "../transcript.js";
 import { git, trialEnv, writeEmptyMcpConfig } from "./fixture.js";
 import { appendJsonl, envKeys, isFakeHarness, killGroup, newSessionId, runHarnessTurn, writeJson, type TurnOutcome } from "./harness.js";
 import { claudeOriginArgs, codexOriginArgs } from "./origin.js";
-import { collectToolCalls, prepareCodexHome } from "./successor.js";
+import { collectToolCalls, parseLastJsonObject, prepareCodexHome } from "./successor.js";
 import type { TrialContext } from "./types.js";
 
 /** C02's unrelated task. The third harness implements the aggregation; this runner validates it. */
@@ -70,6 +70,55 @@ export interface ParallelTurn {
   outcome: TurnOutcome;
   toolCalls: Record<string, unknown>[];
   traceRef: string;
+}
+
+/** Shell strings and argv arrays express the same operation (Codex may wrap Node with a Python timeout). */
+export function invokesAttributionCheck(input: string, phase: ParallelTurn["phase"]): boolean {
+  return new RegExp(`check-attribution\\.cjs["']?(?:\\s+|\\s*,\\s*)["']?${phase}(?=["'\\s;,)\\]}]|$)`).test(input);
+}
+
+function outputLayers(call: Record<string, unknown>): Record<string, unknown>[] {
+  const layers: Record<string, unknown>[] = [];
+  let text = String(call.output ?? call.output_preview ?? "");
+  // Codex's exec wrapper returns JSON whose output is a string containing the actual process JSON.
+  for (let depth = 0; depth < 5; depth++) {
+    const value = parseLastJsonObject(text);
+    if (!value) break;
+    layers.push(value);
+    if (typeof value.output !== "string") break;
+    text = value.output;
+  }
+  return layers;
+}
+
+/** Verify process completion, following the exact shell/cell id when a real tool invocation yields. */
+export function verifiedAttributionToolOperation(turn: ParallelTurn): boolean {
+  if (!turn.outcome.ok || turn.outcome.spawn.pid === null) return false;
+  const sessions = new Set<string>();
+  const cells = new Set<string>();
+  const references = (input: string, key: string, known: Set<string>) => {
+    const match = new RegExp(`["']?${key}["']?\\s*:\\s*["']?([A-Za-z0-9_-]+)`).exec(input);
+    return Boolean(match && known.has(match[1]));
+  };
+  for (const call of turn.toolCalls) {
+    const input = String(call.input ?? "");
+    if (!/(?:^|__|\.)(?:Bash|exec|exec_command|write_stdin|wait)$/.test(String(call.tool ?? ""))) continue;
+    const launch = invokesAttributionCheck(input, turn.phase);
+    if (!launch && !references(input, "session_id", sessions) && !references(input, "cell_id", cells)) continue;
+    if (call.is_error === true || (call.exit_code != null && call.exit_code !== 0)) continue;
+    const layers = outputLayers(call);
+    if (layers.some(layer => typeof layer.exit_code === "number" && layer.exit_code !== 0)) continue;
+    for (const layer of layers) if (typeof layer.session_id === "number" || typeof layer.session_id === "string") sessions.add(String(layer.session_id));
+    const cell = /Script running with cell ID\s+([A-Za-z0-9_-]+)/.exec(String(call.output ?? call.output_preview ?? ""));
+    if (cell) cells.add(cell[1]);
+    const completed = call.exit_code === 0 || layers.some(layer => layer.exit_code === 0)
+      || (call.tool === "Bash" && call.is_error === false && typeof call.finished_at === "string");
+    if (!completed) continue;
+    if (layers.some(layer => layer.phase === turn.phase && (turn.phase === "during"
+      ? Number.isInteger(layer.successful_operations) && Number(layer.successful_operations) > 0
+      : layer.success === true))) return true;
+  }
+  return false;
 }
 
 export interface ParallelState {

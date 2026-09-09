@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { writeJson } from "../harness.js";
-import { createParallelState, fileHash, parallelProgress, readParallelOperations, runParallelTurn, startParallelHandoff, stopParallelAgent, type ParallelState } from "../parallel-agent.js";
+import { createParallelState, fileHash, parallelProgress, readParallelOperations, runParallelTurn, startParallelHandoff, stopParallelAgent, verifiedAttributionToolOperation, type ParallelState } from "../parallel-agent.js";
 import { trialEnv } from "../fixture.js";
 import type { TrialContext } from "../types.js";
 import type { EvalCaseRunner } from "./index.js";
@@ -64,10 +64,7 @@ export const C02: EvalCaseRunner = {
     writeJson(path.join(ctx.paths.outputDir, validationRef), { at: new Date().toISOString(), ...independentCheck, runner_preserved: runnerPreserved, runner_sha256: runnerAfter, implementation_sha256: fileHash(path.join(state.worktree, "attribution.cjs")) });
 
     const phases = ["before", "during", "after"];
-    const actualToolChecks = phases.every(phase => state.turns.some(turn => turn.phase === phase && turn.outcome.ok && turn.outcome.spawn.pid !== null && turn.toolCalls.some(call => {
-      const input = String(call.input ?? "");
-      return input.includes(`check-attribution.cjs ${phase}`) && call.is_error !== true && (call.exit_code == null || call.exit_code === 0);
-    })));
+    const actualToolChecks = phases.every(phase => state.turns.some(turn => turn.phase === phase && verifiedAttributionToolOperation(turn)));
     const harnessOverlapped = state.turns.some(turn => turn.phase === "during" && turn.outcome.ok && turn.outcome.spawn.pid !== null
       && Date.parse(turn.outcome.spawn.startedAt) <= Date.parse(output.started_at)
       && Date.parse(turn.outcome.spawn.endedAt) >= Date.parse(output.ended_at));
