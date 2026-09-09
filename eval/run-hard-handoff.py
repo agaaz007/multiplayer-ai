@@ -51,6 +51,7 @@ def main():
     manifest = {
         "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "topology": "same-machine", "cases": args.cases, "conditions": args.conditions,
+        "anthropic_api_key_present": bool(os.environ.get("ANTHROPIC_API_KEY")),
         "directions": args.directions, "repetitions": args.repetitions,
         "suite_sha256": hashlib.sha256((suite / "private/oracle.json").read_bytes()).hexdigest(),
         "revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
