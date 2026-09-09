@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import type { ConditionPlugin, TrialContext, OriginRun, FixtureEvent } from "../types.js";
@@ -9,16 +10,22 @@ import { resolveOriginSessions } from "./ours.js";
  * Condition "gbrain": the same normalized origin events our helper sees, ingested into an isolated gbrain
  * brain (PGLite under the trial HOME), exposed to the successor through `gbrain serve` MCP tools.
  *
- *   prepare        `HOME=<trial home> gbrain init --pglite`; one page per event (`s-<session8>-<seq>`), tagged
- *                  with the kind, the session and the author, staged as markdown and written with one
- *                  `gbrain import <dir> --no-embed`; a `session-<session8>` page listing the whole session in
- *                  order; a timeline entry per event (`gbrain timeline-add`) when the event count is modest;
- *                  `gbrain embed --all` once at the end (needs OPENAI_API_KEY; failure is noted, not fatal).
+ *   prepare        `HOME=<trial home> gbrain init --pglite` once; then ONE PAGE PER EVENT:
+ *                    `gbrain put s-<session8>-<seq>` with the markdown on stdin
+ *                      (frontmatter title/type/tags, then `# <kind> · session <short> · seq <n>`, the text or
+ *                      tool + input or output or path, and `(author: …, harness: …, at: …)`),
+ *                    `gbrain tag <slug> <kind>` and `gbrain tag <slug> session-<short>`;
+ *                  a `session-<short>` page listing every event page in order; a timeline entry per event
+ *                  (`gbrain timeline-add`) while the event count is modest; `gbrain embed --all` once at the end
+ *                  when an OPENAI_API_KEY is present (a keyless run stalls ~60 s and embeds nothing).
  *   successorSetup an MCP config running `gbrain serve` with HOME = the trial home. The successor process
  *                  itself keeps its real HOME (its login lives there).
- *   evidenceRef    keyword search (`gbrain call search`) and an exact-text check on the page body.
+ *   evidenceRef    `gbrain call search` (the `search` tool, keyword/tsvector) and an exact-text check on the
+ *                  page body (`gbrain call get_page`).
  *
- * The real ~/.gbrain is never read or written: every gbrain invocation here carries HOME = trial home.
+ * The real ~/.gbrain is never read or written: every gbrain invocation here carries HOME = trial home, and
+ * `gb()` refuses to run when that HOME is empty, relative, or the real home. Every child also carries
+ * LEDGER_EVAL=1 (nothing gbrain spawns imports our store, but the rule is uniform).
  */
 
 const GBRAIN_FALLBACK = "/Users/Agaaz/.bun/bin/gbrain";
@@ -28,6 +35,7 @@ const INGEST_FILE = "eval-ingest.json";
 const BODY_MAX = 6000;
 
 const norm = (s: string) => String(s ?? "").replace(/\s+/g, " ").trim();
+function realpath(p: string): string { try { return fs.realpathSync(p); } catch { return p; } }
 
 /**
  * Short session ids for slugs. The tail of the id, not the head: Codex ids are uuid v7, so sessions created
@@ -66,9 +74,17 @@ export function gbrainBin(): string {
 
 interface GbResult { ok: boolean; stdout: string; stderr: string }
 
+/** The trial HOME gbrain runs under; throws unless it is an absolute path that is not the real home. */
+export function trialHome(ctx: TrialContext): string {
+  const home = ctx.paths.homeDir;
+  if (!home || !path.isAbsolute(home)) throw new Error(`gbrain: trial HOME must be an absolute path (got ${JSON.stringify(home)})`);
+  if (realpath(home) === realpath(os.homedir())) throw new Error(`gbrain: trial HOME is the real home ${home}; refusing`);
+  return home;
+}
+
 /** Run gbrain against the trial brain. Never inherits a database pointer from the real environment. */
 export function gb(ctx: TrialContext, args: string[], opts: { input?: string; timeoutMs?: number } = {}): GbResult {
-  const env: NodeJS.ProcessEnv = { ...process.env, HOME: ctx.paths.homeDir };
+  const env: NodeJS.ProcessEnv = { ...process.env, HOME: trialHome(ctx), LEDGER_EVAL: "1" };
   for (const k of Object.keys(env)) if (/^GBRAIN|^DATABASE_URL$|^SUPABASE/i.test(k)) delete env[k];
   try {
     const out = execFileSync(gbrainBin(), args, { env, input: opts.input, timeout: opts.timeoutMs ?? 120_000, maxBuffer: 64 << 20, stdio: ["pipe", "pipe", "pipe"] });
@@ -92,21 +108,21 @@ function brainConfig(ctx: TrialContext): { database_path?: string; engine?: stri
   try { return JSON.parse(fs.readFileSync(path.join(ctx.paths.homeDir, ".gbrain", "config.json"), "utf8")); } catch { return null; }
 }
 
+/** `HOME=<trial home> gbrain init --pglite` once; then prove the brain it points at lives under that HOME. */
 function ensureBrain(ctx: TrialContext): void {
-  fs.mkdirSync(ctx.paths.homeDir, { recursive: true });
+  const home = trialHome(ctx);
+  fs.mkdirSync(home, { recursive: true });
   if (!brainConfig(ctx)) {
     const r = gb(ctx, ["init", "--pglite"], { timeoutMs: 180_000 });
     if (!r.ok) throw new Error(`gbrain init failed: ${(r.stderr || r.stdout).slice(0, 300)}`);
   }
   const cfg = brainConfig(ctx);
   const dbPath = String(cfg?.database_path ?? "");
-  const home = ctx.paths.homeDir;
   const under = (p: string, root: string) => p.startsWith(root.endsWith(path.sep) ? root : root + path.sep);
-  if (!cfg || !dbPath || !(under(dbPath, home) || under(realpath(dbPath), realpath(home)))) {
-    throw new Error(`gbrain brain is not isolated under the trial HOME (${home}): ${JSON.stringify(cfg)}`);
+  if (!cfg || cfg.engine !== "pglite" || !dbPath || !(under(dbPath, home) || under(realpath(dbPath), realpath(home)))) {
+    throw new Error(`gbrain brain is not an isolated PGLite brain under the trial HOME (${home}): ${JSON.stringify(cfg)}`);
   }
 }
-function realpath(p: string): string { try { return fs.realpathSync(p); } catch { return p; } }
 
 // ---------- pages ----------
 
@@ -122,18 +138,26 @@ function eventBody(e: NormEvent): string {
 
 const yamlStr = (s: string) => JSON.stringify(s);
 
-interface Page { slug: string; kind: string; seq: number; text: string; body: string; at: string | undefined; session: string }
+interface Page { slug: string; kind: string; seq: number; text: string; markdown: string; at: string | undefined; session: string }
 
-function eventPage(e: NormEvent, seq: number, short: string, author: string, harness: string): Page {
-  const text = eventBody(e).slice(0, BODY_MAX);
-  const at = e.occurred_at;
-  const md = `# ${e.kind} · session ${short} · seq ${seq}\n\n${text}\n\n(author: ${author}, harness: ${harness}, at: ${at ?? "unknown"})\n`;
-  return { slug: `s-${short}-${seq}`, kind: e.kind, seq, text, body: md, at, session: short };
+/** The markdown `gbrain put` reads on stdin: frontmatter (title, type, tags), then the page body. */
+export function pageMarkdown(title: string, type: string, tags: string[], body: string): string {
+  return `---\ntitle: ${yamlStr(title)}\ntype: ${type}\ntags: [${tags.map(yamlStr).join(", ")}]\n---\n${body}`;
 }
 
-function writePage(dir: string, slug: string, title: string, type: string, tags: string[], body: string): void {
-  const fm = `---\ntitle: ${yamlStr(title)}\ntype: ${type}\ntags: [${tags.map(yamlStr).join(", ")}]\n---\n`;
-  fs.writeFileSync(path.join(dir, `${slug}.md`), fm + body);
+/** One event page: `s-<short>-<seq>`, `# <kind> · session <short> · seq <n>`, the content, `(author, harness, at)`. */
+export function eventPage(e: NormEvent, seq: number, short: string, author: string, harness: string): Page {
+  const text = eventBody(e).slice(0, BODY_MAX);
+  const at = e.occurred_at;
+  const title = `${e.kind} · session ${short} · seq ${seq}`;
+  const body = `# ${title}\n\n${text}\n\n(author: ${author}, harness: ${harness}, at: ${at ?? "unknown"})\n`;
+  return { slug: `s-${short}-${seq}`, kind: e.kind, seq, text, markdown: pageMarkdown(title, "event", [e.kind, `session-${short}`, author], body), at, session: short };
+}
+
+interface IngestRecord {
+  sessions: { id: string; short: string; author: string; harness: string; events: number; pages: number }[];
+  pages: number; session_pages: number; put_ok: number; put_failed: number; tag_ok: number; tag_failed: number; timeline: number;
+  embed_ok: boolean; embed_note: string; seconds: number; at: string;
 }
 
 async function prepare(ctx: TrialContext, origin: OriginRun): Promise<{ notes: string[]; prepared_ms: number }> {
@@ -144,12 +168,20 @@ async function prepare(ctx: TrialContext, origin: OriginRun): Promise<{ notes: s
   if (!sessions.length) throw new Error("gbrain.prepare: no origin transcripts to ingest");
   ensureBrain(ctx);
 
-  const stage = path.join(ctx.paths.homeDir, "gbrain-import");
-  fs.rmSync(stage, { recursive: true, force: true });
-  fs.mkdirSync(stage, { recursive: true });
   const pages: Page[] = [];
-  const ingested: { id: string; short: string; author: string; harness: string; events: number; pages: number }[] = [];
+  const ingested: IngestRecord["sessions"] = [];
   const shorts = sessionShorts(sessions.map((s) => s.id));
+  let putOk = 0, putFailed = 0, tagOk = 0, tagFailed = 0;
+  const put = (slug: string, markdown: string): boolean => {
+    const r = gb(ctx, ["put", slug], { input: markdown, timeoutMs: 60_000 });
+    if (r.ok) putOk++; else { putFailed++; if (putFailed <= 3) notes.push(`gbrain put ${slug} failed: ${(r.stderr || r.stdout).replace(/\s+/g, " ").slice(0, 160)}`); }
+    return r.ok;
+  };
+  const tag = (slug: string, t: string): void => {
+    const r = gb(ctx, ["tag", slug, t], { timeoutMs: 30_000 });
+    if (r.ok) tagOk++; else { tagFailed++; if (tagFailed <= 3) notes.push(`gbrain tag ${slug} ${t} failed: ${(r.stderr || r.stdout).replace(/\s+/g, " ").slice(0, 160)}`); }
+  };
+
   for (const s of sessions) {
     const r = streamTranscript(s.transcript, 0, s.harness);
     const short = shorts.get(s.id)!;
@@ -161,30 +193,15 @@ async function prepare(ctx: TrialContext, origin: OriginRun): Promise<{ notes: s
       const p = eventPage(e, seq, short, s.author, s.harness);
       pages.push(p);
       n++;
-      writePage(stage, p.slug, `${e.kind} · session ${short} · seq ${seq}`, "event", [e.kind, `session-${short}`, s.author], p.body);
+      if (put(p.slug, p.markdown)) { tag(p.slug, e.kind); tag(p.slug, `session-${short}`); }
       lines.push(`- seq ${seq} · ${e.kind}${e.occurred_at ? ` · ${e.occurred_at}` : ""}: ${norm(eventBody(e)).slice(0, 2000)} ([[s-${short}-${seq}]])`);
     });
-    const sessionBody = `# session ${short} · ${s.harness} · ${s.author}\n\nSession ${s.id} (${s.harness}, author ${s.author}), ${r.events.length} events, ${n} shown in order. Each line links to the event page.\n\n${lines.join("\n")}\n`;
-    writePage(stage, `session-${short}`, `session ${short} · ${s.harness} · ${s.author}`, "session", ["session", `session-${short}`, s.author, s.harness], sessionBody);
+    const sessionSlug = `session-${short}`;
+    const sessionTitle = `session ${short} · ${s.harness} · ${s.author}`;
+    const sessionBody = `# ${sessionTitle}\n\nSession ${s.id} (${s.harness}, author ${s.author}), ${r.events.length} normalized events, ${n} shown in order. Each line links to the event page.\n\n${lines.join("\n")}\n`;
+    if (put(sessionSlug, pageMarkdown(sessionTitle, "session", ["session", sessionSlug, s.author, s.harness], sessionBody))) { tag(sessionSlug, "session"); tag(sessionSlug, sessionSlug); }
     ingested.push({ id: s.id, short, author: s.author, harness: s.harness, events: r.events.length, pages: n + 1 });
-    log(`staged ${n} event pages + 1 session page for ${s.harness} session ${short} (${s.author})`);
-  }
-
-  // one import for every page: `gbrain import <dir> --no-embed` (tags and type come from the frontmatter)
-  const imp = gb(ctx, ["import", stage, "--no-embed"], { timeoutMs: 300_000 });
-  const m = /(\d+) pages imported/.exec(imp.stdout);
-  const imported = m ? Number(m[1]) : NaN;
-  if (!imp.ok) notes.push(`gbrain import failed: ${(imp.stderr || imp.stdout).slice(0, 300)}`);
-  const expected = pages.length + ingested.length;
-  if (imp.ok && imported !== expected) {
-    // fall back to per-page put for anything the import skipped
-    let fixed = 0;
-    for (const f of fs.readdirSync(stage)) {
-      const slug = f.replace(/\.md$/, "");
-      const r = gb(ctx, ["put", slug], { input: fs.readFileSync(path.join(stage, f), "utf8") });
-      if (r.ok) fixed++;
-    }
-    notes.push(`gbrain import reported ${imported} of ${expected} pages; re-put ${fixed} pages individually`);
+    log(`put ${n} event pages + 1 session page for ${s.harness} session ${short} (${s.author})`);
   }
 
   // a timeline entry per event when cheap (one process per entry)
@@ -205,31 +222,37 @@ async function prepare(ctx: TrialContext, origin: OriginRun): Promise<{ notes: s
     const emb = gb(ctx, ["embed", "--all"], { timeoutMs: 180_000 });
     const embN = /Embedded (\d+) chunks/.exec(emb.stdout);
     embedOk = emb.ok && embN !== null && Number(embN[1]) > 0 && !/Error embedding/.test(emb.stdout + emb.stderr);
-    embedWhy = embedOk ? "" : /OPENAI_API_KEY/.test(emb.stdout + emb.stderr) ? "no OPENAI_API_KEY" : (emb.stderr || emb.stdout).replace(/\s+/g, " ").slice(0, 160);
+    embedWhy = embedOk ? "" : /OPENAI_API_KEY/.test(emb.stdout + emb.stderr) ? "no OPENAI_API_KEY" : (emb.stderr || emb.stdout).replace(/\s+/g, " ").slice(0, 160) || "embedded 0 chunks";
   }
 
-  fs.writeFileSync(path.join(ctx.paths.homeDir, ".gbrain", INGEST_FILE), JSON.stringify({ sessions: ingested, pages: pages.length, session_pages: ingested.length, imported, timeline, embed_ok: embedOk, embed_note: embedWhy, at: new Date().toISOString() }, null, 2) + "\n");
-  const secs = ((Date.now() - t0) / 1000).toFixed(1);
-  notes.push(`${pages.length} event pages + ${ingested.length} session page(s) written (import reported ${imported}), ${timeline} timeline entries, embed ${embedOk ? "ok" : `failed (${embedWhy})`}, ${secs} s`);
+  const seconds = Number(((Date.now() - t0) / 1000).toFixed(1));
+  const record: IngestRecord = { sessions: ingested, pages: pages.length, session_pages: ingested.length, put_ok: putOk, put_failed: putFailed, tag_ok: tagOk, tag_failed: tagFailed, timeline, embed_ok: embedOk, embed_note: embedWhy, seconds, at: new Date().toISOString() };
+  fs.writeFileSync(path.join(ctx.paths.homeDir, ".gbrain", INGEST_FILE), JSON.stringify(record, null, 2) + "\n");
+  notes.push(`${pages.length} event pages + ${ingested.length} session page(s): ${putOk} put ok${putFailed ? `, ${putFailed} put FAILED` : ""}, ${tagOk} tags${tagFailed ? ` (${tagFailed} failed)` : ""}, ${timeline} timeline entries, embed ${embedOk ? "ok" : `not done (${embedWhy})`}, ${seconds} s`);
   for (const s of ingested) notes.push(`${s.harness} session ${s.short} (${s.author}): ${s.events} normalized events, ${s.pages} pages`);
   return { notes, prepared_ms: Date.now() - t0 };
 }
 
 // ---------- successor ----------
 
+/** The successor's MCP server: `gbrain serve` (stdio) with HOME = the trial home, so it opens the trial brain. */
+export function mcpServerConfig(ctx: TrialContext) {
+  return { mcpServers: { gbrain: { command: gbrainBin(), args: ["serve"], env: { HOME: trialHome(ctx) } } } };
+}
+
 async function successorSetup(ctx: TrialContext) {
   const mcpConfigPath = path.join(ctx.paths.configDir, "mcp-gbrain.json");
-  const mcp = { mcpServers: { gbrain: { command: gbrainBin(), args: ["serve"], env: { HOME: ctx.paths.homeDir } } } };
   fs.mkdirSync(ctx.paths.configDir, { recursive: true });
-  fs.writeFileSync(mcpConfigPath, JSON.stringify(mcp, null, 2) + "\n");
+  fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpServerConfig(ctx), null, 2) + "\n");
   let ingest: { embed_ok?: boolean } | null = null;
   try { ingest = JSON.parse(fs.readFileSync(path.join(ctx.paths.homeDir, ".gbrain", INGEST_FILE), "utf8")); } catch { ingest = null; }
   const preamble =
     "A teammate's previous work sessions were captured into the gbrain knowledge brain available to you as MCP tools (search, query, get_page, traverse_graph, get_timeline). Use them to recover what was asked, decided, and left unfinished before acting." +
     (ingest && ingest.embed_ok === false ? " Keyword search is available; semantic query may return nothing because embeddings were not generated." : "");
   return {
-    // HOME is not overridden for the successor process (its login lives in the real HOME); the ledger hooks
-    // of the user's real settings are switched off so the successor sees no Ledger brief in this condition.
+    // HOME is not overridden for the successor process (its login lives in the real HOME). LEDGER_HOOKS_OFF=1
+    // makes the user's own Claude hooks (which the successor driver does not disable) exit without injecting a
+    // Ledger brief: this condition's successor must see gbrain only.
     env: { LEDGER_HOOKS_OFF: "1" },
     mcpConfigPath,
     allowedTools: ["mcp__gbrain__*", "Read", "Glob", "Grep", "Bash(git *)", "Bash(ls *)", "Bash(cat *)"],
@@ -242,6 +265,7 @@ async function successorSetup(ctx: TrialContext) {
 
 interface Hit { slug: string; chunk_text?: string; title?: string }
 
+/** `HOME=<trial home> gbrain call search '{"query":…,"limit":…}'`: the keyword `search` tool, JSON out. */
 function search(ctx: TrialContext, query: string, limit = 10): Hit[] {
   const r = gb(ctx, ["call", "search", JSON.stringify({ query, limit })], { timeoutMs: 60_000 });
   const j = jsonOf(r.stdout);
@@ -259,6 +283,7 @@ async function evidenceRef(ctx: TrialContext, fixtureEvent: FixtureEvent): Promi
   const want = norm(text);
   if (!want || !brainConfig(ctx)) return null;
   const words = want.split(" ").map((w) => w.replace(/[^\p{L}\p{N}_-]/gu, "")).filter((w) => w.length > 1);
+  // distinctive phrases first: the leading words, the whole text, then the head and tail
   const queries = [...new Set([words.slice(0, 8).join(" "), want, words.slice(0, 4).join(" "), words.slice(-4).join(" ")].filter(Boolean))];
   const checked = new Set<string>();
   for (const q of queries) {
