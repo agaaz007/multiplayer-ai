@@ -63,6 +63,22 @@ if (live) {
 } else {
   try {
     await C02.before!(ctx);
+    assert.equal(git(paths.repo, "status", "--porcelain"), "");
+    await C02.afterOrigin!(ctx, origin);
+    const marker = path.join(paths.repo, "continuation-pending.txt");
+    assert.equal(git(paths.repo, "status", "--porcelain"), "?? continuation-pending.txt");
+    assert.equal(fs.readFileSync(marker, "utf8"), "Pending continuation fixture.\n");
+    assert.equal(fs.existsSync(path.join(paths.root, "third-agent-worktree", "continuation-pending.txt")), false);
+    const fixture = JSON.parse(fs.readFileSync(path.join(paths.rawDir, "c02-origin-fixture.json"), "utf8"));
+    assert.equal(fixture.mode, "controlled-fixture-setup");
+    assert.equal(fixture.actual_origin_interruption, false);
+    assert.equal(fixture.operation, "created-untracked-file");
+    assert.equal(fixture.sha256, fileHash(marker));
+    fs.writeFileSync(marker, "Existing origin bytes must be preserved.\n");
+    await C02.afterOrigin!(ctx, origin);
+    assert.equal(fs.readFileSync(marker, "utf8"), "Existing origin bytes must be preserved.\n");
+    assert.equal(JSON.parse(fs.readFileSync(path.join(paths.rawDir, "c02-origin-fixture.json"), "utf8")).operation, "preserved-existing-file");
+    ok("clean origin gains untracked snapshot bytes with honest controller provenance; third worktree and existing bytes remain intact");
     await C02.beforeSuccessor!(ctx);
     await C02.collect!(ctx, origin, successor);
     const parallel = JSON.parse(fs.readFileSync(path.join(paths.outputDir, "parallel.json"), "utf8"));

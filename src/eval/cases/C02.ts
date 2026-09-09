@@ -13,6 +13,26 @@ const states = new WeakMap<TrialContext, ParallelState>();
 export const C02: EvalCaseRunner = {
   id: "C02",
   async before(ctx) { states.set(ctx, createParallelState(ctx)); },
+  async afterOrigin(ctx) {
+    // The public C02 events can leave the repo clean. Ensure there are snapshot bytes to
+    // restore without injecting an answer or portraying this controlled setup as an interruption.
+    const relativePath = "continuation-pending.txt";
+    const marker = path.join(ctx.paths.repo, relativePath);
+    const existed = fs.existsSync(marker);
+    if (!existed) fs.writeFileSync(marker, "Pending continuation fixture.\n", { flag: "wx" });
+    writeJson(path.join(ctx.paths.rawDir, "c02-origin-fixture.json"), {
+      at: new Date().toISOString(),
+      actor: "fixture-controller",
+      mode: "controlled-fixture-setup",
+      actual_origin_interruption: false,
+      purpose: "Ensure C02 exercises snapshot restoration even when the origin leaves the repository clean.",
+      operation: existed ? "preserved-existing-file" : "created-untracked-file",
+      path: relativePath,
+      sha256: fileHash(marker),
+      contains_expected_answers: existed ? null : false,
+    });
+    ctx.log(`C02 controlled fixture: ${existed ? "preserved" : "created"} ${relativePath} before capture; no actual interruption`);
+  },
   async beforeSuccessor(ctx) {
     const state = states.get(ctx);
     if (!state) throw new Error("C02 third-agent setup is missing");
@@ -52,7 +72,7 @@ export const C02: EvalCaseRunner = {
       && Date.parse(turn.outcome.spawn.startedAt) <= Date.parse(output.started_at)
       && Date.parse(turn.outcome.spawn.endedAt) >= Date.parse(output.ended_at));
     const progressed = !state.fake && !state.failure && runnerPreserved && independentCheck.ok && actualToolChecks && harnessOverlapped && progress.before && progress.during && progress.after;
-    const refs = ["raw/third-agent-setup.json", operationRef, validationRef, ...state.turns.flatMap(turn => [turn.traceRef, `raw/third-agent-${turn.phase}-tools.jsonl`])];
+    const refs = ["raw/c02-origin-fixture.json", "raw/third-agent-setup.json", operationRef, validationRef, ...state.turns.flatMap(turn => [turn.traceRef, `raw/third-agent-${turn.phase}-tools.jsonl`])];
     writeJson(path.join(ctx.paths.outputDir, "parallel.json"), {
       raw_trace_refs: refs,
       mode: state.fake ? "fake-plumbing" : "live",

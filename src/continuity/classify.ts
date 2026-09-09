@@ -33,6 +33,8 @@ export interface ClassifyOpts {
   maxEvents?: number;
   dryRun?: boolean;
   log?: (s: string) => void;
+  /** Optional execution boundary for isolated evaluations; production keeps the configured extractor. */
+  extract?: (prompt: string, cfg: Config) => Promise<string>;
 }
 
 export interface ClassifyResult {
@@ -287,7 +289,7 @@ export async function classifySession(cfg: Config, pool: pg.Pool, sessionId: str
   // 4. model
   let out: ModelOutput;
   try {
-    out = parseClassifyOutput(await runExtractorAsync(prompt, cfg));
+    out = parseClassifyOutput(await (opts.extract ?? runExtractorAsync)(prompt, cfg));
   } catch (e: any) {
     return fail(`classifier failed: ${String(e?.message ?? e).slice(0, 300)}`);
   }

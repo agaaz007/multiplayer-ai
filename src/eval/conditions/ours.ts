@@ -13,6 +13,8 @@ import * as S from "../../continuity/store.js";
 import { checkoutWip, repoIdentity } from "../../continuity/shadow.js";
 import { detectHarness } from "../../continuity/events.js";
 import { loadAll, type Config } from "../../store.js";
+import { spawnHarness } from "../harness.js";
+import { trialEnv, writeEmptyMcpConfig } from "../fixture.js";
 
 /**
  * Condition "ours": the successor gets what the production system would give it.
@@ -330,7 +332,21 @@ async function prepare(ctx: TrialContext, origin: OriginRun): Promise<{ notes: s
     for (const s of record.sessions) {
       const cfg: Config = { ...baseCfg, author: s.author };
       try {
-        const r = await classifySession(cfg, pool, s.id, { now: tick(), log });
+        const r = await classifySession(cfg, pool, s.id, { now: tick(), log,
+          // Test doubles supply an explicit extractor command. Live evaluation uses
+          // the same classifier prompt with an empty MCP configuration in the trial.
+          ...(process.env.LEDGER_EXTRACTOR_CMD ? {} : { extract: async (prompt: string) => {
+            const args = ["-p", "--output-format", "text", "--no-session-persistence", "--tools", "", "--mcp-config", writeEmptyMcpConfig(ctx, "classifier-mcp-empty.json"), "--strict-mcp-config"];
+            const result = await spawnHarness({ cmd: "claude", args, cwd: ctx.paths.repo,
+              env: trialEnv(ctx, { LEDGER_HOOKS_OFF: "1" }), stdin: prompt, timeoutMs: 300_000, log });
+            fs.writeFileSync(path.join(ctx.paths.rawDir, `classifier-${s.id}.json`), JSON.stringify({
+              args, cwd: ctx.paths.repo, mcp_servers: [], exit_code: result.exitCode, timed_out: result.timedOut,
+              started_at: result.startedAt, ended_at: result.endedAt, stdout: result.stdout, stderr: result.stderr,
+            }, null, 2) + "\n");
+            if (result.exitCode !== 0 || result.timedOut || result.spawnError) throw new Error("isolated classifier failed; see raw/classifier-" + s.id + ".json");
+            return result.stdout;
+          } }),
+        });
         if (!r.model_ok) notes.push(`classifier ${s.id.slice(0, 8)}: failed: ${r.error}`);
         else notes.push(`classifier ${s.id.slice(0, 8)}: ${r.events_considered} events → ${r.records_created} record(s) created, ${r.assignments_applied} span(s) linked, ${r.updates_proposed} update(s) proposed, ${r.unassigned.length} unassigned${r.rejected.length ? `, ${r.rejected.length} rejected` : ""}`);
       } catch (e: any) {

@@ -44,6 +44,8 @@ def main():
     # later dynamic import or the MCP server that a successor is about to start.
     build = out / "build"
     shutil.copytree(ROOT / args.build_dir, build)
+    shutil.copytree(ROOT / "prompts", out / "prompts")
+    shutil.copytree(ROOT / "template", out / "template")
     adapter = build / "eval/adapter.js"
     suite = out / "suite"
     subprocess.run([sys.executable, str(KIT), "prepare", "--out", str(suite), "--noise-events", str(args.noise_events)], check=True, cwd=ROOT)
@@ -57,6 +59,8 @@ def main():
         "revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
         "working_diff_sha256": hashlib.sha256(subprocess.check_output(["git", "diff"], cwd=ROOT)).hexdigest(),
         "build_files": {str(p.relative_to(build)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(build.rglob("*.js"))},
+        "prompt_files": {str(p.relative_to(out)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted((out / "prompts").rglob("*")) if p.is_file()},
+        "template_files": {str(p.relative_to(out)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted((out / "template").rglob("*")) if p.is_file()},
         "limitations": ["Controlled fixture, not a real interrupted teammate task", "No second laptop involved", "One repetition is not a reliability estimate"],
     }
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")

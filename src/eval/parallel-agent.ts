@@ -117,6 +117,8 @@ export function createParallelState(ctx: TrialContext): ParallelState {
     initial_head: git(worktree, "rev-parse", "HEAD"),
     sentinel_sha256: state.sentinelBefore, runner_sha256: state.runnerBefore,
     config_dir: isolatedCtx.paths.configDir,
+    codex_home: state.codexDir,
+    isolated_role: "third-agent",
   });
   return state;
 }
@@ -140,7 +142,7 @@ export async function runParallelTurn(state: ParallelState, phase: ParallelTurn[
     : codexOriginArgs(prompt, state.sessionId, model, state.worktree, lastMessageFile);
   const env = trialEnv(ctx, state.codexDir ? { CODEX_HOME: state.codexDir } : {});
   state.runningSettled = false;
-  writeJson(path.join(ctx.paths.rawDir, `third-agent-${phase}-invocation.json`), { harness, model, phase, cwd: state.worktree, args, env_keys: envKeys(env) });
+  writeJson(path.join(ctx.paths.rawDir, `third-agent-${phase}-invocation.json`), { harness, model, phase, cwd: state.worktree, args, env_keys: envKeys(env), codex_home: state.codexDir, ledger_config_dir: ctx.paths.configDir });
   try {
     const outcome = await runHarnessTurn({
       harness, cmd: harness, args, cwd: state.worktree, env, timeoutMs: phase === "during" ? 780_000 : 180_000,

@@ -185,6 +185,7 @@ export async function runOrigin(ctx: TrialContext, events: FixtureEvent[], opts:
       turns.push(detail);
       appendJsonl(path.join(raw, "origin-turns.jsonl"), { ...detail, stdout_chars: out.spawn.stdout.length, boot_tokens: out.bootTokens, total_input_tokens: out.totalInputTokens });
       ctx.log(`origin turn ${i + 1}/${events.length} ${label} ${s.harness} ${out.ok ? "ok" : `FAILED (${out.failure})`} wall_ms=${out.spawn.wallMs} in=${out.usage?.input_tokens ?? "?"} cache_read=${out.usage?.cache_read ?? "?"} out=${out.usage?.output_tokens ?? "?"} event=${ev.id}`);
+      if (!out.ok) break; // preserve the failed turn, then reject instead of spending more calls
     }
   } finally {
     if (configAuthor !== ctx.originAuthor) writeTrialConfig(ctx, ctx.originAuthor);
