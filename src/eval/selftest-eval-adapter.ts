@@ -22,7 +22,7 @@ const ADAPTER = path.join(HERE, "adapter.js");
 const COMPARE = path.join(HERE, "compare.js");
 const PY = process.env.PYTHON || "python3";
 const PHASE1 = ["D01", "D02", "D03", "R01", "R02", "E01"];
-const PHASE2 = ["E02", "E03", "C01", "C02", "L01", "L02"];
+const PHASE2 = ["E02", "C01", "L02"];
 
 let step = 0;
 const ok = (msg: string) => console.log(`  ok ${++step}. ${msg}`);

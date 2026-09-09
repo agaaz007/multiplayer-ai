@@ -94,8 +94,13 @@ export const E03: EvalCaseRunner = {
     const seed = ctx.request.case.seed_files?.["layout.json"];
     if (seed === undefined) throw new Error("E03: fixture has no layout.json seed");
     const filename = path.join(ctx.paths.repo, "layout.json");
-    const existed = fs.existsSync(filename);
-    if (existed && !fs.lstatSync(filename).isFile()) throw new Error("E03: origin layout.json is not a regular file");
+    let existed = false;
+    try {
+      if (!fs.lstatSync(filename).isFile()) throw new Error("E03: origin layout.json is not a regular file");
+      existed = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
     const previous = existed ? fs.readFileSync(filename) : null;
     fs.mkdirSync(ctx.paths.rawDir, { recursive: true });
     if (previous !== null) fs.writeFileSync(path.join(ctx.paths.rawDir, "e03-origin-layout.before-reset.json"), previous);

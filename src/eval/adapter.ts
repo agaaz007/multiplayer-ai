@@ -197,6 +197,7 @@ async function runTrial(request: AdapterRequest, args: Args, log: (l: string) =>
         log(`bootstrap(${args.condition}): no snapshot in this condition; recovered/ is the fresh clone at ${boot.worktree}`);
       }
       const recovered = path.join(ctx.paths.outputDir, "recovered");
+      if (fs.existsSync(recovered)) throw new Error("recovered/ already exists; use a fresh output directory so stale files cannot satisfy checks");
       copyTree(boot.worktree, recovered);
       const files = manifest(recovered);
       fs.writeFileSync(path.join(ctx.paths.rawDir, "bootstrap.json"), JSON.stringify({ condition: args.condition, ...boot, copied_to: "recovered", copied_at: new Date().toISOString(), files }, null, 2) + "\n");
@@ -212,6 +213,7 @@ async function runTrial(request: AdapterRequest, args: Args, log: (l: string) =>
 
     if (needsSnapshot(request.case)) {
       const final = path.join(ctx.paths.outputDir, "final");
+      if (fs.existsSync(final)) throw new Error("final/ already exists; use a fresh output directory so stale files cannot satisfy checks");
       copyTree(setup.cwd, final);
       fs.writeFileSync(path.join(ctx.paths.rawDir, "final-manifest.json"), JSON.stringify({ from: setup.cwd, files: manifest(final) }, null, 2) + "\n");
     }

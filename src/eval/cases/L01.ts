@@ -1,4 +1,9 @@
 import type { EvalCaseRunner } from "./index.js";
+import { collectLongHistory, runLongHistoryOrigin } from "../long-history.js";
 
-/** L01 (phase 2): needs a long origin run with at least three real compactions, provider token counters, and stress.json. */
-export const L01: EvalCaseRunner = { id: "L01", skip: "phase 2: long-history origin with measured compactions and stress.json not implemented" };
+/** Capture-safe bounded turns, three observed fresh-session resets, and unique source-token measurement. */
+export const L01: EvalCaseRunner = {
+  id: "L01",
+  runOrigin: runLongHistoryOrigin,
+  collect: async (ctx, origin, successor) => collectLongHistory(ctx, origin, successor),
+};
