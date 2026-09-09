@@ -26,14 +26,20 @@ import { loadAll, type Config } from "../../store.js";
  *   evidenceRef    fixture text → `event:<session>:<seq>` from cont_events (trial sessions only), or
  *                  `ledger:<id>` when a decision in the trial ledger carries the text (D02).
  *
- * Isolation: LEDGER_CONFIG_DIR is set only for the duration of prepare and restored after; the helper
- * walks private per-session roots (symlinks to the origin transcripts under <configDir>/eval-roots)
- * so it never tails anything but the trial's sessions; `continuity.repos` pins capture to the fixture repo.
+ * Isolation: LEDGER_CONFIG_DIR = the trial config dir and LEDGER_EVAL=1 are set only for the duration of
+ * each plugin call and restored after (withEnv); the helper walks private per-session roots (symlinks to
+ * the origin transcripts under <configDir>/eval-roots) so it never tails anything but the trial's sessions;
+ * `continuity.repos` pins capture to the fixture repo. This module never calls initLedger/saveConfig: the
+ * trial config.json (written by the fixture) is read and rewritten with fs only. On 2026-09-09 a test that
+ * called initLedger() without LEDGER_CONFIG_DIR repointed the real ~/.ledger/config.json for hours; the
+ * guards here (`assertIsolated`) refuse a config dir that is the real one or a database that is the real one.
  */
 
 const ACTIVE_WINDOW_MIN = 14 * 24 * 60; // any origin transcript counts as active, however old the run
 const CAPTURE_TIMEOUT_MS = 90_000;
 const ORIGIN_FILE = "eval-origin.json";
+/** Env every plugin call runs under: the trial's config dir, and the store's eval guard armed. */
+const evalEnv = (ctx: TrialContext): Record<string, string> => ({ LEDGER_CONFIG_DIR: ctx.paths.configDir, LEDGER_EVAL: "1" });
 
 export interface OriginSession { id: string; harness: Harness; transcript: string; author: string; label: string | null }
 interface OriginRecord { sessions: (OriginSession & { wip_ref: string | null; wip_commit: string | null; thread_id: string | null })[]; repo: string; repo_identity: string }
@@ -57,12 +63,36 @@ function configFile(ctx: TrialContext): string { return path.join(ctx.paths.conf
 
 function realpathSafe(p: string): string { try { return fs.realpathSync(p); } catch { return p; } }
 
+/** The machine's real ~/.ledger/config.json (never LEDGER_CONFIG_DIR): what a trial must never read or write. */
+function realMachineConfig(): { dir: string; database_url: string | null } {
+  const dir = path.join(os.homedir(), ".ledger");
+  try {
+    const j = JSON.parse(fs.readFileSync(path.join(dir, "config.json"), "utf8"));
+    return { dir, database_url: typeof j?.continuity?.database_url === "string" ? j.continuity.database_url : null };
+  } catch { return { dir, database_url: null }; }
+}
+
+/**
+ * Refuse to run a trial against the real machine config or the real (Neon) continuity database. Cheap, and
+ * the only thing standing between a mis-built TrialContext and another config clobber.
+ */
+export function assertIsolated(ctx: TrialContext): void {
+  const real = realMachineConfig();
+  const dir = ctx.paths.configDir;
+  if (!dir || !path.isAbsolute(dir)) throw new Error(`ours: trial configDir must be absolute (got ${JSON.stringify(dir)})`);
+  if (realpathSafe(dir) === realpathSafe(real.dir)) throw new Error(`ours: trial configDir is the real ${real.dir}; refusing`);
+  if (!ctx.evalDatabaseUrl) throw new Error("ours: evalDatabaseUrl is empty");
+  if (real.database_url && ctx.evalDatabaseUrl === real.database_url) throw new Error("ours: evalDatabaseUrl is the real continuity database from ~/.ledger/config.json; refusing");
+  if (/neon\.tech/i.test(ctx.evalDatabaseUrl)) throw new Error("ours: evalDatabaseUrl points at Neon; the eval database must be local and disposable");
+}
+
 /**
  * The trial's config.json, normalized: ledger_dir, author, git_sync off unless stated, continuity pinned to
  * the eval database and to the fixture repo (`repos`). Rewritten only when something was missing or wrong;
  * unknown keys are preserved. `author` overrides the file's author for the returned Config only.
  */
 export function trialConfig(ctx: TrialContext, opts: { author?: string; write?: boolean } = {}): Config {
+  assertIsolated(ctx);
   const file = configFile(ctx);
   let raw: Record<string, any> = {};
   try { raw = JSON.parse(fs.readFileSync(file, "utf8")); } catch { raw = {}; }
@@ -92,7 +122,9 @@ export function trialConfig(ctx: TrialContext, opts: { author?: string; write?: 
   };
 }
 
+/** Switch the trial config's author with fs (never saveConfig); every other key is preserved byte for byte. */
 function rewriteConfigAuthor(ctx: TrialContext, author: string): void {
+  assertIsolated(ctx);
   const file = configFile(ctx);
   let raw: Record<string, any> = {};
   try { raw = JSON.parse(fs.readFileSync(file, "utf8")); } catch { raw = {}; }
@@ -232,7 +264,10 @@ async function prepare(ctx: TrialContext, origin: OriginRun): Promise<{ notes: s
   const sessions = resolveOriginSessions(ctx, origin);
   if (!sessions.length) throw new Error("ours.prepare: no origin transcripts to capture");
 
-  return withEnv({ LEDGER_CONFIG_DIR: ctx.paths.configDir, LEDGER_CLASSIFY: "0", LEDGER_GIT_SYNC: process.env.LEDGER_GIT_SYNC ?? "0" }, async () => {
+  // LEDGER_CLASSIFY=0: the helper must not start its own detached classification after the turn checkpoint;
+  // step 4 runs the classifier synchronously so its result is in the database when prepare returns.
+  // Children spawned meanwhile (the extractor behind classifySession) inherit LEDGER_EVAL and LEDGER_CONFIG_DIR.
+  return withEnv({ ...evalEnv(ctx), LEDGER_CLASSIFY: "0", LEDGER_GIT_SYNC: process.env.LEDGER_GIT_SYNC ?? "0" }, async () => {
     const baseCfg = trialConfig(ctx);
     const pool = getPool(baseCfg);
     await migrate(pool);
@@ -308,38 +343,51 @@ async function prepare(ctx: TrialContext, origin: OriginRun): Promise<{ notes: s
 
 // ---------- successor ----------
 
-/** The ledger CLI the successor's MCP server runs: LEDGER_EVAL_CLI_JS, else dist/cli.js, else this build's cli.js. */
+/**
+ * The ledger CLI the successor's MCP server runs: LEDGER_EVAL_CLI_JS, else the cli.js of the build this module
+ * runs from (the same sources as the plugin), else the repo's dist/cli.js.
+ */
 export function cliPath(): string {
   const here = path.dirname(fileURLToPath(import.meta.url)); // <build>/eval/conditions
   const buildDir = path.resolve(here, "..", "..");
   const root = path.resolve(buildDir, "..");
-  const candidates = [process.env.LEDGER_EVAL_CLI_JS, path.join(root, "dist", "cli.js"), path.join(buildDir, "cli.js")].filter((c): c is string => Boolean(c));
-  for (const c of candidates) if (fs.existsSync(c)) return c;
+  const candidates = [process.env.LEDGER_EVAL_CLI_JS, path.join(buildDir, "cli.js"), path.join(root, "dist", "cli.js")].filter((c): c is string => Boolean(c));
+  for (const c of candidates) if (fs.existsSync(c)) return path.resolve(c);
   throw new Error(`ours: no ledger cli.js found (tried ${candidates.join(", ")})`);
 }
 
-async function successorSetup(ctx: TrialContext) {
-  const mcpConfigPath = path.join(ctx.paths.configDir, "mcp-ours.json");
-  const mcp = {
+/**
+ * The successor's MCP server: `node <cli.js> mcp` reading the TRIAL config dir as the successor author, with
+ * LEDGER_EVAL=1 so the store refuses to write any real config, and LEDGER_CONTINUITY_DB pinned to the eval
+ * database (belt and braces over the config's own database_url).
+ */
+export function mcpServerConfig(ctx: TrialContext) {
+  return {
     mcpServers: {
       ledger: {
         command: process.execPath,
         args: [cliPath(), "mcp"],
-        env: { LEDGER_CONFIG_DIR: ctx.paths.configDir, LEDGER_AUTHOR: ctx.successorAuthor, LEDGER_CONTINUITY_DB: ctx.evalDatabaseUrl },
+        env: { LEDGER_CONFIG_DIR: ctx.paths.configDir, LEDGER_AUTHOR: ctx.successorAuthor, LEDGER_EVAL: "1", LEDGER_CONTINUITY_DB: ctx.evalDatabaseUrl },
       },
     },
   };
-  fs.mkdirSync(ctx.paths.configDir, { recursive: true });
-  fs.writeFileSync(mcpConfigPath, JSON.stringify(mcp, null, 2) + "\n");
-  trialConfig(ctx); // normalize first (repos, database) so hooks reading it see the same pins
-  rewriteConfigAuthor(ctx, ctx.successorAuthor);
-  return {
-    env: { LEDGER_CONFIG_DIR: ctx.paths.configDir, LEDGER_CONTINUITY_DB: ctx.evalDatabaseUrl },
-    mcpConfigPath,
-    allowedTools: ["mcp__ledger__*", "Read", "Glob", "Grep", "Bash(git *)", "Bash(ls *)", "Bash(cat *)"],
-    cwd: ctx.paths.successorRepo,
-    preamble: "",
-  };
+}
+
+async function successorSetup(ctx: TrialContext) {
+  return withEnv(evalEnv(ctx), async () => {
+    const mcpConfigPath = path.join(ctx.paths.configDir, "mcp-ours.json");
+    fs.mkdirSync(ctx.paths.configDir, { recursive: true });
+    fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpServerConfig(ctx), null, 2) + "\n");
+    trialConfig(ctx); // normalize first (repos, database) so hooks reading it see the same pins
+    rewriteConfigAuthor(ctx, ctx.successorAuthor);
+    return {
+      env: { LEDGER_CONFIG_DIR: ctx.paths.configDir, LEDGER_EVAL: "1", LEDGER_CONTINUITY_DB: ctx.evalDatabaseUrl },
+      mcpConfigPath,
+      allowedTools: ["mcp__ledger__*", "Read", "Glob", "Grep", "Bash(git *)", "Bash(ls *)", "Bash(cat *)"],
+      cwd: ctx.paths.successorRepo,
+      preamble: "",
+    };
+  });
 }
 
 /**

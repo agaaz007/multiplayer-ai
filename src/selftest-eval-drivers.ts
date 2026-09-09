@@ -160,10 +160,12 @@ const request = (n: string, direction: Direction, c: PublicCase = kase): Adapter
   assert.equal(r.bootTokens, 31199, "boot = iterations[0] input + cache_creation + cache_read");
   assert.equal(r.totalInputTokens, 31199);
   assert.equal(r.duration_api_ms, 1356);
-  const two = { ...sample, usage: { ...sample.usage, iterations: [sample.usage.iterations[0], { input_tokens: 500, output_tokens: 10, cache_read_input_tokens: 31000, cache_creation_input_tokens: 0, type: "message" }] } };
+  // two API calls: the top-level usage is the run total (verified equal to the transcript's per-call sum), iterations[0] the boot candidate
+  const second = { input_tokens: 500, output_tokens: 10, cache_read_input_tokens: 31000, cache_creation_input_tokens: 0, type: "message" };
+  const two = { ...sample, usage: { input_tokens: 10 + 500, cache_creation_input_tokens: 17407, cache_read_input_tokens: 13782 + 31000, output_tokens: 57, iterations: [sample.usage.iterations[0], second] } };
   const r2 = H.readClaudeJsonOutput(JSON.stringify(two))!;
   assert.equal(r2.bootTokens, 31199);
-  assert.equal(r2.totalInputTokens, 31199 + 31500);
+  assert.equal(r2.totalInputTokens, 31199 + 31500, "total = top-level input + cache_creation + cache_read");
   const stream = ['{"type":"system","subtype":"init"}', '{"type":"assistant","message":{}}', JSON.stringify(sample)].join("\n");
   assert.equal(H.readClaudeJsonOutput(stream)?.session_id, sample.session_id);
   assert.equal(H.readClaudeJsonOutput("not json"), null);
@@ -173,7 +175,7 @@ const request = (n: string, direction: Direction, c: PublicCase = kase): Adapter
   assert.equal(noIter.totalInputTokens, 10);
   const err = H.readClaudeJsonOutput(JSON.stringify({ ...sample, is_error: true, result: "Prompt is too long" }))!;
   assert.equal(err.is_error, true);
-  ok("readClaudeJsonOutput: result, session id, boot = iterations[0], totals over iterations, stream-json, garbage, is_error");
+  ok("readClaudeJsonOutput: result, session id, boot candidate = iterations[0], total = top-level usage, stream-json, garbage, is_error");
 }
 
 // ---------- unit: Codex JSON event stream (documented exec shape + legacy shape) ----------
