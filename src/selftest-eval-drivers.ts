@@ -137,10 +137,13 @@ const request = (n: string, direction: Direction, c: PublicCase = kase): Adapter
   if (!REAL) assert.equal(H.harnessVersion("claude"), "fake-claude");
   assert.equal(H.claudeProjectDirName("/private/var/x.y/z"), "-private-var-x-y-z");
   assert.ok(H.evalTmpRoot().endsWith("ledger-eval"));
-  const env = H.harnessEnv({ PATH: "/bin", LEDGER_DIR: "/leak", LEDGER_AUTHOR: "leak", LEDGER_CONTINUITY_DB: "leak", HOME: "/h" }, { LEDGER_CONFIG_DIR: "/cfg", HOME: undefined });
-  assert.deepEqual(env, { PATH: "/bin", LEDGER_CONFIG_DIR: "/cfg" });
+  const env = H.harnessEnv(
+    { PATH: "/bin", LEDGER_DIR: "/leak", LEDGER_AUTHOR: "leak", LEDGER_CONTINUITY_DB: "leak", LEDGER_GIT_SYNC: "0", HOME: "/h", CLAUDECODE: "1", CLAUDE_CODE_SESSION_ID: "ours", CLAUDE_CODE_CHILD_SESSION: "1", CLAUDE_CODE_MESSAGING_SOCKET: "/s", CLAUDE_CODE_MESSAGING_TOKEN: "t", CLAUDE_CODE_EXECPATH: "/claude" },
+    { LEDGER_CONFIG_DIR: "/cfg", HOME: undefined },
+  );
+  assert.deepEqual(env, { PATH: "/bin", CLAUDE_CODE_EXECPATH: "/claude", LEDGER_EVAL: "1", LEDGER_CONFIG_DIR: "/cfg" });
   assert.deepEqual(H.envKeys({ B: "1", A: "2", C: undefined }), ["A", "B"]);
-  ok("session ids, versions, project dir names, trial env strips machine-level ledger overrides");
+  ok("session ids, versions, project dir names; harness env strips machine-level ledger overrides and our own Claude session identity, always carries LEDGER_EVAL=1");
 }
 
 // ---------- unit: Claude JSON output (shape observed from claude 2.1.258 on 2026-09-08) ----------
@@ -289,7 +292,11 @@ if (!REAL) {
     assert.deepEqual(cfg.continuity?.include, ["generated/**"]);
     assert.equal(cfg.continuity?.classify, true);
     assert.equal(snap(realLedgerConfig), ledgerCfgBefore, "~/.ledger/config.json must not change");
-    ok("disposable ledger initialised; trial config.json complete; ~/.ledger/config.json untouched");
+    assert.equal(process.env.LEDGER_CONFIG_DIR, guardConfigDir, "createTrial restores LEDGER_CONFIG_DIR after initLedger");
+    assert.equal(process.env.LEDGER_EVAL, "1");
+    assert.ok(!fs.existsSync(path.join(guardConfigDir, "config.json")), "initLedger wrote into the trial config dir, not the process's LEDGER_CONFIG_DIR");
+    assert.ok(fs.readFileSync(path.join(p.configDir, "config.json"), "utf8").includes(p.ledgerDir));
+    ok("disposable ledger initialised; trial config.json complete; ~/.ledger/config.json untouched; LEDGER_CONFIG_DIR restored");
     const { getPool } = await import("./continuity/db.js");
     const t = await getPool(cfg).query("select count(*)::int as n from information_schema.tables where table_schema = current_schema() and table_name like 'cont_%'");
     assert.ok(t.rows[0].n >= 10, `cont_* tables: ${t.rows[0].n}`);
@@ -357,7 +364,7 @@ if (!REAL) {
     const c2 = inv.invocations[2].args as string[];
     assert.ok(c2[0] === "-p" && c2[1] === O.originPrompt(events[2].text) && c2.includes("--session-id") && c2.includes("--strict-mcp-config") && c2.includes("--dangerously-skip-permissions") && c2.includes("--output-format"));
     assert.ok(c2[c2.indexOf("--mcp-config") + 1].endsWith("origin-mcp-empty.json") && c2[c2.indexOf("--add-dir") + 1] === ctxF.paths.repo);
-    assert.ok(inv.invocations.every((x: any) => Array.isArray(x.env_keys) && x.env_keys.includes("LEDGER_CONFIG_DIR") && !("env" in x)));
+    assert.ok(inv.invocations.every((x: any) => Array.isArray(x.env_keys) && x.env_keys.includes("LEDGER_CONFIG_DIR") && x.env_keys.includes("LEDGER_EVAL") && !x.env_keys.includes("CLAUDE_CODE_SESSION_ID") && !x.env_keys.includes("LEDGER_DIR") && !("env" in x)));
     assert.ok(!JSON.stringify(inv).includes(events[0].id + '"') || true);
     assert.ok(inv.transcripts.length === 2 && fs.existsSync(path.join(ctxF.paths.rawDir, "origin-run.json")));
     ok("usage, wall time, assistant text recorded; raw origin-turns.jsonl / origin-invocations.json (argv + env keys only) / origin-run.json written");
@@ -389,7 +396,9 @@ if (!REAL) {
     const rawOut = readJson(sr.rawOutputPath);
     assert.equal(rawOut.session_id, sr.sessionId);
     assert.ok(typeof rawOut.stdout === "string" && rawOut.stdout.includes('"type":"result"'));
-    assert.equal(rawOut.boot_tokens_source, "json.usage.iterations[0]");
+    assert.equal(rawOut.boot_tokens_source, "transcript.first_assistant_usage");
+    assert.equal(rawOut.boot_tokens_transcript, 2512);
+    assert.equal(rawOut.boot_tokens_json, 2512, "fallback candidate (usage.iterations[0]) recorded alongside");
     assert.equal(rawOut.ok, true);
     assert.ok(fs.existsSync(path.join(ctxF.paths.rawDir, "successor-stdout.txt")));
     const invFile = path.join(ctxF.paths.rawDir, "successor-invocation.json");
@@ -403,7 +412,7 @@ if (!REAL) {
     assert.ok(inv.args.includes("--mcp-config") && inv.args[inv.args.indexOf("--mcp-config") + 1] === mcp && inv.args.includes("--strict-mcp-config"));
     assert.equal(inv.args[inv.args.indexOf("--add-dir") + 1], ctxF.paths.successorRepo);
     assert.deepEqual(inv.args.slice(inv.args.indexOf("--allowedTools") + 1), ["mcp__ledger__*", "Read"]);
-    assert.ok(inv.env_keys.includes("LEDGER_EVAL_MARKER") && inv.env_keys.includes("LEDGER_CONFIG_DIR") && !("env" in inv));
+    assert.ok(inv.env_keys.includes("LEDGER_EVAL_MARKER") && inv.env_keys.includes("LEDGER_CONFIG_DIR") && inv.env_keys.includes("LEDGER_EVAL") && !("env" in inv));
     assert.ok(!fs.readFileSync(invFile, "utf8").includes("successor-env-value-9f3"), "env values must not be recorded");
     const tools = fs.readFileSync(path.join(ctxF.paths.rawDir, "successor-tools.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
     assert.equal(tools.length, 1);
@@ -529,8 +538,10 @@ if (!REAL) {
     const fakeFiles = walk(process.env.LEDGER_EVAL_FAKE_ROOT!).filter((f) => f.endsWith(".jsonl"));
     assert.equal(fakeFiles.length, 8, fakeFiles.join("\n"));
     assert.ok(fakeFiles.every((f) => f.startsWith(base)));
-    assert.deepEqual(fs.readdirSync(base).sort(), ["fake-codex-home", "fake-transcripts", "mcp-ledger-rev.json", "mcp-ledger.json", "out"]);
-    ok("isolation: ~/.ledger/config.json, ~/.claude/projects, ~/.codex/sessions unchanged; no trial roots left; 8 fake transcripts, all under the selftest root");
+    assert.deepEqual(fs.readdirSync(base).sort(), ["config-guard", "fake-codex-home", "fake-transcripts", "mcp-ledger-rev.json", "mcp-ledger.json", "out"]);
+    assert.deepEqual(fs.readdirSync(guardConfigDir), [], "nothing wrote into the process's LEDGER_CONFIG_DIR guard dir");
+    assert.equal(process.env.LEDGER_CONFIG_DIR, guardConfigDir);
+    ok("isolation: ~/.ledger/config.json, ~/.claude/projects, ~/.codex/sessions unchanged; no trial roots left; 8 fake transcripts, all under the selftest root; guard config dir empty");
   }
   fs.rmSync(base, { recursive: true, force: true });
 } else {
@@ -540,6 +551,8 @@ if (!REAL) {
   const req = request("real", "claude-to-codex", smoke);
   const ctx = await F.createTrial(req, "ours", { log: (l) => console.log("    | " + l), originModel: "claude-haiku-4-5-20251001", successorModel: "claude-haiku-4-5-20251001" });
   assert.equal(ctx.originHarness, "claude");
+  assert.equal(process.env.LEDGER_CONFIG_DIR, guardConfigDir, "createTrial restores LEDGER_CONFIG_DIR");
+  assert.equal(snap(realLedgerConfig), ledgerCfgBefore, "~/.ledger/config.json unchanged by createTrial");
   console.log(`    harness versions: claude=${H.harnessVersion("claude")} codex=${H.harnessVersion("codex")}`);
   const run = await O.runOrigin(ctx, evs, { timeoutMs: 300_000 });
   const det = run.turns as OriginTurnDetail[];
@@ -566,8 +579,25 @@ if (!REAL) {
   const rawOut = readJson(sr.rawOutputPath);
   console.log(`    successor usage (json): ${JSON.stringify(rawOut.claude?.usage)}`);
   console.log(`    successor transcript usage: ${JSON.stringify(rawOut.transcript_usage)}`);
+  console.log(`    successor boot tokens: used=${rawOut.boot_tokens} source=${rawOut.boot_tokens_source} transcript_first_call=${rawOut.boot_tokens_transcript} json_iterations0=${rawOut.boot_tokens_json}`);
+  const originInv = readJson(path.join(ctx.paths.rawDir, "origin-invocations.json"));
+  const succInv = readJson(path.join(ctx.paths.rawDir, "successor-invocation.json"));
+  for (const x of [...originInv.invocations.map((i: any) => ({ role: `origin turn ${i.turn}`, ...i })), { role: "successor", ...succInv }]) {
+    assert.ok(x.env_keys.includes("LEDGER_EVAL") && x.env_keys.includes("LEDGER_CONFIG_DIR") && !x.env_keys.includes("CLAUDECODE") && !x.env_keys.includes("CLAUDE_CODE_SESSION_ID"), `${x.role}: env keys ${x.env_keys.join(",")}`);
+    console.log(`    ${x.role} argv: ${x.cmd} ${(x.args as string[]).map((a) => (a.length > 60 ? JSON.stringify(a.slice(0, 57) + "…") : a)).join(" ")}`);
+  }
   assert.ok((await F.cleanupTrial(ctx)).removed);
-  ok("REAL trial root cleaned up");
+  ok("REAL trial root cleaned up; every spawned process carried LEDGER_EVAL=1 + LEDGER_CONFIG_DIR and no nested-Claude identity");
+}
+
+// ---------- the config-file identity check, both modes ----------
+{
+  const after = snapBytes(realLedgerConfig);
+  const same = ledgerCfgBytesBefore === null ? after === null : after !== null && ledgerCfgBytesBefore.equals(after);
+  assert.ok(same, "~/.ledger/config.json must be byte-identical before and after the whole run");
+  const mtimeAfter = fs.existsSync(realLedgerConfig) ? fs.statSync(realLedgerConfig).mtimeMs : null;
+  assert.equal(process.env.LEDGER_CONFIG_DIR, guardConfigDir, "LEDGER_CONFIG_DIR still the guard dir at the end");
+  ok(`~/.ledger/config.json byte-identical before and after (${ledgerCfgBytesBefore?.length ?? 0} bytes; mtime ${mtimeAfter === ledgerCfgMtimeBefore ? "unchanged" : "CHANGED but bytes equal"})`);
 }
 
 await F.closeEvalPools();
