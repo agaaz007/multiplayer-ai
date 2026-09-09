@@ -222,6 +222,10 @@ function installExitHook() {
   process.on("exit", () => {
     for (const c of live) killGroup(c.pid, "SIGKILL");
   });
+  // The outer controller timeout sends SIGTERM. Node does not emit 'exit' for
+  // an unhandled signal, so explicitly clean up only the child groups we own.
+  process.once("SIGTERM", () => process.exit(143));
+  process.once("SIGINT", () => process.exit(130));
 }
 
 /** Run a harness process with a watchdog: on timeout the whole process group gets SIGTERM, then SIGKILL 5 s later. */

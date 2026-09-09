@@ -288,6 +288,7 @@ export async function runSuccessor(ctx: TrialContext, setup: SuccessorSetup, res
     codex: out.codex ? { turns: out.codex.turns, errors: out.codex.errors, types: out.codex.types, lines: out.codex.lines } : null,
   });
   ctx.log(`successor done: ${out.ok ? "ok" : `FAILED (${out.failure})`} wall_ms=${out.spawn.wallMs} boot=${bootTokens ?? "null"} total_in=${totalInputTokens ?? "null"} tools=${toolCalls.length} parsed=${parsed ? "yes" : "no"} transcript=${found?.path ?? "none"}`);
+  if (!out.ok) throw new Error(`successor harness failed: ${out.failure}; see raw/successor-output.json`);
   return {
     harness,
     sessionId: sessionId ?? "",

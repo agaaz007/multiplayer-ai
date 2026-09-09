@@ -220,6 +220,8 @@ export async function runOrigin(ctx: TrialContext, events: FixtureEvent[], opts:
   const run: OriginRun = { harness: ctx.originHarness, sessionIds, turns, transcriptPaths, totalInputTokens, compactions };
   writeJson(path.join(raw, "origin-invocations.json"), { invocations, transcripts: transcriptNotes });
   writeJson(path.join(raw, "origin-run.json"), run);
+  const failed = turns.find((turn) => !turn.ok);
+  if (failed) throw new Error(`origin harness failed on turn ${failed.turnIndex + 1}: ${failed.failure}; see raw/origin-turns.jsonl. No continuation may be scored from failed origin turns.`);
   ctx.log(`origin run done: ${turns.filter((t) => t.ok).length}/${turns.length} turns ok, ${sessionIds.length} sessions, ${transcriptPaths.length} transcripts, ${totalInputTokens} input tokens (incl. cache reads), ${compactions} compactions`);
   return run;
 }
