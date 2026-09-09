@@ -1,0 +1,1 @@
+["node", "dist/eval/adapter.js", "--condition", "gbrain"]
