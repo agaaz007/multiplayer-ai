@@ -2,7 +2,7 @@
 
 The single maintained record for the continuity layer of `@tranzmit/ledger`. Update it whenever a decision is made, a feature lands, or something is learned the hard way. Canonical spec and runbook live beside it in `docs/continuity/`; the Ledger itself holds the formal decision records referenced below.
 
-Last updated: 2026-09-08
+Last updated: 2026-09-09
 
 ---
 
@@ -14,6 +14,7 @@ Documents:
 - `docs/continuity/spec.md`: the implementation spec (v1.2)
 - `docs/continuity/runbook.md`: what is running, how to check, how a teammate joins, how to stop
 - `docs/continuity/phase0-report.md`: the transcript coverage scan that gated the build
+- `docs/continuity/handoff-evaluation-2026-09-09.md`: actual recovery blocker and controlled completion, concurrency, and long-history tests
 
 ---
 
@@ -56,7 +57,8 @@ Documents:
 | Phase-1 matrix run A: D01–D03, R01, R02, E01 × ours, gbrain × Codex→Claude × 1 rep | done 9 Sep 09:15Z: ours 2 pass / 4 fail, gbrain 3 pass / 3 fail. Ours' E01 file checks all passed (exact bytes, untracked file, deletion); gbrain's failed by design (no snapshot). Three of ours' failures were correct values with rejected citations, an adapter artifact (framing line in the origin turn; clipped evidence previews quoted as-is); vocabulary misses on next_action in both; gbrain answered null for R02's 640 viewport after its search surfaced the right page and the successor did not open it | `eval/runs/phase1-a/matrix.md` |
 | Phase-1 matrix run B: same cases after the two condition-neutral adapter fixes (`c0fc1bd`) | done 9 Sep: kit verdicts ours 3/6, gbrain 3/6. Over 13 answer checks each: ours 10 values correct (8 fully passed, 2 citation-failed, 3 wrong), gbrain 10 correct (9 fully passed, 1 citation-failed, 3 wrong); the same three oracle-vocabulary tokens wrong in both. E01 files: ours 3/3, gbrain 0/3 by design. Medians: resume 13.0 s vs 9.4 s, successor wall 49.9 s vs 26.6 s, total input 307k vs 253k tokens, boot ≈50k vs ≈48k. Ledger: `fnd-20260909-continuity-benchmark-phase-1-ours-vs-gbrain-tie--6glz`, definition `def-20260909-continuity-evaluation-case-pass-and-value-correc-7pnv` | `eval/runs/phase1-b/matrix.md` |
 | Rachit's helper enrolled and uploading (Codex 0.153.4, MacBook-Pro.local); first sessions were in a non-repo folder | done 8 Sep; real handoff test pending a session in the HiAstro checkout | Neon |
-| Real interrupted handoff test across two machines | pending Rachit's next HiAstro session | runbook |
+| Controlled E03 completion, C02 third-agent activity, and L01 long-history drivers | implemented locally; live trials and limitations recorded in the handoff report; no level claim | `src/eval/`, `eval/run-hard-handoff.py`, `docs/continuity/handoff-evaluation-2026-09-09.md` |
+| Real interrupted handoff test across two machines | blocked 9 Sep: inspected Rachit sessions captured Downloads cwd, no repo/thread/verified snapshot; nested Tranzmit checkout remains on his laptop | handoff report and runbook |
 | Postgres backup and restore drill | planned | |
 
 ---
@@ -106,6 +108,10 @@ Wave 1: records layer, emitter improvements, evidence query tools. Wave 2: class
 ## 4. Learnings
 
 Dated, concrete, with the evidence. Add one whenever reality disagreed with the plan.
+
+- **2026-09-09 · Conversation capture did not recover Rachit's nested checkout.** Three inspected Codex sessions on `MacBook-Pro.local` had non-repository Downloads working directories and null repo, thread, WIP ref, and verified snapshot timestamp. One transcript named `/Users/ramesh/Downloads/Tata1MG/tmp/tranzmit-current.iuURa9` and branch `local/adaptive-learning-five-phases`; neither that remote branch nor a matching Rachit WIP ref was available. The helper derives the repository from session cwd; a tool working in a nested repository does not establish a snapshot of that repository. The captured agent claimed local completion, which remains unverified. Start the real handoff from a session in the actual checkout and identify the remaining task.
+- **2026-09-09 · E03's public instruction and strict scorer disagree.** The instruction permits at least 20 px bottom clearance; the unchanged oracle requires exactly 20. Ledger's two live successors restored the unfinished seed and preserved price/CTA height with 24/48 px clearance. Independent public-requirement validation passed both; official scoring failed both. GBrain's two successors failed preservation/reconstruction and both validations. This demonstrates saved-file assistance on a controlled fixture, not a structured-record accuracy advantage. The report retains both interpretations and the controller's deliberate pre-capture reset.
+- **2026-09-09 · Live harness failures must stop the evaluation.** An older Codex CLI rejected the configured model before any origin work. The adapter now retains the failed turn and refuses to score continuation. Origins and successors use separate Codex configs; later runs isolate the classifier's MCP configuration, freeze executable/assets, and clean up owned harness processes on timeout. C02 verification follows exact shell/cell completion chains, including Python argv wrappers, rather than matching one command spelling.
 
 - **2026-09-08 · The Codex parser missed 27% of tool calls.** `custom_tool_call` (`exec` with JS-wrapped shell, `apply_patch`) was invisible; outputs are arrays of text parts. Found by the corpus scan, not by anyone noticing. The hook-vs-transcript reconciliation exists so the next format drift is caught on the first session.
 - **2026-09-08 · Codex has two message formats in the wild.** Older rollouts use `event_msg/user_message`; newer use `response_item/message` with roles, including a `developer` role that carries injected AGENTS.md text. Both are parsed; the legacy shape is used only when the new yields nothing, so a file with both is not double-counted.

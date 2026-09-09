@@ -10,9 +10,9 @@ Read-only session inspection found three Rachit sessions with Downloads-director
 - `01a08105-5167-7f61-a098-43e2b477861a`
 - `01a080bb-745f-7951-820a-8c15e349f459`
 
-For all three, `repo`, `thread_id`, `wip_ref`, and `code_saved_through_verified` were null. Events 541 and 548 of the last session described an unpushed checkout at `/Users/ramesh/Downloads/Tata1MG/tmp/tranzmit-current.iuURa9`, on `local/adaptive-learning-five-phases`, in `agaaz007/behaviour-md-tranzmit`. A read-only remote-ref check found neither that branch nor any matching `refs/wip/rachit/*` ref.
+For all three, `repo`, `thread_id`, `wip_ref`, and `last_verified_snapshot_at` were null. Events 541 and 548 of session `01a07b83-5faa-76f2-ae8e-a01bb9647b64` described an unpushed checkout at `/Users/ramesh/Downloads/Tata1MG/tmp/tranzmit-current.iuURa9`, on `local/adaptive-learning-five-phases`, in `agaaz007/behaviour-md-tranzmit`. A read-only remote-ref check found neither that branch nor any matching `refs/wip/rachit/*` ref.
 
-These are findings from the live inspection during this session; this report does not contain a copied transcript or a standalone database evidence bundle. They establish that the inspected sessions and selected remote refs did not supply a checkpoint. They do not establish that Rachit's local files were lost. Finishing his exact change requires publishing a snapshot or branch from that nested checkout, then recovering it into a fresh worktree and validating the change.
+A [sanitized metadata inspection](../../.context/hard-handoff/rachit-inspection.json) retains the session fields and whitelisted event claims. The captured agent claimed all five phases were completed locally; that completion claim has not been independently verified, and the user has not yet identified which unfinished task to use. They establish that the inspected sessions and selected remote refs did not supply a checkpoint. They do not establish that Rachit's local files were lost. Finishing his exact change requires publishing a snapshot or branch from that nested checkout, then recovering it into a fresh worktree and validating the change.
 
 **E03: completed trials and unchanged official verdicts.**
 
@@ -58,9 +58,9 @@ No continuity level is demonstrated by these E03 results. The additional concurr
 | --- | --- | --- |
 | [hard-e03-20260909](../../eval/runs/hard-e03-20260909/manifest.json) | Codex origin requests received HTTP 400 requiring a CLI upgrade for the configured model | Stopped as invalid setup; no completion score |
 | [hard-c02-20260909](../../eval/runs/hard-c02-20260909/manifest.json) | Ledger's clean origin worktree produced no snapshot for the required bootstrap | Ledger trials `error`/`not_run`; corrected fixture rerun required |
-| [hard-long-20260909](../../eval/runs/hard-long-20260909/manifest.json) | Frozen run could not load the tokenizer cache | Setup error; restarted with a populated frozen cache |
+| [hard-long-20260909](../../eval/runs/hard-long-20260909/manifest.json) | One Ledger Codex → Claude preflight could not load the tokenizer cache | That trial was restarted with a populated frozen cache; other trials continued |
 
-The first C02 run also contains completed GBrain observations: Codex → Claude failed the parallel-work check and Claude → Codex passed it. Those observations remain in that run's report; the incomplete Ledger pairing cannot establish a comparative C02 result.
+The first C02 run also contains completed GBrain observations: Codex → Claude failed the parallel-work check and Claude → Codex passed it. Independent trace review found that the first failure came from a verifier rejecting a Python argv wrapper; the corrected verifier accepts its exact successful command/poll chain. The original verdict remains unchanged. Those observations remain in that run's report; the incomplete Ledger pairing cannot establish a comparative C02 result.
 
 **Reproduction.**
 
