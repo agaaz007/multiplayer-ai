@@ -87,6 +87,20 @@ if (live) {
     noPid.outcome = { ...noPid.outcome, spawn: { ...noPid.outcome.spawn, pid: null } };
     assert.equal(verifiedAttributionToolOperation(noPid), false);
     ok("equivalent argv wrapper and exact shell/cell polling chains verify; wrong ids, errors, unfinished commands, and missing reports fail");
+    const beforeReport = JSON.stringify({ phase: "before", success: true, note: 'Quoted braces: } [ \\"' });
+    const checksum = { exit_code: 0, output: "Checker and sentinel unchanged.\n" };
+    const batchTurn = (results: unknown[]): ParallelTurn => ({
+      ...turn([]), phase: "before",
+      toolCalls: [{ tool: "exec", input: "node check-attribution.cjs before node -e 'console.log(\"checksum\")'", is_error: false,
+        output: "Script completed\nWall time 0.2 seconds\nOutput:\n" + results.map(value => JSON.stringify(value)).join("") }],
+    });
+    assert.ok(verifiedAttributionToolOperation(batchTurn([{}, { exit_code: 0, output: beforeReport }, checksum])));
+    assert.ok(verifiedAttributionToolOperation(batchTurn([checksum, { exit_code: 0, output: beforeReport }, {}])));
+    assert.ok(verifiedAttributionToolOperation(batchTurn([[{ status: "fulfilled", value: { exit_code: 0, output: beforeReport } }, { status: "fulfilled", value: checksum }]])));
+    assert.equal(verifiedAttributionToolOperation(batchTurn([{ exit_code: 1, output: beforeReport }, checksum])), false, "a failed check cannot borrow a sibling command's exit status");
+    assert.equal(verifiedAttributionToolOperation(batchTurn([{ session_id: 45, output: beforeReport }, checksum])), false, "an unfinished check cannot borrow a sibling command's exit status");
+    assert.equal(verifiedAttributionToolOperation(batchTurn([{ status: "rejected", value: { exit_code: 0, output: beforeReport } }, checksum])), false);
+    ok("batched adjacent/array results retain every operation and its own status; successful siblings cannot validate failed or unfinished checks");
     await C02.before!(ctx);
     assert.equal(git(paths.repo, "status", "--porcelain"), "");
     await C02.afterOrigin!(ctx, origin);

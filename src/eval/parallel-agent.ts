@@ -6,7 +6,7 @@ import { findTranscript } from "../transcript.js";
 import { git, trialEnv, writeEmptyMcpConfig } from "./fixture.js";
 import { appendJsonl, envKeys, isFakeHarness, killGroup, newSessionId, runHarnessTurn, writeJson, type TurnOutcome } from "./harness.js";
 import { claudeOriginArgs, codexOriginArgs } from "./origin.js";
-import { collectToolCalls, parseLastJsonObject, prepareCodexHome } from "./successor.js";
+import { collectToolCalls, prepareCodexHome } from "./successor.js";
 import type { TrialContext } from "./types.js";
 
 /** C02's unrelated task. The third harness implements the aggregation; this runner validates it. */
@@ -77,17 +77,58 @@ export function invokesAttributionCheck(input: string, phase: ParallelTurn["phas
   return new RegExp(`check-attribution\\.cjs["']?(?:\\s+|\\s*,\\s*)["']?${phase}(?=["'\\s;,)\\]}]|$)`).test(input);
 }
 
-function outputLayers(call: Record<string, unknown>): Record<string, unknown>[] {
-  const layers: Record<string, unknown>[] = [];
-  let text = String(call.output ?? call.output_preview ?? "");
-  // Codex's exec wrapper returns JSON whose output is a string containing the actual process JSON.
-  for (let depth = 0; depth < 5; depth++) {
-    const value = parseLastJsonObject(text);
-    if (!value) break;
-    layers.push(value);
-    if (typeof value.output !== "string") break;
-    text = value.output;
+/** A batched exec may return several adjacent JSON values, with no delimiter between them. */
+function outputJsonValues(text: string): unknown[] {
+  const values: unknown[] = [];
+  for (let start = 0; start < text.length; start++) {
+    if (text[start] !== "{" && text[start] !== "[") continue;
+    let depth = 0;
+    let quoted = false;
+    for (let end = start; end < text.length; end++) {
+      const char = text[end];
+      if (quoted) {
+        if (char === "\\") end++;
+        else if (char === '"') quoted = false;
+        continue;
+      }
+      if (char === '"') quoted = true;
+      else if (char === "{" || char === "[") depth++;
+      else if (char === "}" || char === "]") depth--;
+      if (depth !== 0) continue;
+      try {
+        values.push(JSON.parse(text.slice(start, end + 1)));
+        start = end;
+      } catch { /* Continue scanning for a valid subsequent value. */ }
+      break;
+    }
   }
+  return values;
+}
+
+interface OutputLayer { value: Record<string, unknown>; failed: boolean; completed: boolean }
+
+function outputLayers(call: Record<string, unknown>, completed: boolean): OutputLayer[] {
+  const layers: OutputLayer[] = [];
+  const visit = (value: unknown, depth: number, failed: boolean, completed: boolean) => {
+    if (depth > 8 || layers.length >= 256) return;
+    if (typeof value === "string") {
+      for (const parsed of outputJsonValues(value)) visit(parsed, depth + 1, failed, completed);
+    } else if (Array.isArray(value)) {
+      for (const child of value) visit(child, depth + 1, failed, completed);
+    } else if (value && typeof value === "object") {
+      const object = value as Record<string, unknown>;
+      failed ||= object.is_error === true || object.isError === true || object.status === "rejected"
+        || (typeof object.exit_code === "number" && object.exit_code !== 0);
+      completed ||= object.exit_code === 0;
+      layers.push({ value: object, failed, completed });
+      // Each result retains its own exit status: a later successful hash check cannot
+      // turn an earlier failed attribution operation into a verified success.
+      for (const [key, child] of Object.entries(object)) {
+        if (typeof child === "object" || key === "output" || key === "text") visit(child, depth + 1, failed, completed);
+      }
+    }
+  };
+  visit(String(call.output ?? call.output_preview ?? ""), 0, false, completed);
   return layers;
 }
 
@@ -106,17 +147,14 @@ export function verifiedAttributionToolOperation(turn: ParallelTurn): boolean {
     const launch = invokesAttributionCheck(input, turn.phase);
     if (!launch && !references(input, "session_id", sessions) && !references(input, "cell_id", cells)) continue;
     if (call.is_error === true || (call.exit_code != null && call.exit_code !== 0)) continue;
-    const layers = outputLayers(call);
-    if (layers.some(layer => typeof layer.exit_code === "number" && layer.exit_code !== 0)) continue;
-    for (const layer of layers) if (typeof layer.session_id === "number" || typeof layer.session_id === "string") sessions.add(String(layer.session_id));
+    const completed = call.exit_code === 0 || (call.tool === "Bash" && call.is_error === false && typeof call.finished_at === "string");
+    const layers = outputLayers(call, completed).filter(layer => !layer.failed);
+    for (const { value } of layers) if (typeof value.session_id === "number" || typeof value.session_id === "string") sessions.add(String(value.session_id));
     const cell = /Script running with cell ID\s+([A-Za-z0-9_-]+)/.exec(String(call.output ?? call.output_preview ?? ""));
     if (cell) cells.add(cell[1]);
-    const completed = call.exit_code === 0 || layers.some(layer => layer.exit_code === 0)
-      || (call.tool === "Bash" && call.is_error === false && typeof call.finished_at === "string");
-    if (!completed) continue;
-    if (layers.some(layer => layer.phase === turn.phase && (turn.phase === "during"
-      ? Number.isInteger(layer.successful_operations) && Number(layer.successful_operations) > 0
-      : layer.success === true))) return true;
+    if (layers.some(({ value, completed }) => completed && value.phase === turn.phase && (turn.phase === "during"
+      ? Number.isInteger(value.successful_operations) && Number(value.successful_operations) > 0
+      : value.success === true))) return true;
   }
   return false;
 }
