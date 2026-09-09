@@ -43,10 +43,20 @@ export interface RunSuccessorOptions {
 
 export const SUCCESSOR_TIMEOUT_MS = 600_000;
 
+/**
+ * The same contract for every condition. It fixes the FORM of a value (an identifier, not a sentence)
+ * without naming any expected value; the oracle compares values literally, so "locked insight only" and
+ * "locked_insight" are different answers even when they state the same fact. Explanations, attribution,
+ * and qualifiers belong in `evidence` and `notes`, never in `value`.
+ */
 export function answerContract(answerKeys: string[]): string {
   return (
     'When finished, output ONLY a JSON object on the last line of your reply: {"answers": {"<key>": {"value": <answer>, "evidence": ["<exact quoted source text you retrieved>"]}}, "selected_topic": "<topic if asked>", "notes": "<one sentence>"}. ' +
-    `Keys: ${answerKeys.join(", ")}. Use null when a value is genuinely unknown or unresolved; never guess.`
+    `Keys: ${answerKeys.join(", ")}. ` +
+    "Value format: each value is the shortest identifier that names the fact, not a sentence: a number as a JSON number (199, not \"₹199\"), otherwise a single word or a short snake_case noun phrase naming the thing itself (a component, a status, a reason word, a next step). " +
+    "Do not add qualifiers (\"only\", \"currently\"), attribution (\"by X\", \"according to\"), reasons, or units to a value; put those in evidence or notes. " +
+    "If the source states a reason, the value is the reason word itself. If a question asks for a status such as resolved or unresolved, answer with that word. " +
+    "Use null when a value is genuinely unknown or unresolved; never guess. `evidence` must quote the retrieved source text exactly."
   );
 }
 
