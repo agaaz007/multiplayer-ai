@@ -90,6 +90,43 @@ function readLayout(outputDir: string, folder: string): LayoutArtifact {
  */
 export const E03: EvalCaseRunner = {
   id: "E03",
+  async afterOrigin(ctx) {
+    const seed = ctx.request.case.seed_files?.["layout.json"];
+    if (seed === undefined) throw new Error("E03: fixture has no layout.json seed");
+    const filename = path.join(ctx.paths.repo, "layout.json");
+    const existed = fs.existsSync(filename);
+    if (existed && !fs.lstatSync(filename).isFile()) throw new Error("E03: origin layout.json is not a regular file");
+    const previous = existed ? fs.readFileSync(filename) : null;
+    fs.mkdirSync(ctx.paths.rawDir, { recursive: true });
+    if (previous !== null) fs.writeFileSync(path.join(ctx.paths.rawDir, "e03-origin-layout.before-reset.json"), previous);
+    fs.writeFileSync(filename, seed);
+    fs.writeFileSync(path.join(ctx.paths.rawDir, "e03-origin-checkpoint.json"), JSON.stringify({
+      version: 1,
+      recorded_at: new Date().toISOString(),
+      action: "controller reset to supplied unfinished fixture before capture",
+      limitation: "Controlled fixture setup; this is not a real interrupted Rachit session. Origin responses and any earlier fix remain in raw traces.",
+      before_sha256: previous === null ? null : digest(previous),
+      after_sha256: digest(seed),
+      controller_changed_layout: previous === null || digest(previous) !== digest(seed),
+      before_file: previous === null ? null : "raw/e03-origin-layout.before-reset.json",
+    }, null, 2) + "\n");
+    ctx.log("E03: controller restored the unfinished fixture before capture; this is controlled setup, not a real interruption (raw/e03-origin-checkpoint.json)");
+  },
+  async beforeSuccessor(ctx) {
+    const recovered = readLayout(ctx.paths.outputDir, "recovered");
+    const seed = ctx.request.case.seed_files?.["layout.json"];
+    const matchesSeed = seed !== undefined && recovered.sha256 === digest(seed);
+    fs.writeFileSync(path.join(ctx.paths.rawDir, "e03-successor-start.json"), JSON.stringify({
+      checked_at: new Date().toISOString(),
+      condition: ctx.condition,
+      recovered_matches_seed: matchesSeed,
+      source_already_completed: recovered.validation.passed,
+      recovered,
+    }, null, 2) + "\n");
+    if (recovered.validation.passed || (ctx.condition === "ours" && !matchesSeed)) {
+      throw new Error("E03: refusing to start successor from a checkpoint that does not preserve the unfinished seed (see raw/e03-successor-start.json)");
+    }
+  },
   async collect(ctx) {
     for (const folder of ["recovered", "final"]) {
       const dir = path.join(ctx.paths.outputDir, folder);

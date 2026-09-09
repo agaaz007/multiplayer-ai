@@ -1,7 +1,8 @@
 import path from "node:path";
 import { streamTranscript } from "../continuity/events.js";
 import type { FixtureEvent, Harness, OriginRun, OriginTurnResult, TrialContext } from "./types.js";
-import { appendJsonl, codexModelArgs, countCompactions, defaultModel, envKeys, newSessionId, otherHarness, runHarnessTurn, waitForTranscript, writeJson, type FakeToolCall, type TurnSpec } from "./harness.js";
+import { appendJsonl, codexModelArgs, countCompactions, defaultModel, envKeys, isFakeHarness, newSessionId, otherHarness, runHarnessTurn, waitForTranscript, writeJson, type FakeToolCall, type TurnSpec } from "./harness.js";
+import { prepareCodexHome } from "./successor.js";
 import { trialEnv, writeEmptyMcpConfig, writeTrialConfig } from "./fixture.js";
 
 /**
@@ -99,6 +100,11 @@ export async function runOrigin(ctx: TrialContext, events: FixtureEvent[], opts:
   const primary = primarySessionLabel(events);
   const raw = ctx.paths.rawDir;
   const mcpConfigPath = opts.mcpConfigPath === undefined ? writeEmptyMcpConfig(ctx, "origin-mcp-empty.json") : opts.mcpConfigPath;
+  // Origin and successor have separate isolated Codex configs. Real personal MCP servers,
+  // hooks and memory must not contaminate a fixture or escape into the team database.
+  const originCodex = events.some((e) => harnessFor(ctx, e.session || primary, primary) === "codex")
+    ? prepareCodexHome(ctx, { cwd: ctx.paths.repo, mcpConfigPath, env: {}, allowedTools: [], preamble: "" }, "origin")
+    : null;
   const sessions = new Map<string, SessionState>();
   const turns: OriginTurnDetail[] = [];
   const invocations: Record<string, unknown>[] = [];
@@ -142,7 +148,7 @@ export async function runOrigin(ctx: TrialContext, events: FixtureEvent[], opts:
       const args = s.harness === "claude"
         ? claudeOriginArgs(prompt, s.sessionId!, resume, s.model, ctx.paths.repo, mcpConfigPath, opts.allowedTools)
         : codexOriginArgs(prompt, resume ? s.sessionId : null, s.model, ctx.paths.repo, lastMessageFile);
-      const env = trialEnv(ctx, opts.extraEnv);
+      const env = trialEnv(ctx, { ...opts.extraEnv, ...(s.harness === "codex" && originCodex ? { CODEX_HOME: originCodex.home } : {}) });
       const fakeCalls: FakeToolCall[] = s.harness === "claude"
         ? [{ name: "Bash", input: { command: "git status --short" }, output: "" }]
         : [{ name: "exec", input: { command: "git status --short" }, output: "Script completed\nOutput:\n" }];
@@ -195,7 +201,8 @@ export async function runOrigin(ctx: TrialContext, events: FixtureEvent[], opts:
       continue;
     }
     sessionIds.push(s.sessionId);
-    const found = await waitForTranscript(s.sessionId);
+    const roots = s.harness === "codex" && originCodex && !isFakeHarness() ? { codex: path.join(originCodex.home, "sessions") } : undefined;
+    const found = await waitForTranscript(s.sessionId, 10_000, roots);
     if (!found) {
       ctx.log(`session ${s.label}: transcript for ${s.sessionId} not found`);
       transcriptNotes.push({ label: s.label, harness: s.harness, session_id: s.sessionId, transcript: null });

@@ -181,8 +181,8 @@ export function mcpJsonToToml(json: Record<string, unknown>): string {
  * config.toml with the trial's MCP servers and a trust entry for the working directory, and
  * nothing else (no user config, no hooks.json, no history). Returns the directory.
  */
-export function prepareCodexHome(ctx: TrialContext, setup: SuccessorSetup): { home: string; authCopied: boolean; configPath: string } {
-  const home = path.join(ctx.paths.homeDir, "codex");
+export function prepareCodexHome(ctx: TrialContext, setup: SuccessorSetup, role: "origin" | "successor" = "successor"): { home: string; authCopied: boolean; configPath: string } {
+  const home = path.join(ctx.paths.homeDir, role === "origin" ? "origin-codex" : "codex");
   fs.mkdirSync(home, { recursive: true });
   const realAuth = path.join(codexHome(), "auth.json");
   let authCopied = false;
