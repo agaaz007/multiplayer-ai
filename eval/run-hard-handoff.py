@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -27,7 +28,7 @@ def main():
     parser.add_argument("--repetitions", type=int, default=1)
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--timeout", type=int, default=7200)
-    parser.add_argument("--noise-events", type=int, default=1200)
+    parser.add_argument("--noise-events", type=int, default=1300)
     parser.add_argument("--build-dir", default="dist-handoff")
     args = parser.parse_args()
     if min(args.repetitions, args.workers, args.timeout) < 1:
@@ -39,6 +40,11 @@ def main():
     if not adapter.is_file():
         parser.error("build first: node_modules/.bin/tsc -p tsconfig.json --outDir " + args.build_dir)
     out.mkdir(parents=True)
+    # Freeze executable bytes: rebuilding the workspace during a run cannot alter a
+    # later dynamic import or the MCP server that a successor is about to start.
+    build = out / "build"
+    shutil.copytree(ROOT / args.build_dir, build)
+    adapter = build / "eval/adapter.js"
     suite = out / "suite"
     subprocess.run([sys.executable, str(KIT), "prepare", "--out", str(suite), "--noise-events", str(args.noise_events)], check=True, cwd=ROOT)
     # Retain the full oracle unchanged; omitted cases remain not_run in level reports.
@@ -49,12 +55,14 @@ def main():
         "suite_sha256": hashlib.sha256((suite / "private/oracle.json").read_bytes()).hexdigest(),
         "revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
         "working_diff_sha256": hashlib.sha256(subprocess.check_output(["git", "diff"], cwd=ROOT)).hexdigest(),
+        "build_files": {str(p.relative_to(build)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(build.rglob("*.js"))},
         "limitations": ["Controlled fixture, not a real interrupted teammate task", "No second laptop involved", "One repetition is not a reliability estimate"],
     }
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     env = {**os.environ, "LEDGER_EVAL": "1"}
     env.pop("LEDGER_EVAL_FAKE_HARNESS", None)
     env["LEDGER_CONFIG_DIR"] = str(out / "controller-config")
+    env.setdefault("LEDGER_EVAL_TOKENIZER_PYTHON", str(ROOT / ".context/eval-tokenizer/bin/python3"))
     Path(env["LEDGER_CONFIG_DIR"]).mkdir()
     (out / "source.diff").write_bytes(subprocess.check_output(["git", "diff"], cwd=ROOT))
 

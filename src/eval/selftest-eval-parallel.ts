@@ -3,13 +3,14 @@ import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { C02 } from "./cases/C02.js";
-import { evalTmpRoot, writeJson } from "./harness.js";
+import { defaultModel, evalTmpRoot, writeJson } from "./harness.js";
 import { git } from "./fixture.js";
 import { createParallelState, fileHash, parallelProgress, readParallelOperations, runParallelTurn, startParallelHandoff, stopParallelAgent } from "./parallel-agent.js";
 import type { AdapterRequest, OriginRun, SuccessorRun, TrialContext } from "./types.js";
 
-/** Pure plumbing/negative checks by default. --live-claude runs only an actual third-agent smoke, not a C02 trial. */
-const live = process.argv.includes("--live-claude");
+/** Pure plumbing/negative checks by default. --live-claude/--live-codex run third-agent smokes, not C02 trials. */
+const thirdHarness = process.argv.includes("--live-codex") ? "codex" : "claude";
+const live = process.argv.includes("--live-claude") || process.argv.includes("--live-codex");
 process.env.LEDGER_EVAL = "1";
 if (live) delete process.env.LEDGER_EVAL_FAKE_HARNESS;
 else process.env.LEDGER_EVAL_FAKE_HARNESS = "1";
@@ -30,7 +31,7 @@ const request: AdapterRequest = {
   protocol_version: 1, direction: "codex-to-claude", repetition: 1, trial_id: path.basename(root), output_dir: paths.outputDir,
   case: { id: "C02", level: 4, title: "Third agent selftest", events: [], resume_prompt: "Continue", setup: [], answer_keys: [], successor_answer_contract: {} },
 };
-const ctx: TrialContext = { request, paths, condition: "ours", originHarness: "claude", successorHarness: "codex", originAuthor: "eval", successorAuthor: "eval", originModel: "claude-haiku-4-5-20251001", successorModel: "codex-default", evalDatabaseUrl: "postgresql://localhost:5432/ledger_eval", log: line => fs.appendFileSync(path.join(paths.rawDir, "controller.log"), `${new Date().toISOString()} ${line}\n`) };
+const ctx: TrialContext = { request, paths, condition: "ours", originHarness: thirdHarness, successorHarness: thirdHarness === "claude" ? "codex" : "claude", originAuthor: "eval", successorAuthor: "eval", originModel: defaultModel(thirdHarness, "origin"), successorModel: "codex-default", evalDatabaseUrl: "postgresql://localhost:5432/ledger_eval", log: line => fs.appendFileSync(path.join(paths.rawDir, "controller.log"), `${new Date().toISOString()} ${line}\n`) };
 writeJson(path.join(paths.rawDir, "bootstrap.json"), { worktree: paths.successorRepo });
 const rawOutputPath = path.join(paths.rawDir, "successor-output.json");
 writeJson(rawOutputPath, { started_at: "2026-01-01T00:00:01.000Z", ended_at: "2026-01-01T00:00:03.000Z" });
