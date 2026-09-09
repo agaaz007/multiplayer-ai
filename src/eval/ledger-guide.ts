@@ -32,12 +32,10 @@ export function freezeLedgerGuide(ctx: TrialContext, build: string): { path: str
   return { path: trialPath, retainedPath, provenancePath, sha256: digest };
 }
 
-/** Change only query.brief()'s generated Rules line; stored records remain verbatim. */
-export function localizeBriefGuide(rendered: string, guidePath: string): string {
+/** Reject a selected build that ignored the optional guide path; no source text is rewritten. */
+export function assertLocalBriefGuide(rendered: string, guidePath: string): void {
   const lines = rendered.split("\n");
-  if (!lines[0]?.startsWith("# Ledger brief (") || lines[1] !== "" || !lines[2]?.startsWith("Rules: ") || !lines[2].endsWith(GLOBAL_GUIDE_POINTER)) {
+  if (!lines[0]?.startsWith("# Ledger brief (") || lines[1] !== "" || !lines[2]?.startsWith("Rules: ") || !lines[2].endsWith(`Full format in \`${guidePath}\`.`)) {
     throw new Error("ours: unrecognized generated brief guide pointer; refusing a global-guide fallback");
   }
-  lines[2] = lines[2].slice(0, -GLOBAL_GUIDE_POINTER.length) + `Full format in \`${guidePath}\`.`;
-  return lines.join("\n");
 }

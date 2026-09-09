@@ -16,7 +16,7 @@ import { loadAll, type Config } from "../../store.js";
 import { spawnHarness } from "../harness.js";
 import { trialEnv, writeEmptyMcpConfig } from "../fixture.js";
 import { claudeClassifierArgs } from "../claude-isolation.js";
-import { freezeLedgerGuide, GLOBAL_GUIDE_POINTER, localizeBriefGuide } from "../ledger-guide.js";
+import { assertLocalBriefGuide, freezeLedgerGuide } from "../ledger-guide.js";
 
 /**
  * Condition "ours": the successor gets what the production system would give it.
@@ -380,12 +380,13 @@ export function cliPath(): string {
  * database (belt and braces over the config's own database_url).
  */
 export function mcpServerConfig(ctx: TrialContext) {
+  const guide = freezeLedgerGuide(ctx, path.dirname(cliPath()));
   return {
     mcpServers: {
       ledger: {
         command: process.execPath,
         args: [cliPath(), "mcp"],
-        env: { LEDGER_CONFIG_DIR: ctx.paths.configDir, LEDGER_AUTHOR: ctx.successorAuthor, LEDGER_EVAL: "1", LEDGER_CONTINUITY_DB: ctx.evalDatabaseUrl },
+        env: { LEDGER_CONFIG_DIR: ctx.paths.configDir, LEDGER_AUTHOR: ctx.successorAuthor, LEDGER_EVAL: "1", LEDGER_CONTINUITY_DB: ctx.evalDatabaseUrl, LEDGER_EVAL_GUIDE_PATH: guide.path },
       },
     },
   };
@@ -401,7 +402,7 @@ export async function explicitStartupBrief(ctx: TrialContext): Promise<string> {
     `import { brief } from ${moduleUrl("query.js")};`,
     `import { openThreadsText } from ${moduleUrl("continuity/brief.js")};`,
     `import { closePools } from ${moduleUrl("continuity/db.js")};`,
-    "try { const config = loadConfig(); const sections = [brief(config), await openThreadsText(config, { cwd: process.cwd() })]; process.stdout.write(sections.filter(Boolean).join('\\n\\n') + '\\n'); } finally { await closePools(); }",
+    `try { const config = loadConfig(); const sections = [brief(config, { guidePath: ${JSON.stringify(guide.path)} }), await openThreadsText(config, { cwd: process.cwd() })]; process.stdout.write(sections.filter(Boolean).join('\\n\\n') + '\\n'); } finally { await closePools(); }`,
   ].join("\n");
   const args = ["--input-type=module", "-e", script];
   const result = await spawnHarness({ cmd: process.execPath, args, cwd: ctx.paths.successorRepo,
@@ -417,10 +418,9 @@ export async function explicitStartupBrief(ctx: TrialContext): Promise<string> {
   const tracePath = path.join(ctx.paths.rawDir, "ours-startup-brief.json");
   fs.writeFileSync(tracePath, JSON.stringify(trace, null, 2) + "\n");
   if (result.exitCode !== 0 || result.timedOut || result.spawnError) throw new Error("ours startup brief failed; see raw/ours-startup-brief.json");
-  const preamble = localizeBriefGuide(result.stdout, guide.path);
-  fs.writeFileSync(tracePath, JSON.stringify({ ...trace, preamble,
-    guide_pointer_rewrite: { generated_line_number: 3, original: GLOBAL_GUIDE_POINTER, replacement: `Full format in \`${guide.path}\`.` },
-  }, null, 2) + "\n");
+  assertLocalBriefGuide(result.stdout, guide.path);
+  const preamble = result.stdout;
+  fs.writeFileSync(tracePath, JSON.stringify({ ...trace, preamble, content_transformations: [] }, null, 2) + "\n");
   fs.writeFileSync(path.join(ctx.paths.rawDir, "ours-startup-brief.txt"), preamble);
   return preamble.trim();
 }
