@@ -13,11 +13,16 @@ import { trialEnv, writeEmptyMcpConfig } from "./fixture.js";
  *
  * Boot tokens: the input of the successor's FIRST model call, which is the system prompt,
  * tool schemas, CLAUDE.md/AGENTS.md, the injected brief, and the prompt, before any
- * retrieval. Claude: usage.iterations[0] of the `--output-format json` result
- * (input + cache creation + cache read), cross-checked against the transcript's first
- * assistant line. Codex: the rollout's first event_msg/token_count last_token_usage
- * (input_tokens, cache included); the exec stream's turn.completed usage is a turn total
- * and is only the fallback.
+ * retrieval. Both harnesses record per-call usage only in their transcript, so that is the
+ * primary source and the machine output on stdout is the fallback:
+ *   Claude  primary  transcript: first `type:"assistant"` line, message.usage.input_tokens +
+ *                    cache_creation_input_tokens + cache_read_input_tokens ("transcript.first_assistant_usage")
+ *           fallback `--output-format json` result: usage.iterations[0], same three fields summed
+ *                    ("json.usage.iterations[0]"; on 2.1.258 iterations holds ONE entry and it is the LAST call)
+ *   Codex   primary  rollout: first event_msg/token_count payload.info.last_token_usage.input_tokens, cache
+ *                    included ("rollout.first_token_count")
+ *           fallback `--json` stream: turn.completed usage.input_tokens, a turn total ("stream.turn.completed")
+ * raw/successor-output.json records both candidates (boot_tokens_transcript, boot_tokens_json) and the one used.
  */
 
 export interface SuccessorSetup {
@@ -247,15 +252,24 @@ export async function runSuccessor(ctx: TrialContext, setup: SuccessorSetup, res
   } else {
     ctx.log(`successor: transcript not found for ${sessionId ?? "(no session id)"}`);
   }
-  // Claude: the JSON result's iterations[0] is the first call; Codex: the rollout's first token_count is, the stream only has turn totals.
-  const bootTokens = harness === "claude" ? out.bootTokens ?? tUsage?.boot ?? null : tUsage?.boot ?? out.bootTokens ?? null;
+  // First model call from the transcript (both harnesses); the stdout usage is the fallback (see the header).
+  const bootFromTranscript = tUsage?.boot ?? null;
+  const bootFromStdout = out.bootTokens ?? null;
+  const bootTokens = bootFromTranscript ?? bootFromStdout;
+  const bootSource =
+    bootFromTranscript !== null
+      ? harness === "claude" ? "transcript.first_assistant_usage" : "rollout.first_token_count"
+      : bootFromStdout !== null
+        ? harness === "claude" ? "json.usage.iterations[0]" : out.codex?.firstCallSource === "token_count" ? "stream.token_count" : "stream.turn.completed"
+        : null;
+  // Totals: Claude's top-level usage is the run total and equals the transcript sum; Codex's stream carries turn totals only.
   const totalInputTokens = harness === "claude" ? out.totalInputTokens ?? tUsage?.total ?? null : tUsage?.total ?? out.totalInputTokens ?? null;
 
   writeJson(rawOutputPath, {
     harness, model, session_id: sessionId, ok: out.ok, failure: out.failure, exit_code: out.spawn.exitCode, signal: out.spawn.signal, timed_out: out.spawn.timedOut,
     wall_ms: out.spawn.wallMs, started_at: out.spawn.startedAt, ended_at: out.spawn.endedAt,
     stdout: out.spawn.stdout, stderr_tail: out.spawn.stderr.slice(-4000), assistant_text: out.assistantText, parsed_output: parsed,
-    usage: out.usage, boot_tokens: bootTokens, boot_tokens_source: harness === "claude" ? (out.bootTokens !== null ? "json.usage.iterations[0]" : tUsage?.boot !== null && tUsage ? "transcript.first_assistant_usage" : null) : (tUsage?.boot != null ? "rollout.first_token_count" : out.codex?.firstCallSource ?? null),
+    usage: out.usage, boot_tokens: bootTokens, boot_tokens_source: bootSource, boot_tokens_transcript: bootFromTranscript, boot_tokens_json: bootFromStdout,
     total_input_tokens: totalInputTokens, transcript_usage: tUsage, transcript: found?.path ?? null, transcript_events: transcriptEvents, tool_calls: toolCalls.length,
     claude: out.claude ? { subtype: out.claude.subtype, num_turns: out.claude.num_turns, duration_ms: out.claude.duration_ms, duration_api_ms: out.claude.duration_api_ms, total_cost_usd: out.claude.total_cost_usd, usage: out.claude.usage, modelUsage: out.claude.modelUsage } : null,
     codex: out.codex ? { turns: out.codex.turns, errors: out.codex.errors, types: out.codex.types, lines: out.codex.lines } : null,

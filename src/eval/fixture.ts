@@ -152,9 +152,13 @@ export function readTrialConfig(ctx: TrialContext): Config {
   return JSON.parse(fs.readFileSync(trialConfigPath(ctx), "utf8")) as Config;
 }
 
-/** Child-process env for anything run inside the trial: LEDGER_CONFIG_DIR set, machine-level ledger overrides stripped. */
+/**
+ * Child-process env for anything run inside the trial: LEDGER_EVAL=1 and LEDGER_CONFIG_DIR=<trial config dir>
+ * (the hooks, helper, and MCP server read them), machine-level ledger overrides and our own Claude session
+ * identity stripped. Every origin and successor process goes through this.
+ */
 export function trialEnv(ctx: TrialContext, extra: Record<string, string | undefined> = {}): NodeJS.ProcessEnv {
-  return harnessEnv(process.env, { LEDGER_CONFIG_DIR: ctx.paths.configDir, ...extra });
+  return harnessEnv(process.env, { LEDGER_EVAL: "1", LEDGER_CONFIG_DIR: ctx.paths.configDir, ...extra });
 }
 
 /** `{"mcpServers":{}}` for `--mcp-config … --strict-mcp-config`: no user-level MCP servers reach the harness. */
@@ -204,6 +208,9 @@ export function applyCaseSetup(ctx: TrialContext): SetupApplied {
 }
 
 export async function createTrial(request: AdapterRequest, condition: Condition, opts: CreateTrialOptions = {}): Promise<TrialContext> {
+  // This process is an eval process from here on: src/store.ts saveConfig() throws under LEDGER_EVAL=1 unless
+  // LEDGER_CONFIG_DIR is set, so a stray initLedger/saveConfig can never repoint ~/.ledger/config.json again.
+  process.env.LEDGER_EVAL = "1";
   const trialId = safeTrialId(request.trial_id);
   const evalRoot = path.resolve(opts.evalRoot ?? evalTmpRoot());
   const root = path.join(evalRoot, trialId);
@@ -269,7 +276,8 @@ export async function createTrial(request: AdapterRequest, condition: Condition,
 
   if (opts.applySetup !== false) applyCaseSetup(ctx);
 
-  // disposable ledger + trial config (never ~/.ledger)
+  // disposable ledger + trial config (never ~/.ledger): LEDGER_CONFIG_DIR points at the trial config dir for the
+  // initLedger call (which ends in saveConfig) and is restored to whatever it was afterwards
   withConfigDir(paths.configDir, () => initLedger(paths.ledgerDir, authors.origin));
   writeTrialConfig(ctx, authors.origin);
   log(`ledger initialised at ${paths.ledgerDir}; config at ${trialConfigPath(ctx)} author=${authors.origin}`);

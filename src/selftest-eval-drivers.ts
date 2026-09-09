@@ -19,12 +19,19 @@ import path from "node:path";
  * successor (no MCP) in a disposable repo. Costs model calls; run once and keep the numbers.
  */
 
+// HARD RULE, before anything from this repo is imported: this is an eval process (src/store.ts saveConfig() throws
+// under LEDGER_EVAL=1 without LEDGER_CONFIG_DIR) and LEDGER_CONFIG_DIR points at a disposable guard dir, never
+// ~/.ledger. The real ~/.ledger/config.json is snapshotted below and must be byte-identical at the end.
+process.env.LEDGER_EVAL = "1";
 const REAL = process.env.LEDGER_EVAL_REAL === "1";
 if (!REAL) process.env.LEDGER_EVAL_FAKE_HARNESS = "1";
 const tmpRoot = path.join(process.env.TMPDIR || "/tmp", "ledger-eval");
 const base = path.join(tmpRoot, `selftest-drivers-${process.pid}`);
 fs.rmSync(base, { recursive: true, force: true });
 fs.mkdirSync(base, { recursive: true });
+const guardConfigDir = path.join(base, "config-guard");
+fs.mkdirSync(guardConfigDir, { recursive: true });
+process.env.LEDGER_CONFIG_DIR = guardConfigDir;
 process.env.LEDGER_EVAL_FAKE_ROOT = path.join(base, "fake-transcripts");
 process.env.LEDGER_EVAL_DB = process.env.LEDGER_EVAL_DB || "postgresql://localhost:5432/ledger_selftest_eval_a";
 delete process.env.LEDGER_EVAL_KEEP;
@@ -44,8 +51,11 @@ if (!REAL) {
 // what must not change while the drivers run
 const realLedgerConfig = path.join(os.homedir(), ".ledger", "config.json");
 const snap = (f: string) => (fs.existsSync(f) ? fs.readFileSync(f, "utf8") : null);
+const snapBytes = (f: string) => (fs.existsSync(f) ? fs.readFileSync(f) : null);
 const listing = (d: string) => (fs.existsSync(d) ? fs.readdirSync(d).sort().join("\n") : "<absent>");
 const ledgerCfgBefore = snap(realLedgerConfig);
+const ledgerCfgBytesBefore = snapBytes(realLedgerConfig);
+const ledgerCfgMtimeBefore = fs.existsSync(realLedgerConfig) ? fs.statSync(realLedgerConfig).mtimeMs : null;
 const claudeProjectsBefore = listing(path.join(os.homedir(), ".claude", "projects"));
 const codexSessionsBefore = listing(path.join(realCodexHome, "sessions"));
 
