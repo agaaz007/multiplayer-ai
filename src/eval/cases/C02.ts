@@ -64,7 +64,8 @@ export const C02: EvalCaseRunner = {
     writeJson(path.join(ctx.paths.outputDir, validationRef), { at: new Date().toISOString(), ...independentCheck, runner_preserved: runnerPreserved, runner_sha256: runnerAfter, implementation_sha256: fileHash(path.join(state.worktree, "attribution.cjs")) });
 
     const phases = ["before", "during", "after"];
-    const actualToolChecks = phases.every(phase => state.turns.some(turn => turn.phase === phase && verifiedAttributionToolOperation(turn)));
+    const toolChecksByPhase = Object.fromEntries(phases.map(phase => [phase, state.turns.some(turn => turn.phase === phase && verifiedAttributionToolOperation(turn))]));
+    const actualToolChecks = Object.values(toolChecksByPhase).every(Boolean);
     const harnessOverlapped = state.turns.some(turn => turn.phase === "during" && turn.outcome.ok && turn.outcome.spawn.pid !== null
       && Date.parse(turn.outcome.spawn.startedAt) <= Date.parse(output.started_at)
       && Date.parse(turn.outcome.spawn.endedAt) >= Date.parse(output.ended_at));
@@ -85,6 +86,7 @@ export const C02: EvalCaseRunner = {
       successor_ended_at: output.ended_at ?? null,
       operations_before_during_after: progress,
       actual_harness_tool_operations_verified: actualToolChecks,
+      actual_harness_tool_operation_checks: toolChecksByPhase,
       third_harness_active_through_successor: harnessOverlapped,
       independent_validation_passed: independentCheck.ok,
       failure: state.fake ? "fake harness cannot demonstrate a third actual agent" : state.failure,

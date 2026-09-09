@@ -33,6 +33,8 @@ def main():
     args = parser.parse_args()
     if min(args.repetitions, args.workers, args.timeout) < 1:
         parser.error("repetitions, workers and timeout must be positive")
+    if os.environ.get("LEDGER_EXTRACTOR_CMD") or os.environ.get("LEDGER_EXTRACTOR", "auto") not in ("auto", "claude"):
+        parser.error("live hard-handoff runs require the isolated Claude classifier; unset custom extractor overrides")
     out = Path(args.out).resolve()
     if out.exists():
         parser.error("output directory already exists; choose a new run to retain earlier evidence")
@@ -59,6 +61,7 @@ def main():
         "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "topology": "same-machine", "cases": args.cases, "conditions": args.conditions,
         "anthropic_api_key_present": bool(os.environ.get("ANTHROPIC_API_KEY")),
+        "classifier": {"provider": "claude", "model": "CLI configured default (not independently resolved)", "custom_extractor_override": False},
         "directions": args.directions, "repetitions": args.repetitions,
         "suite_sha256": hashlib.sha256((suite / "private/oracle.json").read_bytes()).hexdigest(),
         "revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),

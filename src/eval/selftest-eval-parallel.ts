@@ -5,7 +5,8 @@ import path from "node:path";
 import { C02 } from "./cases/C02.js";
 import { defaultModel, evalTmpRoot, writeJson } from "./harness.js";
 import { git } from "./fixture.js";
-import { createParallelState, fileHash, parallelProgress, readParallelOperations, runParallelTurn, startParallelHandoff, stopParallelAgent } from "./parallel-agent.js";
+import { createParallelState, fileHash, invokesAttributionCheck, parallelProgress, readParallelOperations, runParallelTurn, startParallelHandoff, stopParallelAgent, verifiedAttributionToolOperation, type ParallelTurn } from "./parallel-agent.js";
+import type { TurnOutcome } from "./harness.js";
 import type { AdapterRequest, OriginRun, SuccessorRun, TrialContext } from "./types.js";
 
 /** Pure plumbing/negative checks by default. --live-claude/--live-codex run third-agent smokes, not C02 trials. */
@@ -62,6 +63,30 @@ if (live) {
   } finally { await stopParallelAgent(state); }
 } else {
   try {
+    const output = (value: unknown) => `Script completed\nWall time 0.1 seconds\nOutput:\n${JSON.stringify(value)}`;
+    const duringReport = JSON.stringify({ phase: "during", successful_operations: 490, ended_at: "2026-09-09T11:34:37.903Z" });
+    const launch = { tool: "exec", input: `python3 -c 'import subprocess; raise SystemExit(subprocess.run(["node", "check-attribution.cjs", "during"], timeout=750).returncode)'`, output: output({ session_id: 26467, output: "" }), is_error: false };
+    const finish = { tool: "exec", input: 'text(await tools.write_stdin({session_id:26467,chars:""}));', output: output({ exit_code: 0, output: duringReport }), is_error: false };
+    const turn = (toolCalls: Record<string, unknown>[]): ParallelTurn => ({ phase: "during", outcome: { ok: true, spawn: { pid: 34353 } } as TurnOutcome, toolCalls, traceRef: "regression-fixture" });
+    assert.ok(invokesAttributionCheck(launch.input, "during"));
+    assert.ok(invokesAttributionCheck('node "check-attribution.cjs" "during"', "during"));
+    assert.equal(invokesAttributionCheck(launch.input, "after"), false);
+    assert.equal(invokesAttributionCheck("node check-attribution.cjs during_extra", "during"), false);
+    assert.ok(verifiedAttributionToolOperation(turn([launch, finish])));
+    assert.equal(verifiedAttributionToolOperation(turn([launch])), false, "a yielded process has not completed");
+    assert.equal(verifiedAttributionToolOperation(turn([launch, { ...finish, input: 'tools.write_stdin({session_id:999})' }])), false, "another shell's completion is not evidence");
+    assert.equal(verifiedAttributionToolOperation(turn([launch, { ...finish, output: output({ exit_code: 1, output: duringReport }) }])), false);
+    assert.equal(verifiedAttributionToolOperation(turn([launch, { ...finish, is_error: true }])), false);
+    assert.equal(verifiedAttributionToolOperation(turn([launch, { ...finish, output: output({ exit_code: 0, output: "no attribution operation" }) }])), false);
+    const yieldingPoll = { ...finish, output: "Script running with cell ID 5\nWall time 31.0 seconds\nOutput:\n" };
+    const completedCell = { tool: "wait", input: '{"cell_id":"5"}', output: finish.output, is_error: false };
+    assert.ok(verifiedAttributionToolOperation(turn([launch, yieldingPoll, completedCell])));
+    assert.equal(verifiedAttributionToolOperation(turn([launch, yieldingPoll, { ...completedCell, input: '{"cell_id":"6"}' }])), false);
+    assert.ok(verifiedAttributionToolOperation(turn([{ tool: "Bash", input: "node check-attribution.cjs during", output: duringReport, is_error: false, finished_at: "2026-09-09T11:34:38Z" }])));
+    const noPid = turn([launch, finish]);
+    noPid.outcome = { ...noPid.outcome, spawn: { ...noPid.outcome.spawn, pid: null } };
+    assert.equal(verifiedAttributionToolOperation(noPid), false);
+    ok("equivalent argv wrapper and exact shell/cell polling chains verify; wrong ids, errors, unfinished commands, and missing reports fail");
     await C02.before!(ctx);
     assert.equal(git(paths.repo, "status", "--porcelain"), "");
     await C02.afterOrigin!(ctx, origin);
