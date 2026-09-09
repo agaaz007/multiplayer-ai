@@ -60,7 +60,7 @@ export function answerContract(answerKeys: string[]): string {
   return (
     'When finished, output ONLY a JSON object on the last line of your reply: {"answers": {"<key>": {"value": <answer>, "evidence": ["<exact quoted source text you retrieved>"]}}, "selected_topic": "<topic if asked>", "notes": "<one sentence>"}. ' +
     `Keys: ${answerKeys.join(", ")}. ` +
-    "Value format: each value is the shortest identifier that names the fact, not a sentence: a number as a JSON number (199, not \"₹199\"), otherwise a single word or a short snake_case noun phrase naming the thing itself (a component, a status, a reason word, a next step). " +
+    "Value format: each value is the shortest identifier that names the fact, not a sentence: a number as a JSON number without currency symbols or units, otherwise a single word or a short snake_case noun phrase naming the thing itself (a component, a status, a reason word, a next step). " +
     "Do not add qualifiers (\"only\", \"currently\"), attribution (\"by X\", \"according to\"), reasons, or units to a value; put those in evidence or notes. " +
     "If the source states a reason, the value is the reason word itself. If a question asks for a status such as resolved or unresolved, answer with that word. " +
     "For an action or next step, use verb_object form with the verb first (validate_x, check_y). For selected_topic, use one lowercase word naming the work area. " +

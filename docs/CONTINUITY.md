@@ -4,6 +4,8 @@ The single maintained record for the continuity layer of `@tranzmit/ledger`. Upd
 
 Last updated: 2026-09-09
 
+**Evaluation validity correction:** 9 Sep independent review found a global Claude startup hook exposing other trials from the shared evaluation database. A forward L01 answer cited C02 evidence. Earlier score counts remain historical observations, but comparisons using this setup are not qualified evidence of memory accuracy. See the handoff report; per-trial database and startup isolation are being added.
+
 ---
 
 ## 1. What this is, in one paragraph

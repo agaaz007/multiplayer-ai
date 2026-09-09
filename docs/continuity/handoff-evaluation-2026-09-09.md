@@ -1,4 +1,6 @@
-The 2026-09-09 handoff evaluation completed a controlled layout task in both harness directions. The unchanged E03 scorer marked all four trials failed. A separate, retrospective check of the public requirements found that Ledger's two successors preserved the saved configuration and produced valid layouts; GBrain's two successors did not preserve or reconstruct that configuration. These results support the value of recovering saved files. They do not establish that structured work records improve continuation accuracy over GBrain.
+**Validity correction, 2026-09-09.** Independent review found cross-trial memory contamination in the runs below. Ledger's forward L01 successor read C02's price instruction through a globally injected startup brief and the shared evaluation database. Its answer was not evidence of L01 recall. All pre-isolation runs are retained as diagnostic artifacts; they are not qualified comparative benchmarks. The independent file and process checks describe what happened, but cannot establish a memory-layer advantage. See the [contamination review](../../.context/hard-handoff/l01-ledger-forward-independent-review.json) and per-run `validity-review.json` files. Further runs were stopped while per-trial databases and harness startup isolation were implemented.
+
+The pre-isolation handoff evaluation completed a controlled layout task in both harness directions. The unchanged E03 scorer marked all four trials failed. A separate, retrospective check of the public requirements found that Ledger's two successors preserved the saved configuration and produced valid layouts; GBrain's two successors did not preserve or reconstruct that configuration. The recovered files and resulting layouts are observable artifacts. The comparison is not qualified because startup isolation was not enforced, and does not establish that structured work records improve continuation accuracy over GBrain.
 
 The requested continuation of Rachit's actual unfinished change remains untested because no recoverable snapshot was available. The controlled task is not a substitute for a successful recovery from his laptop.
 
@@ -50,7 +52,7 @@ The private oracle was outside the agent worktrees and was not supplied in succe
 | Different laptops | Not run; all controlled trials used the same machine |
 | Both harness directions | E03 completed in both directions, one repetition each |
 | Third agent actively progressing during handoff, C02 | Four trials completed: strict Ledger 0/2, GBrain 1/2; two forward failures are verifier artifacts, and Ledger reverse has a real third-agent setup failure |
-| Long mixed-topic history and three context resets, L01 | Running; append observed history size, resets, boot tokens, verdicts, and artifact paths when complete |
+| Long mixed-topic history and three context resets, L01 | Three successors completed before isolation failure was found; remaining reverse GBrain trial stopped. Forward Ledger read a C02 source, so its correct value is not L01 recall evidence |
 
 No continuity level is demonstrated by these E03 results. The additional concurrency and history checks must be reported from their actual observation artifacts rather than inferred from the implementation.
 

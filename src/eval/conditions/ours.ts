@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type pg from "pg";
 import type { ConditionPlugin, TrialContext, OriginRun, FixtureEvent, Harness } from "../types.js";
 import { helperOnce } from "../../helper/daemon.js";
@@ -390,6 +390,32 @@ export function mcpServerConfig(ctx: TrialContext) {
   };
 }
 
+/** Render the ordinary Ledger startup brief from the frozen build, without invoking SessionStart hooks. */
+export async function explicitStartupBrief(ctx: TrialContext): Promise<string> {
+  const build = path.dirname(cliPath());
+  const moduleUrl = (relative: string) => JSON.stringify(pathToFileURL(path.join(build, relative)).href);
+  const script = [
+    `import { loadConfig } from ${moduleUrl("store.js")};`,
+    `import { brief } from ${moduleUrl("query.js")};`,
+    `import { openThreadsText } from ${moduleUrl("continuity/brief.js")};`,
+    `import { closePools } from ${moduleUrl("continuity/db.js")};`,
+    "try { const config = loadConfig(); const sections = [brief(config), await openThreadsText(config, { cwd: process.cwd() })]; process.stdout.write(sections.filter(Boolean).join('\\n\\n') + '\\n'); } finally { await closePools(); }",
+  ].join("\n");
+  const args = ["--input-type=module", "-e", script];
+  const result = await spawnHarness({ cmd: process.execPath, args, cwd: ctx.paths.successorRepo,
+    env: trialEnv(ctx, { LEDGER_AUTHOR: ctx.successorAuthor, LEDGER_CONTINUITY_DB: ctx.evalDatabaseUrl, LEDGER_HOOKS_OFF: "1" }),
+    timeoutMs: 30_000, log: ctx.log });
+  fs.writeFileSync(path.join(ctx.paths.rawDir, "ours-startup-brief.json"), JSON.stringify({
+    source: "explicit-frozen-build-render", build, cwd: ctx.paths.successorRepo, args,
+    config_dir: ctx.paths.configDir, author: ctx.successorAuthor,
+    started_at: result.startedAt, ended_at: result.endedAt, exit_code: result.exitCode, timed_out: result.timedOut,
+    stdout: result.stdout, stderr: result.stderr,
+  }, null, 2) + "\n");
+  if (result.exitCode !== 0 || result.timedOut || result.spawnError) throw new Error("ours startup brief failed; see raw/ours-startup-brief.json");
+  fs.writeFileSync(path.join(ctx.paths.rawDir, "ours-startup-brief.txt"), result.stdout);
+  return result.stdout.trim();
+}
+
 async function successorSetup(ctx: TrialContext) {
   return withEnv(evalEnv(ctx), async () => {
     const mcpConfigPath = path.join(ctx.paths.configDir, "mcp-ours.json");
@@ -397,12 +423,13 @@ async function successorSetup(ctx: TrialContext) {
     fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpServerConfig(ctx), null, 2) + "\n");
     trialConfig(ctx); // normalize first (repos, database) so hooks reading it see the same pins
     rewriteConfigAuthor(ctx, ctx.successorAuthor);
+    const startupBrief = await explicitStartupBrief(ctx);
     return {
       env: { LEDGER_CONFIG_DIR: ctx.paths.configDir, LEDGER_EVAL: "1", LEDGER_CONTINUITY_DB: ctx.evalDatabaseUrl },
       mcpConfigPath,
       allowedTools: ["mcp__ledger__*", "Read", "Glob", "Grep", "Bash(git *)", "Bash(ls *)", "Bash(cat *)"],
       cwd: ctx.paths.successorRepo,
-      preamble: "",
+      preamble: startupBrief,
     };
   });
 }
