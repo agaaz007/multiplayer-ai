@@ -453,14 +453,20 @@ const contentKinds = ["instruction.added", "assistant.message", "tool.requested"
   const slugs = list.split("\n").map((l) => l.split("\t")[0]).filter(Boolean);
   const eventsA = slugs.filter((s) => s.startsWith(`s-${shortA}-`)).length, eventsB = slugs.filter((s) => s.startsWith(`s-${shortB}-`)).length;
   assert.ok(eventsA === 8 && eventsB >= 4 && slugs.includes(`session-${shortA}`) && slugs.includes(`session-${shortB}`), `list: ${slugs.join(",")}`);
-  const tags = gbrainTrial(homeDir, "tags", `s-${shortA}-2`);
-  assert.ok(tags.includes("instruction.added") && tags.includes(`session-${shortA}`) && tags.includes("rachit"), `tags on s-${shortA}-2: ${tags}`);
-  const page = gbrainTrial(homeDir, "get", `s-${shortA}-2`);
-  assert.ok(page.includes(`# instruction.added · session ${shortA} · seq 2`) && page.includes(CONSTRAINT) && page.includes("(author: rachit, harness: codex, at: 2026-09-08T02:00:02Z)"), `page format:\n${page}`);
+  // slugs carry the seq the helper assigned to the same event (session_meta is seq 1, so the goal is 2 and the constraint 3)
+  const seqOf = async (sid: string, text: string) => Number((await pool.query(`select seq from cont_events where session_id = $1 and payload->>'text' = $2`, [sid, text])).rows[0]?.seq);
+  const seqG = await seqOf(sidA, GOAL), seqC = await seqOf(sidA, CONSTRAINT);
+  assert.ok(seqG > 0 && seqC > seqG, `seqs: goal ${seqG}, constraint ${seqC}`);
+  const slugC = `s-${shortA}-${seqC}`;
+  assert.ok(slugs.includes(slugC), `slug ${slugC} exists (seq aligned with cont_events)`);
+  const tags = gbrainTrial(homeDir, "tags", slugC);
+  assert.ok(tags.includes("instruction.added") && tags.includes(`session-${shortA}`) && tags.includes("rachit"), `tags on ${slugC}: ${tags}`);
+  const page = gbrainTrial(homeDir, "get", slugC);
+  assert.ok(page.includes(`# instruction.added · session ${shortA} · seq ${seqC}`) && page.includes(CONSTRAINT) && page.includes("(author: rachit, harness: codex, at: 2026-09-08T02:00:02Z)"), `page format:\n${page}`);
   const search = gbrainTrial(homeDir, "call", "search", JSON.stringify({ query: "price_inr 199 layout", limit: 5 }));
-  assert.ok(search.includes(`s-${shortA}-`), `search hit: ${search.slice(0, 300)}`);
+  assert.ok(search.includes(slugC), `search hit: ${search.slice(0, 300)}`);
   const sessionPage = gbrainTrial(homeDir, "call", "get_page", JSON.stringify({ slug: `session-${shortA}` }));
-  assert.ok(sessionPage.includes(CONSTRAINT.slice(0, 40)) && sessionPage.includes("seq 1 ·") && sessionPage.indexOf("seq 1 ·") < sessionPage.indexOf("seq 2 ·"), "session page lists the events in order");
+  assert.ok(sessionPage.includes(CONSTRAINT.slice(0, 40)) && sessionPage.includes(`seq ${seqG} ·`) && sessionPage.indexOf(`seq ${seqG} ·`) < sessionPage.indexOf(`seq ${seqC} ·`), "session page lists the events in order");
   const stats = gbrainTrial(homeDir, "stats");
   assert.ok(/Timeline:\s+\d+/.test(stats) && !/Timeline:\s+0\b/.test(stats), `timeline entries present: ${stats}`);
   ok("event pages (title, text, author/harness/at), tags, session page, and timeline entries are searchable in the trial brain");
