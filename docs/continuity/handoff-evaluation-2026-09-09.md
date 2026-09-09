@@ -11,7 +11,7 @@ The isolated run is [hard-isolated-20260909](../../eval/runs/hard-isolated-20260
 | L01 long-history recall | Unmeasured, 2 errors | Unmeasured, 2 errors | Quota prevented a scored successor answer |
 | Rachit's actual change / different laptops | Not run | Not run | Actual source checkpoint unavailable |
 
-These counts are observations from one trial per direction, not reliability estimates. No continuity level is demonstrated.
+These counts are observations from one trial per direction, not reliability estimates. No continuity level is demonstrated. Ledger finding: `fnd-20260909-isolated-handoff-tests-saved-files-help-completi-lb9j`.
 
 **Rachit's actual checkout.** Read-only production inspection found three Rachit Codex sessions on `MacBook-Pro.local` with non-repository Downloads working directories and null repository, thread, WIP ref, WIP commit, and verified snapshot timestamp. Session `01a07b83-5faa-76f2-ae8e-a01bb9647b64`, events 541 and 548, named an unpushed checkout at `/Users/ramesh/Downloads/Tata1MG/tmp/tranzmit-current.iuURa9`, branch `local/adaptive-learning-five-phases`, repository `agaaz007/behaviour-md-tranzmit`. Selected remote-ref checks found neither that branch nor a matching `refs/wip/rachit/*` ref. The captured agent claimed all five phases were complete locally; that claim remains unverified, and the intended unfinished task has not been confirmed.
 
