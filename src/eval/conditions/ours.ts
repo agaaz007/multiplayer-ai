@@ -396,21 +396,23 @@ async function successorSetup(ctx: TrialContext) {
  * snapshot (clean worktree, or nothing captured). Idempotent: an existing worktree is returned as is.
  */
 export async function bootstrapWorktree(ctx: TrialContext): Promise<{ worktree: string; wip_ref: string; wip_commit: string } | null> {
-  const cfg = trialConfig(ctx, { write: false });
-  const pool = getPool(cfg);
-  const ids = await trialSessionIds(ctx, pool);
-  if (!ids.length) return null;
-  const r = await pool.query<{ id: string; wip_ref: string; wip_commit: string }>(
-    `select id, wip_ref, wip_commit from cont_sessions where id = any($1) and wip_ref is not null and wip_commit is not null order by last_verified_snapshot_at desc nulls last, last_seen_at desc limit 1`,
-    [ids]
-  );
-  const row = r.rows[0];
-  if (!row) return null;
-  const dest = `${ctx.paths.successorRepo}-wt`;
-  if (fs.existsSync(dest)) return { worktree: dest, wip_ref: row.wip_ref, wip_commit: row.wip_commit };
-  checkoutWip(ctx.paths.successorRepo, row.wip_ref, row.wip_commit, dest);
-  ctx.log(`ours: checked out ${row.wip_ref} @ ${row.wip_commit.slice(0, 12)} into ${dest}`);
-  return { worktree: dest, wip_ref: row.wip_ref, wip_commit: row.wip_commit };
+  return withEnv(evalEnv(ctx), async () => {
+    const cfg = trialConfig(ctx, { write: false });
+    const pool = getPool(cfg);
+    const ids = await trialSessionIds(ctx, pool);
+    if (!ids.length) return null;
+    const r = await pool.query<{ id: string; wip_ref: string; wip_commit: string }>(
+      `select id, wip_ref, wip_commit from cont_sessions where id = any($1) and wip_ref is not null and wip_commit is not null order by last_verified_snapshot_at desc nulls last, last_seen_at desc limit 1`,
+      [ids]
+    );
+    const row = r.rows[0];
+    if (!row) return null;
+    const dest = `${ctx.paths.successorRepo}-wt`;
+    if (fs.existsSync(dest)) return { worktree: dest, wip_ref: row.wip_ref, wip_commit: row.wip_commit };
+    checkoutWip(ctx.paths.successorRepo, row.wip_ref, row.wip_commit, dest);
+    ctx.log(`ours: checked out ${row.wip_ref} @ ${row.wip_commit.slice(0, 12)} into ${dest}`);
+    return { worktree: dest, wip_ref: row.wip_ref, wip_commit: row.wip_commit };
+  });
 }
 
 // ---------- evidence ----------
@@ -419,6 +421,10 @@ async function evidenceRef(ctx: TrialContext, fixtureEvent: FixtureEvent): Promi
   const text = String(fixtureEvent.text ?? "");
   const want = norm(text);
   if (!want) return null;
+  return withEnv(evalEnv(ctx), () => evidenceRefInner(ctx, text, want));
+}
+
+async function evidenceRefInner(ctx: TrialContext, text: string, want: string): Promise<{ system_ref: string } | null> {
   const cfg = trialConfig(ctx, { write: false });
 
   // a decision in the trial ledger whose `decision` carries the text (D02: real Ledger objects with supersedes)
