@@ -140,6 +140,8 @@ export function renderFull(o: LedgerObject): string {
 export interface BriefOpts {
   days?: number;
   tags?: string[];
+  /** Optional packaged guide supplied by an embedding host; installed-guide default is unchanged. */
+  guidePath?: string;
 }
 
 /**
@@ -162,7 +164,7 @@ export function brief(cfg: Config, opts: BriefOpts = {}): string {
   const out: string[] = [];
   out.push(`# Ledger brief (${new Date().toISOString().slice(0, 10)}, last ${days} days)`);
   out.push(``);
-  out.push(`Rules: use these definitions verbatim when computing metrics. Before running an analysis, call ledger_search with the question — if a matching finding exists, reuse or explicitly refresh it. Before attributing a change in a metric, check changes below. After any analysis, decision, or ship, record it: a finding needs inputs, method, and assumptions (explicit and implicit); a decision needs context and the options that lost. Full format in ~/.claude/ledger.md.`);
+  out.push(`Rules: use these definitions verbatim when computing metrics. Before running an analysis, call ledger_search with the question — if a matching finding exists, reuse or explicitly refresh it. Before attributing a change in a metric, check changes below. After any analysis, decision, or ship, record it: a finding needs inputs, method, and assumptions (explicit and implicit); a decision needs context and the options that lost. Full format in ${opts.guidePath ? `\`${opts.guidePath}\`` : "~/.claude/ledger.md"}.`);
   out.push(``);
   out.push(`## Definitions (${defs.length})`);
   out.push(defs.length ? defs.map(short).join("\n") : "_none yet — record one before computing any metric_");

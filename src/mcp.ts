@@ -20,7 +20,7 @@ import { addStateUpdate, confirmStateUpdate, createRecord, getRecord, linkSpan, 
 
 const text = (s: string) => ({ content: [{ type: "text" as const, text: s }] });
 
-export function createMcpServer(cfg: Config) {
+export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) {
   const server = new McpServer({ name: "ledger", version: "0.1.0" });
   const evidenceUi = { ui: { resourceUri: EVIDENCE_URI } };
   const readOnly = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
@@ -46,7 +46,7 @@ export function createMcpServer(cfg: Config) {
       },
     },
     async ({ days, tags }) => {
-      const b = brief(cfg, { days, tags });
+      const b = brief(cfg, { days, tags, guidePath: opts.guidePath });
       const threads = await openThreadsText(cfg, { cwd: process.cwd(), includeOwn: false });
       return text(threads ? `${b}\n\n${threads}` : b);
     }
@@ -581,5 +581,8 @@ export async function startMcp() {
     process.stderr.write(`ledger: ${e.message}\n`);
     process.exit(1);
   }
-  await createMcpServer(cfg).connect(new StdioServerTransport());
+  // Evaluation embeds the same packaged guide as its explicit startup brief. Normal installs
+  // keep their existing guide path; an ambient evaluation override alone cannot change it.
+  const guidePath = process.env.LEDGER_EVAL === "1" ? process.env.LEDGER_EVAL_GUIDE_PATH : undefined;
+  await createMcpServer(cfg, { guidePath }).connect(new StdioServerTransport());
 }

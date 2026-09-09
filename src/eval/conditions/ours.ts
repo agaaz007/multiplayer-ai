@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type pg from "pg";
 import type { ConditionPlugin, TrialContext, OriginRun, FixtureEvent, Harness } from "../types.js";
 import { helperOnce } from "../../helper/daemon.js";
@@ -13,6 +13,10 @@ import * as S from "../../continuity/store.js";
 import { checkoutWip, repoIdentity } from "../../continuity/shadow.js";
 import { detectHarness } from "../../continuity/events.js";
 import { loadAll, type Config } from "../../store.js";
+import { spawnHarness } from "../harness.js";
+import { trialEnv, writeEmptyMcpConfig } from "../fixture.js";
+import { claudeClassifierArgs } from "../claude-isolation.js";
+import { assertLocalBriefGuide, freezeLedgerGuide } from "../ledger-guide.js";
 
 /**
  * Condition "ours": the successor gets what the production system would give it.
@@ -330,7 +334,21 @@ async function prepare(ctx: TrialContext, origin: OriginRun): Promise<{ notes: s
     for (const s of record.sessions) {
       const cfg: Config = { ...baseCfg, author: s.author };
       try {
-        const r = await classifySession(cfg, pool, s.id, { now: tick(), log });
+        const r = await classifySession(cfg, pool, s.id, { now: tick(), log,
+          // Test doubles supply an explicit extractor command. Live evaluation uses
+          // the same classifier prompt with an empty MCP configuration in the trial.
+          ...(process.env.LEDGER_EXTRACTOR_CMD ? {} : { extract: async (prompt: string) => {
+            const args = claudeClassifierArgs(writeEmptyMcpConfig(ctx, "classifier-mcp-empty.json"));
+            const result = await spawnHarness({ cmd: "claude", args, cwd: ctx.paths.repo,
+              env: trialEnv(ctx, { LEDGER_HOOKS_OFF: "1" }), stdin: prompt, timeoutMs: 300_000, log });
+            fs.writeFileSync(path.join(ctx.paths.rawDir, `classifier-${s.id}.json`), JSON.stringify({
+              args, cwd: ctx.paths.repo, mcp_servers: [], exit_code: result.exitCode, timed_out: result.timedOut,
+              started_at: result.startedAt, ended_at: result.endedAt, stdout: result.stdout, stderr: result.stderr,
+            }, null, 2) + "\n");
+            if (result.exitCode !== 0 || result.timedOut || result.spawnError) throw new Error("isolated classifier failed; see raw/classifier-" + s.id + ".json");
+            return result.stdout;
+          } }),
+        });
         if (!r.model_ok) notes.push(`classifier ${s.id.slice(0, 8)}: failed: ${r.error}`);
         else notes.push(`classifier ${s.id.slice(0, 8)}: ${r.events_considered} events → ${r.records_created} record(s) created, ${r.assignments_applied} span(s) linked, ${r.updates_proposed} update(s) proposed, ${r.unassigned.length} unassigned${r.rejected.length ? `, ${r.rejected.length} rejected` : ""}`);
       } catch (e: any) {
@@ -362,15 +380,49 @@ export function cliPath(): string {
  * database (belt and braces over the config's own database_url).
  */
 export function mcpServerConfig(ctx: TrialContext) {
+  const guide = freezeLedgerGuide(ctx, path.dirname(cliPath()));
   return {
     mcpServers: {
       ledger: {
         command: process.execPath,
         args: [cliPath(), "mcp"],
-        env: { LEDGER_CONFIG_DIR: ctx.paths.configDir, LEDGER_AUTHOR: ctx.successorAuthor, LEDGER_EVAL: "1", LEDGER_CONTINUITY_DB: ctx.evalDatabaseUrl },
+        env: { LEDGER_CONFIG_DIR: ctx.paths.configDir, LEDGER_AUTHOR: ctx.successorAuthor, LEDGER_EVAL: "1", LEDGER_CONTINUITY_DB: ctx.evalDatabaseUrl, LEDGER_EVAL_GUIDE_PATH: guide.path },
       },
     },
   };
+}
+
+/** Render the ordinary Ledger startup brief from the frozen build, without invoking SessionStart hooks. */
+export async function explicitStartupBrief(ctx: TrialContext): Promise<string> {
+  const build = path.dirname(cliPath());
+  const guide = freezeLedgerGuide(ctx, build);
+  const moduleUrl = (relative: string) => JSON.stringify(pathToFileURL(path.join(build, relative)).href);
+  const script = [
+    `import { loadConfig } from ${moduleUrl("store.js")};`,
+    `import { brief } from ${moduleUrl("query.js")};`,
+    `import { openThreadsText } from ${moduleUrl("continuity/brief.js")};`,
+    `import { closePools } from ${moduleUrl("continuity/db.js")};`,
+    `try { const config = loadConfig(); const sections = [brief(config, { guidePath: ${JSON.stringify(guide.path)} }), await openThreadsText(config, { cwd: process.cwd() })]; process.stdout.write(sections.filter(Boolean).join('\\n\\n') + '\\n'); } finally { await closePools(); }`,
+  ].join("\n");
+  const args = ["--input-type=module", "-e", script];
+  const result = await spawnHarness({ cmd: process.execPath, args, cwd: ctx.paths.successorRepo,
+    env: trialEnv(ctx, { LEDGER_AUTHOR: ctx.successorAuthor, LEDGER_CONTINUITY_DB: ctx.evalDatabaseUrl, LEDGER_HOOKS_OFF: "1" }),
+    timeoutMs: 30_000, log: ctx.log });
+  const trace = {
+    source: "explicit-frozen-build-render", build, cwd: ctx.paths.successorRepo, args,
+    config_dir: ctx.paths.configDir, author: ctx.successorAuthor,
+    started_at: result.startedAt, ended_at: result.endedAt, exit_code: result.exitCode, timed_out: result.timedOut,
+    stdout: result.stdout, stderr: result.stderr,
+    guide,
+  };
+  const tracePath = path.join(ctx.paths.rawDir, "ours-startup-brief.json");
+  fs.writeFileSync(tracePath, JSON.stringify(trace, null, 2) + "\n");
+  if (result.exitCode !== 0 || result.timedOut || result.spawnError) throw new Error("ours startup brief failed; see raw/ours-startup-brief.json");
+  assertLocalBriefGuide(result.stdout, guide.path);
+  const preamble = result.stdout;
+  fs.writeFileSync(tracePath, JSON.stringify({ ...trace, preamble, content_transformations: [] }, null, 2) + "\n");
+  fs.writeFileSync(path.join(ctx.paths.rawDir, "ours-startup-brief.txt"), preamble);
+  return preamble.trim();
 }
 
 async function successorSetup(ctx: TrialContext) {
@@ -380,12 +432,13 @@ async function successorSetup(ctx: TrialContext) {
     fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpServerConfig(ctx), null, 2) + "\n");
     trialConfig(ctx); // normalize first (repos, database) so hooks reading it see the same pins
     rewriteConfigAuthor(ctx, ctx.successorAuthor);
+    const startupBrief = await explicitStartupBrief(ctx);
     return {
       env: { LEDGER_CONFIG_DIR: ctx.paths.configDir, LEDGER_EVAL: "1", LEDGER_CONTINUITY_DB: ctx.evalDatabaseUrl },
       mcpConfigPath,
       allowedTools: ["mcp__ledger__*", "Read", "Glob", "Grep", "Bash(git *)", "Bash(ls *)", "Bash(cat *)"],
       cwd: ctx.paths.successorRepo,
-      preamble: "",
+      preamble: startupBrief,
     };
   });
 }

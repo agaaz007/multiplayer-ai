@@ -235,9 +235,9 @@ const request = (n: string, direction: Direction, c: PublicCase = kase): Adapter
   assert.equal(p("{broken"), null);
   ok("parseLastJsonObject: fenced, prefers the object carrying answers, braces and escapes inside strings, no match");
   const c = S.answerContract(["price_inr", "next_action"]);
-  assert.ok(c.startsWith("When finished, output ONLY a JSON object on the last line of your reply: ") && c.includes("Keys: price_inr, next_action") && c.endsWith("never guess.") && c.includes('"selected_topic"'));
+  assert.ok(c.startsWith("When finished, output ONLY a JSON object on the last line of your reply: ") && c.includes("Keys: price_inr, next_action") && c.includes("never guess.") && c.includes('"selected_topic"'));
   const prompt = S.buildSuccessorPrompt("PRE", "RESUME", ["k"]);
-  assert.ok(prompt.startsWith("PRE\n\nRESUME\n\n") && prompt.endsWith("never guess."));
+  assert.ok(prompt.startsWith("PRE\n\nRESUME\n\n") && prompt.includes("never guess.") && prompt.includes("fetch the full text first"));
   assert.ok(S.buildSuccessorPrompt("", "RESUME", ["k"]).startsWith("RESUME\n\n"));
   ok("answer contract and successor prompt assembly (preamble, resume prompt, contract)");
   const toml = S.mcpJsonToToml({ mcpServers: { ledger: { command: "node", args: ["/x/cli.js", "mcp"], env: { LEDGER_CONFIG_DIR: "/t/config" } }, "odd name": { url: "http://localhost:1/mcp" } } });
@@ -354,11 +354,17 @@ if (!REAL) {
     assert.ok(path.basename(ta.path).startsWith("rollout-") && ta.path.startsWith(process.env.LEDGER_EVAL_FAKE_ROOT!));
     assert.equal(tb.agent, "claude");
     assert.ok(tb.path.endsWith(`${run.sessionIds[1]}.jsonl`) && tb.path.startsWith(process.env.LEDGER_EVAL_FAKE_ROOT!));
-    assert.deepEqual(run.turns.map((t) => t.transcriptPath), [ta.path, ta.path, tb.path]);
+    assert.deepEqual(run.turns.map((t) => t.transcriptPath), [run.transcriptPaths[0], run.transcriptPaths[0], run.transcriptPaths[1]]);
+    for (const [index, source] of [ta.path, tb.path].entries()) {
+      assert.ok(run.transcriptPaths[index].startsWith(ctxF.paths.rawDir));
+      assert.deepEqual(fs.readFileSync(run.transcriptPaths[index]), fs.readFileSync(source));
+      assert.equal(readJson(run.transcriptPaths[index] + ".provenance.json").source_path, source);
+    }
     const ra = streamTranscript(ta.path, 0, "codex");
     const instrA = ra.events.filter((e) => e.kind === "instruction.added").map((e) => String(e.payload.text));
     assert.equal(instrA.length, 2);
-    assert.ok(instrA[0].startsWith(O.ORIGIN_PROMPT_PREFIX) && instrA[0].endsWith(events[0].text) && instrA[1].endsWith(events[1].text));
+    assert.equal(instrA[0], events[0].text);
+    assert.equal(instrA[1], events[1].text);
     assert.equal(ra.session_id, run.sessionIds[0]);
     assert.equal(ra.cwd, ctxF.paths.repo);
     const rb = streamTranscript(tb.path, 0, "claude");
@@ -398,7 +404,7 @@ if (!REAL) {
     assert.equal(sr.output?.notes, "fake successor: no retrieval performed");
     assert.ok(sr.wallMs >= 1);
     ok("runSuccessor (claude): fresh session; JSON answer object parsed leniently from the reply");
-    assert.ok(sr.transcriptPath && sr.transcriptPath.startsWith(process.env.LEDGER_EVAL_FAKE_ROOT!) && sr.transcriptPath.endsWith(`${sr.sessionId}.jsonl`));
+    assert.ok(sr.transcriptPath && sr.transcriptPath.startsWith(ctxF.paths.rawDir) && sr.transcriptPath.endsWith(`${sr.sessionId}.jsonl`));
     assert.equal(sr.toolCalls.length, 1);
     assert.equal(sr.toolCalls[0].tool, "mcp__ledger__ledger_records");
     assert.ok(sr.toolCalls[0].input.includes(ctxF.paths.successorRepo), sr.toolCalls[0].input);
@@ -526,6 +532,14 @@ if (!REAL) {
 
   // ---------- cleanup ----------
   {
+    const { retainTranscript } = await import("./eval/transcript-evidence.js");
+    const producer = path.join(ctxF.paths.homeDir, "startup-evidence.jsonl");
+    const producerBytes = Buffer.from('{"type":"startup","text":"full context omitted by normalizer"}\n');
+    fs.writeFileSync(producer, producerBytes);
+    const kept = retainTranscript(ctxF.paths.rawDir, producer, { role: "origin", harness: "codex", sessionId: "retention-canary", synthetic: true });
+    const originalProvenance = fs.readFileSync(kept.provenancePath);
+    assert.equal(retainTranscript(ctxF.paths.rawDir, kept.path, { role: "origin", harness: "codex", sessionId: "retention-canary", synthetic: true }).path, kept.path);
+    assert.deepEqual(fs.readFileSync(kept.provenancePath), originalProvenance, "re-retaining an already copied file preserves its original producer provenance");
     const rootF = ctxF.paths.root;
     const rootR = ctxR.paths.root;
     const ctxK = await F.createTrial(request("keep", "codex-to-claude"), "gbrain", { log: () => {}, migrate: false });
@@ -539,6 +553,9 @@ if (!REAL) {
     assert.ok(!fs.existsSync(ctxK.paths.root));
     assert.ok((await F.cleanupTrial(ctxF)).removed && (await F.cleanupTrial(ctxR)).removed);
     assert.ok(!fs.existsSync(rootF) && !fs.existsSync(rootR));
+    assert.ok(!fs.existsSync(producer), "cleanup removed the private producer location");
+    assert.deepEqual(fs.readFileSync(kept.path), producerBytes, "full startup evidence survives private-home cleanup");
+    assert.deepEqual(fs.readFileSync(kept.provenancePath), originalProvenance);
     assert.ok(fs.existsSync(path.join(ctxF.paths.rawDir, "controller.log")) && fs.existsSync(ctxR.paths.rawDir), "the evidence bundle (output_dir) survives cleanup");
     assert.ok(fs.readFileSync(path.join(ctxF.paths.rawDir, "controller.log"), "utf8").includes("cleanup: removed"));
     ok("cleanupTrial removes the trial root (keep option and LEDGER_EVAL_KEEP honoured); output_dir preserved");

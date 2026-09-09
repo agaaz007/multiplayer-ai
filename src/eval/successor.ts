@@ -2,8 +2,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { streamTranscript, type NormEvent } from "../continuity/events.js";
 import type { Harness, SuccessorRun, TrialContext } from "./types.js";
-import { appendJsonl, codexHome, codexModelArgs, defaultModel, envKeys, newSessionId, runHarnessTurn, transcriptUsage, waitForTranscript, writeJson, type TurnSpec } from "./harness.js";
+import { appendJsonl, codexHome, codexModelArgs, defaultModel, envKeys, isFakeHarness, newSessionId, runHarnessTurn, transcriptUsage, waitForTranscript, writeJson, type TurnSpec } from "./harness.js";
 import { trialEnv, writeEmptyMcpConfig } from "./fixture.js";
+import { claudeIsolationArgs } from "./claude-isolation.js";
+import { retainTranscript } from "./transcript-evidence.js";
 
 /**
  * Successor driver: one fresh harness session that receives only the condition's
@@ -41,6 +43,12 @@ export interface RunSuccessorOptions {
   harness?: Harness;
 }
 
+export function claudeSuccessorArgs(prompt: string, sessionId: string, model: string, cwd: string, mcpConfigPath: string, allowedTools: string[]): string[] {
+  const args = ["-p", prompt, "--session-id", sessionId, "--model", model, "--output-format", "json", "--dangerously-skip-permissions", ...claudeIsolationArgs(), "--mcp-config", mcpConfigPath, "--strict-mcp-config", "--add-dir", cwd];
+  if (allowedTools.length) args.push("--allowedTools", ...allowedTools);
+  return args;
+}
+
 export const SUCCESSOR_TIMEOUT_MS = 600_000;
 
 /**
@@ -53,7 +61,7 @@ export function answerContract(answerKeys: string[]): string {
   return (
     'When finished, output ONLY a JSON object on the last line of your reply: {"answers": {"<key>": {"value": <answer>, "evidence": ["<exact quoted source text you retrieved>"]}}, "selected_topic": "<topic if asked>", "notes": "<one sentence>"}. ' +
     `Keys: ${answerKeys.join(", ")}. ` +
-    "Value format: each value is the shortest identifier that names the fact, not a sentence: a number as a JSON number (199, not \"₹199\"), otherwise a single word or a short snake_case noun phrase naming the thing itself (a component, a status, a reason word, a next step). " +
+    "Value format: each value is the shortest identifier that names the fact, not a sentence: a number as a JSON number without currency symbols or units, otherwise a single word or a short snake_case noun phrase naming the thing itself (a component, a status, a reason word, a next step). " +
     "Do not add qualifiers (\"only\", \"currently\"), attribution (\"by X\", \"according to\"), reasons, or units to a value; put those in evidence or notes. " +
     "If the source states a reason, the value is the reason word itself. If a question asks for a status such as resolved or unresolved, answer with that word. " +
     "For an action or next step, use verb_object form with the verb first (validate_x, check_y). For selected_topic, use one lowercase word naming the work area. " +
@@ -181,8 +189,8 @@ export function mcpJsonToToml(json: Record<string, unknown>): string {
  * config.toml with the trial's MCP servers and a trust entry for the working directory, and
  * nothing else (no user config, no hooks.json, no history). Returns the directory.
  */
-export function prepareCodexHome(ctx: TrialContext, setup: SuccessorSetup): { home: string; authCopied: boolean; configPath: string } {
-  const home = path.join(ctx.paths.homeDir, "codex");
+export function prepareCodexHome(ctx: TrialContext, setup: SuccessorSetup, role: "origin" | "successor" = "successor"): { home: string; authCopied: boolean; configPath: string } {
+  const home = path.join(ctx.paths.homeDir, role === "origin" ? "origin-codex" : "codex");
   fs.mkdirSync(home, { recursive: true });
   const realAuth = path.join(codexHome(), "auth.json");
   let authCopied = false;
@@ -219,8 +227,7 @@ export async function runSuccessor(ctx: TrialContext, setup: SuccessorSetup, res
   if (harness === "claude") {
     sessionId = newSessionId();
     const mcp = setup.mcpConfigPath ?? writeEmptyMcpConfig(ctx, "successor-mcp-empty.json");
-    args = ["-p", prompt, "--session-id", sessionId, "--model", model, "--output-format", "json", "--dangerously-skip-permissions", "--mcp-config", mcp, "--strict-mcp-config", "--add-dir", setup.cwd];
-    if (setup.allowedTools.length) args.push("--allowedTools", ...setup.allowedTools);
+    args = claudeSuccessorArgs(prompt, sessionId, model, setup.cwd, mcp, setup.allowedTools);
   } else {
     codexHomeInfo = prepareCodexHome(ctx, setup);
     env = { ...env, CODEX_HOME: codexHomeInfo.home };
@@ -247,12 +254,14 @@ export async function runSuccessor(ctx: TrialContext, setup: SuccessorSetup, res
   fs.writeFileSync(path.join(raw, "successor-stdout.txt"), out.spawn.stdout);
   const parsed = parseLastJsonObject(out.assistantText);
 
-  const found = sessionId ? await waitForTranscript(sessionId) : null;
+  const roots = codexHomeInfo && !isFakeHarness() ? { codex: path.join(codexHomeInfo.home, "sessions") } : undefined;
+  const found = sessionId ? await waitForTranscript(sessionId, 10_000, roots) : null;
+  const retained = found ? retainTranscript(raw, found.path, { role: "successor", harness, sessionId: sessionId!, synthetic: isFakeHarness() }) : null;
   let toolCalls: SuccessorToolCall[] = [];
   let tUsage: ReturnType<typeof transcriptUsage> | null = null;
   let transcriptEvents = 0;
-  if (found) {
-    const r = streamTranscript(found.path, 0, harness);
+  if (retained) {
+    const r = streamTranscript(retained.path, 0, harness);
     transcriptEvents = r.events.length;
     const collected = collectToolCalls(r.events);
     toolCalls = collected.calls;
@@ -260,7 +269,7 @@ export async function runSuccessor(ctx: TrialContext, setup: SuccessorSetup, res
     if (fs.existsSync(toolsFile)) fs.rmSync(toolsFile);
     for (const c of collected.full) appendJsonl(toolsFile, { session_id: sessionId, harness, ...c });
     if (!collected.full.length) fs.writeFileSync(toolsFile, "");
-    tUsage = transcriptUsage(harness, found.path);
+    tUsage = transcriptUsage(harness, retained.path);
   } else {
     ctx.log(`successor: transcript not found for ${sessionId ?? "(no session id)"}`);
   }
@@ -282,15 +291,18 @@ export async function runSuccessor(ctx: TrialContext, setup: SuccessorSetup, res
     wall_ms: out.spawn.wallMs, started_at: out.spawn.startedAt, ended_at: out.spawn.endedAt,
     stdout: out.spawn.stdout, stderr_tail: out.spawn.stderr.slice(-4000), assistant_text: out.assistantText, parsed_output: parsed,
     usage: out.usage, boot_tokens: bootTokens, boot_tokens_source: bootSource, boot_tokens_transcript: bootFromTranscript, boot_tokens_json: bootFromStdout,
-    total_input_tokens: totalInputTokens, transcript_usage: tUsage, transcript: found?.path ?? null, transcript_events: transcriptEvents, tool_calls: toolCalls.length,
+    total_input_tokens: totalInputTokens, transcript_usage: tUsage, transcript: retained?.path ?? null,
+    source_transcript: found?.path ?? null, transcript_provenance: retained?.provenancePath ?? null, transcript_sha256: retained?.sha256 ?? null,
+    transcript_events: transcriptEvents, tool_calls: toolCalls.length,
     claude: out.claude ? { subtype: out.claude.subtype, num_turns: out.claude.num_turns, duration_ms: out.claude.duration_ms, duration_api_ms: out.claude.duration_api_ms, total_cost_usd: out.claude.total_cost_usd, usage: out.claude.usage, modelUsage: out.claude.modelUsage } : null,
     codex: out.codex ? { turns: out.codex.turns, errors: out.codex.errors, types: out.codex.types, lines: out.codex.lines } : null,
   });
-  ctx.log(`successor done: ${out.ok ? "ok" : `FAILED (${out.failure})`} wall_ms=${out.spawn.wallMs} boot=${bootTokens ?? "null"} total_in=${totalInputTokens ?? "null"} tools=${toolCalls.length} parsed=${parsed ? "yes" : "no"} transcript=${found?.path ?? "none"}`);
+  ctx.log(`successor done: ${out.ok ? "ok" : `FAILED (${out.failure})`} wall_ms=${out.spawn.wallMs} boot=${bootTokens ?? "null"} total_in=${totalInputTokens ?? "null"} tools=${toolCalls.length} parsed=${parsed ? "yes" : "no"} transcript=${retained?.path ?? "none"}`);
+  if (!out.ok) throw new Error(`successor harness failed: ${out.failure}; see raw/successor-output.json`);
   return {
     harness,
     sessionId: sessionId ?? "",
-    transcriptPath: found?.path ?? null,
+    transcriptPath: retained?.path ?? null,
     output: parsed,
     rawOutputPath,
     toolCalls,
