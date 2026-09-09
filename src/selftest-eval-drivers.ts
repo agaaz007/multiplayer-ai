@@ -235,9 +235,9 @@ const request = (n: string, direction: Direction, c: PublicCase = kase): Adapter
   assert.equal(p("{broken"), null);
   ok("parseLastJsonObject: fenced, prefers the object carrying answers, braces and escapes inside strings, no match");
   const c = S.answerContract(["price_inr", "next_action"]);
-  assert.ok(c.startsWith("When finished, output ONLY a JSON object on the last line of your reply: ") && c.includes("Keys: price_inr, next_action") && c.endsWith("never guess.") && c.includes('"selected_topic"'));
+  assert.ok(c.startsWith("When finished, output ONLY a JSON object on the last line of your reply: ") && c.includes("Keys: price_inr, next_action") && c.includes("never guess.") && c.includes('"selected_topic"'));
   const prompt = S.buildSuccessorPrompt("PRE", "RESUME", ["k"]);
-  assert.ok(prompt.startsWith("PRE\n\nRESUME\n\n") && prompt.endsWith("never guess."));
+  assert.ok(prompt.startsWith("PRE\n\nRESUME\n\n") && prompt.includes("never guess.") && prompt.includes("fetch the full text first"));
   assert.ok(S.buildSuccessorPrompt("", "RESUME", ["k"]).startsWith("RESUME\n\n"));
   ok("answer contract and successor prompt assembly (preamble, resume prompt, contract)");
   const toml = S.mcpJsonToToml({ mcpServers: { ledger: { command: "node", args: ["/x/cli.js", "mcp"], env: { LEDGER_CONFIG_DIR: "/t/config" } }, "odd name": { url: "http://localhost:1/mcp" } } });
