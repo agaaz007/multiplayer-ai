@@ -37,6 +37,7 @@ if (process.argv.includes("--fixture-mcp")) {
   };
   try {
     checkArgs(claudeOriginArgs("origin", newSessionId(), false, "fixture-model", root, "fixture.json"));
+    checkArgs(claudeOriginArgs("origin-without-mcp", newSessionId(), false, "fixture-model", root, null));
     checkArgs(claudeOriginArgs("third", newSessionId(), true, "fixture-model", root, "fixture.json", ["Bash", "Read"]));
     checkArgs(claudeSuccessorArgs("successor", newSessionId(), "fixture-model", root, "condition-mcp.json", ["mcp__ledger__*"]));
     checkArgs(claudeClassifierArgs("empty-mcp.json"));

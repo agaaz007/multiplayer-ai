@@ -157,6 +157,59 @@ def main():
             exists = database._command("psql", "--dbname", "postgres", "--no-psqlrc", "--tuples-only", "--no-align",
                                        "--command", "select count(*) from pg_database where datname='" + database.name + "';")
             assert exists == "0", "owned database was not dropped"
+        # Exercise main() with a deliberately non-model adapter. Its two concurrent
+        # children inspect their own assigned DB and explicitly return an error so
+        # this infrastructure selftest can never look like a successful live trial.
+        stub_build = temp / "stub-build"
+        (stub_build / "eval").mkdir(parents=True)
+        pg_module = (ROOT / "node_modules/pg/lib/index.js").as_uri()
+        stub = r"""
+import fs from 'node:fs';
+import path from 'node:path';
+import pg from PG_MODULE;
+const chunks = [];
+for await (const chunk of process.stdin) chunks.push(chunk);
+const request = JSON.parse(Buffer.concat(chunks).toString());
+const pool = new pg.Pool({connectionString: process.env.LEDGER_EVAL_DB, ssl: false});
+try {
+  const name = (await pool.query('select current_database() as name')).rows[0].name;
+  const empty = (await pool.query("select count(*)::int as n from pg_class c join pg_namespace n on n.oid=c.relnamespace where n.nspname <> 'information_schema' and n.nspname !~ '^pg_'")).rows[0].n;
+  await pool.query('create table runner_canary(marker text)');
+  await pool.query('insert into runner_canary values($1)', [request.trial_id]);
+  await new Promise(resolve => setTimeout(resolve, 150));
+  const rows = (await pool.query('select marker from runner_canary')).rows;
+  fs.writeFileSync(path.join(request.output_dir, 'raw/child-database.json'), JSON.stringify({name, empty, markers: rows.map(x => x.marker), config_dir: process.env.LEDGER_CONFIG_DIR}));
+  console.log(JSON.stringify({status:'error',reason:'Synthetic runner infrastructure selftest; no model calls'}));
+} finally { await pool.end(); }
+""".replace("PG_MODULE", json.dumps(pg_module))
+        (stub_build / "eval/adapter.js").write_text(stub)
+        run_output = temp / "runner-output"
+        run_env = {**env, "LEDGER_EXTRACTOR": "claude"}
+        run_env.pop("LEDGER_EXTRACTOR_CMD", None)
+        launched = subprocess.run(["python3", str(ROOT / "eval/run-hard-handoff.py"),
+                                   "--out", str(run_output), "--build-dir", str(stub_build),
+                                   "--cases", "E03", "--conditions", "ours", "gbrain",
+                                   "--directions", "codex-to-claude", "--workers", "2", "--noise-events", "2"],
+                                  env=run_env, cwd=ROOT, capture_output=True, text=True, timeout=60)
+        assert launched.returncode == 0, launched.stderr
+        manifest = json.loads((run_output / "manifest.json").read_text())
+        reports = manifest["database_isolation"]["trials"]
+        assert len(reports) == 2
+        assert len({report["database"] for report in reports.values()}) == 2
+        for run_id, report in reports.items():
+            assert report["cleanup"]["status"] == "dropped"
+            assert report["empty_precondition"]["passed"] is True
+            artifact = run_output / report["artifact"]
+            bundle = artifact.parent.parent
+            child = json.loads((artifact.parent / "child-database.json").read_text())
+            assert child["name"] == report["database"]
+            assert child["empty"] == 0
+            assert child["markers"] == [run_id]
+            observation = json.loads((bundle / "observation.json").read_text())
+            assert observation["database_isolation_file"] == "raw/database-isolation.json"
+            assert observation["database_cleanup"]["status"] == "dropped"
+            assert observation["status"] == "error"
+        print("ok: real runner launches two isolated child databases and records empty preconditions and teardown in manifest/bundles")
         assert dict(os.environ) == before_env
         print("ok: both precisely owned databases removed; unrelated databases and global environment untouched")
     print("test_handoff_database_isolation: all checks passed (local Postgres and actual MCP; no live models)")

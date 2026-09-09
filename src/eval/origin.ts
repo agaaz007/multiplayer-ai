@@ -26,7 +26,7 @@ export const ORIGIN_TURN_TIMEOUT_MS = 300_000;
 export interface RunOriginOptions {
   /** per turn; on timeout the process group is killed and the turn is recorded as failed. Default 300 s. */
   timeoutMs?: number;
-  /** Claude only. undefined: an empty strict config (the user's global MCP servers alone exceed Haiku's 200k context); null: no --mcp-config; string: that file. */
+  /** Claude only. undefined: an empty strict config; null: strict MCP with no configured servers; string: that file. */
   mcpConfigPath?: string | null;
   allowedTools?: string[];
   extraEnv?: Record<string, string>;
@@ -72,7 +72,8 @@ export function originPrompt(text: string): string {
 /** Claude argv. The prompt sits right after -p because --add-dir / --allowedTools / --mcp-config are variadic and would swallow it. */
 export function claudeOriginArgs(prompt: string, sessionId: string, resume: boolean, model: string, addDir: string, mcpConfigPath: string | null, allowedTools?: string[]): string[] {
   const a = ["-p", prompt, ...(resume ? ["--resume", sessionId] : ["--session-id", sessionId]), "--model", model, "--output-format", "json", "--dangerously-skip-permissions", "--append-system-prompt", ORIGIN_PROMPT_PREFIX, ...claudeIsolationArgs()];
-  if (mcpConfigPath) a.push("--mcp-config", mcpConfigPath, "--strict-mcp-config");
+  if (mcpConfigPath) a.push("--mcp-config", mcpConfigPath);
+  a.push("--strict-mcp-config");
   a.push("--add-dir", addDir);
   if (allowedTools?.length) a.push("--allowedTools", ...allowedTools);
   return a;

@@ -214,6 +214,7 @@ def main():
         timed_out = False
         stdout = ""
         observation = None
+        process = None
         try:
             database.create()
             record_database(run_id, database)
@@ -243,6 +244,16 @@ def main():
         except Exception as error:
             observation = {"status": "error", "reason": str(error)}
         finally:
+            if process is not None and process.poll() is None:
+                # Also cover unexpected communicate/controller errors, not only timeouts.
+                process.terminate()
+                try:
+                    remaining, _ = process.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    remaining, _ = process.communicate()
+                if remaining:
+                    stdout = remaining
             # Adapter has exited (including its normal cleanup) before we attempt DROP.
             cleanup = database.cleanup()
             record_database(run_id, database)
