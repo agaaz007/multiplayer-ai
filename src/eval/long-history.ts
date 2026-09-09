@@ -123,11 +123,14 @@ export async function runLongHistoryOrigin(ctx: TrialContext): Promise<OriginRun
   const minimum = ctx.request.case.stress_requirements?.minimum_origin_tokens ?? 100_000;
   if (measurement.measured_origin_tokens < minimum) throw new Error(`L01 unique source size ${measurement.measured_origin_tokens} is below ${minimum}; generate a larger frozen suite before live origin calls`);
 
-  const perEpoch = Math.ceil(batches.length / LONG_EPOCHS);
-  const plan = batches.map((batch, index) => ({
-    batch: index + 1, epoch: Math.min(Math.floor(index / perEpoch), LONG_EPOCHS - 1) + 1,
+  const epochs = Array.from({ length: LONG_EPOCHS }, (_, epoch) => batches.slice(
+    Math.floor(epoch * batches.length / LONG_EPOCHS), Math.floor((epoch + 1) * batches.length / LONG_EPOCHS),
+  ));
+  let batchNumber = 0;
+  const plan = epochs.flatMap((epochBatches, epoch) => epochBatches.map((batch) => ({
+    batch: ++batchNumber, epoch: epoch + 1,
     event_ids: batch.events.map((event) => event.id), chars: batch.text.length, sha256: sha256(batch.text),
-  }));
+  })));
   writeJson(path.join(ctx.paths.rawDir, "long-history-plan.json"), {
     batch_char_cap: LONG_BATCH_CHARS, batch_count: batches.length, epoch_count: LONG_EPOCHS,
     model: ctx.originModel, harness: ctx.originHarness, plan,
@@ -138,7 +141,7 @@ export async function runLongHistoryOrigin(ctx: TrialContext): Promise<OriginRun
   ctx.log(`L01: ${events.length} original events, ${measurement.measured_origin_tokens} unique proxy tokens, ${batches.length} bounded turns, ${LONG_EPOCHS} actual sessions`);
 
   for (let epoch = 0; epoch < LONG_EPOCHS; epoch++) {
-    const selected = batches.slice(epoch * perEpoch, (epoch + 1) * perEpoch);
+    const selected = epochs[epoch];
     if (!selected.length) throw new Error(`L01 epoch ${epoch + 1} has no source events`);
     const rawDir = path.join(ctx.paths.rawDir, `origin-epoch-${epoch + 1}`);
     fs.mkdirSync(rawDir, { recursive: true });

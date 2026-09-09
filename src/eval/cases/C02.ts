@@ -48,7 +48,10 @@ export const C02: EvalCaseRunner = {
       const input = String(call.input ?? "");
       return input.includes(`check-attribution.cjs ${phase}`) && call.is_error !== true && (call.exit_code == null || call.exit_code === 0);
     })));
-    const progressed = !state.fake && !state.failure && runnerPreserved && independentCheck.ok && actualToolChecks && progress.before && progress.during && progress.after;
+    const harnessOverlapped = state.turns.some(turn => turn.phase === "during" && turn.outcome.ok && turn.outcome.spawn.pid !== null
+      && Date.parse(turn.outcome.spawn.startedAt) <= Date.parse(output.started_at)
+      && Date.parse(turn.outcome.spawn.endedAt) >= Date.parse(output.ended_at));
+    const progressed = !state.fake && !state.failure && runnerPreserved && independentCheck.ok && actualToolChecks && harnessOverlapped && progress.before && progress.during && progress.after;
     const refs = ["raw/third-agent-setup.json", operationRef, validationRef, ...state.turns.flatMap(turn => [turn.traceRef, `raw/third-agent-${turn.phase}-tools.jsonl`])];
     writeJson(path.join(ctx.paths.outputDir, "parallel.json"), {
       raw_trace_refs: refs,
@@ -65,6 +68,7 @@ export const C02: EvalCaseRunner = {
       successor_ended_at: output.ended_at ?? null,
       operations_before_during_after: progress,
       actual_harness_tool_operations_verified: actualToolChecks,
+      third_harness_active_through_successor: harnessOverlapped,
       independent_validation_passed: independentCheck.ok,
       failure: state.fake ? "fake harness cannot demonstrate a third actual agent" : state.failure,
     });
