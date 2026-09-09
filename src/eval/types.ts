@@ -184,6 +184,10 @@ export interface CaseRunner {
   before?(ctx: TrialContext): Promise<void>;
   /** Origin turns are the fixture events in order unless overridden. */
   originEvents?(ctx: TrialContext): FixtureEvent[];
+  /** Controller fixture work after real origin turns, before capture. Record any mutations in raw traces. */
+  afterOrigin?(ctx: TrialContext, origin: OriginRun): Promise<void>;
+  /** Start concurrent work or verify the recovered starting state immediately before the successor. */
+  beforeSuccessor?(ctx: TrialContext): Promise<void>;
   /** Case-specific collector artifacts (ownership.json, parallel.json, coverage.json, actions.json). */
   collect?(ctx: TrialContext, origin: OriginRun, successor: SuccessorRun): Promise<Partial<Observation>>;
   after?(ctx: TrialContext): Promise<void>;

@@ -503,10 +503,10 @@ export function countCompactions(events: NormEvent[], harness: Harness): number 
 }
 
 /** Poll findTranscript for a session id; the harness flushes its transcript before exit, so this is usually immediate. */
-export async function waitForTranscript(sessionId: string, timeoutMs = 10_000): Promise<{ path: string; agent: Harness } | null> {
+export async function waitForTranscript(sessionId: string, timeoutMs = 10_000, roots: Roots = transcriptRoots()): Promise<{ path: string; agent: Harness } | null> {
   const until = Date.now() + timeoutMs;
   for (;;) {
-    const f = findTranscript(sessionId, undefined, transcriptRoots());
+    const f = findTranscript(sessionId, undefined, roots);
     if (f) return f;
     if (Date.now() >= until) return null;
     await new Promise((r) => setTimeout(r, 250));

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { streamTranscript, type NormEvent } from "../continuity/events.js";
 import type { Harness, SuccessorRun, TrialContext } from "./types.js";
-import { appendJsonl, codexHome, codexModelArgs, defaultModel, envKeys, newSessionId, runHarnessTurn, transcriptUsage, waitForTranscript, writeJson, type TurnSpec } from "./harness.js";
+import { appendJsonl, codexHome, codexModelArgs, defaultModel, envKeys, isFakeHarness, newSessionId, runHarnessTurn, transcriptUsage, waitForTranscript, writeJson, type TurnSpec } from "./harness.js";
 import { trialEnv, writeEmptyMcpConfig } from "./fixture.js";
 
 /**
@@ -247,7 +247,8 @@ export async function runSuccessor(ctx: TrialContext, setup: SuccessorSetup, res
   fs.writeFileSync(path.join(raw, "successor-stdout.txt"), out.spawn.stdout);
   const parsed = parseLastJsonObject(out.assistantText);
 
-  const found = sessionId ? await waitForTranscript(sessionId) : null;
+  const roots = codexHomeInfo && !isFakeHarness() ? { codex: path.join(codexHomeInfo.home, "sessions") } : undefined;
+  const found = sessionId ? await waitForTranscript(sessionId, 10_000, roots) : null;
   let toolCalls: SuccessorToolCall[] = [];
   let tUsage: ReturnType<typeof transcriptUsage> | null = null;
   let transcriptEvents = 0;

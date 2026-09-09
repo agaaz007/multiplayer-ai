@@ -175,6 +175,8 @@ async function runTrial(request: AdapterRequest, args: Args, log: (l: string) =>
     log(`origin: ${origin.harness}, ${origin.turns.length} turns over ${origin.sessionIds.length} session(s), ${origin.totalInputTokens} input tokens, ${origin.compactions} compactions`);
     fs.writeFileSync(path.join(ctx.paths.rawDir, "origin-run.json"), JSON.stringify({ harness: origin.harness, sessionIds: origin.sessionIds, transcriptPaths: origin.transcriptPaths, totalInputTokens: origin.totalInputTokens, compactions: origin.compactions, turns: origin.turns.map((x) => ({ turn: x.turnIndex, event: x.fixtureEventId, session: x.sessionId, wall_ms: x.wallMs, usage: x.usage ?? null, assistant: x.assistantText.slice(0, 2000) })) }, null, 2) + "\n");
 
+    if (runner.afterOrigin) await runner.afterOrigin(ctx, origin);
+
     t = Date.now();
     const prep = await plugin.prepare(ctx, origin);
     timings.prepare_ms = Date.now() - t;
@@ -201,6 +203,7 @@ async function runTrial(request: AdapterRequest, args: Args, log: (l: string) =>
       log(`recovered/: ${files.length} files copied before the successor started`);
     }
 
+    if (runner.beforeSuccessor) await runner.beforeSuccessor(ctx);
     t = Date.now();
     const successorStartedAt = Date.now();
     const successor: SuccessorRun = await drivers.runSuccessor(ctx, setup, request.case.resume_prompt, request.case.answer_keys);
@@ -226,9 +229,10 @@ async function runTrial(request: AdapterRequest, args: Args, log: (l: string) =>
       condition: args.condition, topology: "same-machine",
     };
     obs = { status: "completed", provenance, ...common, ...extra };
-    if (runner.after) await runner.after(ctx);
     return obs;
   } finally {
+    try { if (runner.after) await runner.after(ctx); }
+    catch (e: any) { log(`case cleanup failed: ${String(e?.message ?? e).slice(0, 300)}`); }
     try { await drivers.cleanupTrial(ctx, args.keep); log(`cleanup: ${args.keep ? "kept" : "removed"} ${ctx.paths.root}`); }
     catch (e: any) { log(`cleanup failed: ${String(e?.message ?? e).slice(0, 300)}`); }
   }
