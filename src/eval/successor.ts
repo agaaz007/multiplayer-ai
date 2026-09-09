@@ -4,6 +4,7 @@ import { streamTranscript, type NormEvent } from "../continuity/events.js";
 import type { Harness, SuccessorRun, TrialContext } from "./types.js";
 import { appendJsonl, codexHome, codexModelArgs, defaultModel, envKeys, isFakeHarness, newSessionId, runHarnessTurn, transcriptUsage, waitForTranscript, writeJson, type TurnSpec } from "./harness.js";
 import { trialEnv, writeEmptyMcpConfig } from "./fixture.js";
+import { claudeIsolationArgs } from "./claude-isolation.js";
 
 /**
  * Successor driver: one fresh harness session that receives only the condition's
@@ -39,6 +40,12 @@ export interface RunSuccessorOptions {
   model?: string;
   /** Default ctx.successorHarness. */
   harness?: Harness;
+}
+
+export function claudeSuccessorArgs(prompt: string, sessionId: string, model: string, cwd: string, mcpConfigPath: string, allowedTools: string[]): string[] {
+  const args = ["-p", prompt, "--session-id", sessionId, "--model", model, "--output-format", "json", "--dangerously-skip-permissions", ...claudeIsolationArgs(), "--mcp-config", mcpConfigPath, "--strict-mcp-config", "--add-dir", cwd];
+  if (allowedTools.length) args.push("--allowedTools", ...allowedTools);
+  return args;
 }
 
 export const SUCCESSOR_TIMEOUT_MS = 600_000;
@@ -219,8 +226,7 @@ export async function runSuccessor(ctx: TrialContext, setup: SuccessorSetup, res
   if (harness === "claude") {
     sessionId = newSessionId();
     const mcp = setup.mcpConfigPath ?? writeEmptyMcpConfig(ctx, "successor-mcp-empty.json");
-    args = ["-p", prompt, "--session-id", sessionId, "--model", model, "--output-format", "json", "--dangerously-skip-permissions", "--mcp-config", mcp, "--strict-mcp-config", "--add-dir", setup.cwd];
-    if (setup.allowedTools.length) args.push("--allowedTools", ...setup.allowedTools);
+    args = claudeSuccessorArgs(prompt, sessionId, model, setup.cwd, mcp, setup.allowedTools);
   } else {
     codexHomeInfo = prepareCodexHome(ctx, setup);
     env = { ...env, CODEX_HOME: codexHomeInfo.home };

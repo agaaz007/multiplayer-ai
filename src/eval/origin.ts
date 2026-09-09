@@ -4,6 +4,7 @@ import type { FixtureEvent, Harness, OriginRun, OriginTurnResult, TrialContext }
 import { appendJsonl, codexModelArgs, countCompactions, defaultModel, envKeys, isFakeHarness, newSessionId, otherHarness, runHarnessTurn, waitForTranscript, writeJson, type FakeToolCall, type TurnSpec } from "./harness.js";
 import { prepareCodexHome } from "./successor.js";
 import { trialEnv, writeEmptyMcpConfig, writeTrialConfig } from "./fixture.js";
+import { claudeIsolationArgs } from "./claude-isolation.js";
 
 /**
  * Origin driver: one real harness turn per fixture event, in fixture order, each event
@@ -70,7 +71,7 @@ export function originPrompt(text: string): string {
 
 /** Claude argv. The prompt sits right after -p because --add-dir / --allowedTools / --mcp-config are variadic and would swallow it. */
 export function claudeOriginArgs(prompt: string, sessionId: string, resume: boolean, model: string, addDir: string, mcpConfigPath: string | null, allowedTools?: string[]): string[] {
-  const a = ["-p", prompt, ...(resume ? ["--resume", sessionId] : ["--session-id", sessionId]), "--model", model, "--output-format", "json", "--dangerously-skip-permissions", "--append-system-prompt", ORIGIN_PROMPT_PREFIX];
+  const a = ["-p", prompt, ...(resume ? ["--resume", sessionId] : ["--session-id", sessionId]), "--model", model, "--output-format", "json", "--dangerously-skip-permissions", "--append-system-prompt", ORIGIN_PROMPT_PREFIX, ...claudeIsolationArgs()];
   if (mcpConfigPath) a.push("--mcp-config", mcpConfigPath, "--strict-mcp-config");
   a.push("--add-dir", addDir);
   if (allowedTools?.length) a.push("--allowedTools", ...allowedTools);

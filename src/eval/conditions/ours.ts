@@ -15,6 +15,7 @@ import { detectHarness } from "../../continuity/events.js";
 import { loadAll, type Config } from "../../store.js";
 import { spawnHarness } from "../harness.js";
 import { trialEnv, writeEmptyMcpConfig } from "../fixture.js";
+import { claudeClassifierArgs } from "../claude-isolation.js";
 
 /**
  * Condition "ours": the successor gets what the production system would give it.
@@ -336,7 +337,7 @@ async function prepare(ctx: TrialContext, origin: OriginRun): Promise<{ notes: s
           // Test doubles supply an explicit extractor command. Live evaluation uses
           // the same classifier prompt with an empty MCP configuration in the trial.
           ...(process.env.LEDGER_EXTRACTOR_CMD ? {} : { extract: async (prompt: string) => {
-            const args = ["-p", "--output-format", "text", "--no-session-persistence", "--tools", "", "--mcp-config", writeEmptyMcpConfig(ctx, "classifier-mcp-empty.json"), "--strict-mcp-config"];
+            const args = claudeClassifierArgs(writeEmptyMcpConfig(ctx, "classifier-mcp-empty.json"));
             const result = await spawnHarness({ cmd: "claude", args, cwd: ctx.paths.repo,
               env: trialEnv(ctx, { LEDGER_HOOKS_OFF: "1" }), stdin: prompt, timeoutMs: 300_000, log });
             fs.writeFileSync(path.join(ctx.paths.rawDir, `classifier-${s.id}.json`), JSON.stringify({
