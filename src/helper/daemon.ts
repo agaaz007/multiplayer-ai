@@ -130,10 +130,16 @@ function sessionIdFor(file: string, harness: "claude" | "codex", parsedId?: stri
   return m?.[1] ?? path.basename(file, ".jsonl");
 }
 
+/** realpath when it exists (macOS: /var → /private/var; Claude Code records the realpath'd cwd), else the string as given */
+function realOrSelf(p: string): string {
+  try { return fs.realpathSync(p); } catch { return p; }
+}
+
 function repoAllowed(cfg: Config, repo: string, root: string | null): boolean {
-  // excluded prefixes win (evaluation fixtures, scratch dirs); then the optional allowlist
-  const excl = cfg.continuity?.exclude_paths ?? [];
-  if (root && excl.some((p) => p && (root === p || root.startsWith(p.endsWith(path.sep) ? p : p + path.sep)))) return false;
+  // excluded prefixes win (evaluation fixtures, scratch dirs); compare realpaths on both sides; then the optional allowlist
+  const excl = (cfg.continuity?.exclude_paths ?? []).filter(Boolean).map(realOrSelf);
+  const r = root ? realOrSelf(root) : null;
+  if (r && excl.some((p) => r === p || r.startsWith(p.endsWith(path.sep) ? p : p + path.sep))) return false;
   const allow = cfg.continuity?.repos ?? [];
   if (!allow.length) return true;
   return allow.some((a) => repo === a || repo.endsWith(a) || (root && (root === a || root.endsWith(a))));
