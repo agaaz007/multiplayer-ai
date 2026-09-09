@@ -29,6 +29,9 @@ import type { Harness } from "./types.js";
  *     Transcript: ~/.claude/projects/<cwd with / and . replaced by ->/<session-id>.jsonl; each assistant
  *     line carries message.usage for its API call (the same message id may appear on several lines).
  *   Codex CLI 0.149.0    `codex exec -C <dir> --skip-git-repo-check -s workspace-write [-m m] --json -o <f> <prompt>`
+ *     then `codex exec resume <id> --skip-git-repo-check -c sandbox_mode="workspace-write" [-m m] --json -o <f> <prompt>`
+ *     (flag surface checked against `codex exec --help` / `codex exec resume --help` on 2026-09-09: resume has no
+ *     -C or -s, so the cwd is the process cwd and the sandbox goes through -c).
  *     stdout is JSONL. Not run for real here; the reader accepts the documented exec event shapes
  *     ({type:"thread.started",thread_id}, {type:"item.completed",item:{type:"agent_message",text}},
  *     {type:"turn.completed",usage:{input_tokens,cached_input_tokens,output_tokens}}, {type:"turn.failed"|"error"})
@@ -129,12 +132,26 @@ export function otherHarness(h: Harness): Harness {
   return h === "claude" ? "codex" : "claude";
 }
 
-/** Machine-level ledger overrides must not leak into a trial: the trial config is authoritative. */
-const STRIPPED_ENV = ["LEDGER_DIR", "LEDGER_AUTHOR", "LEDGER_CONTINUITY_DB", "LEDGER_GIT_SYNC"];
+/**
+ * Machine-level ledger overrides must not leak into a trial (the trial config is authoritative), and neither may
+ * the identity of a Claude Code session this controller happens to run inside: a harness child is its own
+ * top-level session, not a subagent of ours, and must not inherit our session id, child marker, or team socket.
+ */
+const STRIPPED_ENV = [
+  "LEDGER_DIR", "LEDGER_AUTHOR", "LEDGER_CONTINUITY_DB", "LEDGER_GIT_SYNC",
+  "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_PID",
+  "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_AGENT_SDK_VERSION", "CLAUDE_EFFORT",
+];
 
+/**
+ * Env for any process a trial spawns. Always carries LEDGER_EVAL=1: src/store.ts refuses to write the real
+ * ~/.ledger/config.json when it is set without LEDGER_CONFIG_DIR, so a child that lost its LEDGER_CONFIG_DIR
+ * fails loudly instead of repointing the machine config (2026-09-09 incident, docs/CONTINUITY.md).
+ */
 export function harnessEnv(base: NodeJS.ProcessEnv, overrides: Record<string, string | undefined> = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...base };
   for (const k of STRIPPED_ENV) delete env[k];
+  env.LEDGER_EVAL = "1";
   for (const [k, v] of Object.entries(overrides)) {
     if (v === undefined) delete env[k];
     else env[k] = v;
@@ -287,8 +304,12 @@ export interface ClaudeJsonOutput {
   total_cost_usd: number | null;
   usage: ClaudeUsage | null;
   modelUsage: Record<string, unknown> | null;
-  /** input + cache creation + cache read of usage.iterations[0]; observed to be the LAST call when several were made, so a fallback only */
-  iterationInput: number | null;
+  /**
+   * `usage.iterations[0]`: input_tokens + cache_creation_input_tokens + cache_read_input_tokens. Claude Code 2.1.258
+   * reports ONE iteration per run and it is the LAST API call, so this equals the boot context only for a
+   * single-call run; the successor driver prefers the transcript's first assistant line and uses this as the fallback.
+   */
+  bootTokens: number | null;
   /** input + cache creation + cache read of the top-level usage: the run total, equal to the transcript's per-call sum */
   totalInputTokens: number | null;
   raw: Record<string, unknown>;
@@ -327,7 +348,7 @@ export function readClaudeJsonOutput(stdout: string): ClaudeJsonOutput | null {
   if (!j || typeof j !== "object" || Array.isArray(j)) return null;
   const usage: ClaudeUsage | null = j.usage && typeof j.usage === "object" ? j.usage : null;
   const iterations = Array.isArray(usage?.iterations) ? usage!.iterations! : [];
-  const iterationInput = iterations.length ? claudeCallInput(iterations[0]) : null;
+  const bootTokens = iterations.length ? claudeCallInput(iterations[0]) : null;
   const totalInputTokens = claudeCallInput(usage);
   return {
     session_id: typeof j.session_id === "string" ? j.session_id : null,
@@ -340,7 +361,7 @@ export function readClaudeJsonOutput(stdout: string): ClaudeJsonOutput | null {
     total_cost_usd: typeof j.total_cost_usd === "number" ? j.total_cost_usd : null,
     usage,
     modelUsage: j.modelUsage && typeof j.modelUsage === "object" ? j.modelUsage : null,
-    iterationInput,
+    bootTokens,
     totalInputTokens,
     raw: j,
   };
@@ -552,7 +573,7 @@ export async function runHarnessTurn(spec: TurnSpec): Promise<TurnOutcome> {
       if (out.usage) {
         base.usage = { input_tokens: num(out.usage.input_tokens) + num(out.usage.cache_creation_input_tokens), output_tokens: num(out.usage.output_tokens), cache_read: num(out.usage.cache_read_input_tokens) };
       }
-      base.bootTokens = out.iterationInput;
+      base.bootTokens = out.bootTokens;
       base.totalInputTokens = out.totalInputTokens;
       if (out.is_error) failures.push(`harness reported is_error: ${out.result.slice(0, 300)}`);
     }
