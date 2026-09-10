@@ -2,8 +2,9 @@ import path from "node:path";
 import type pg from "pg";
 import { loadAll, type Config } from "../store.js";
 import { TYPES } from "../schema.js";
+import { objectVersion, resolveAccepted, correctionImpact } from '../authority.js';
 import { claimThread, getClaim, getSession, getThread, headCheckpoint, pendingOperations, type ClaimRow, type ThreadRow } from "./store.js";
-import { listRecords, recordEvidence, recordLinks, recordState, unassignedSpans, type LinkSource, type RecordKind, type RecordState, type RecordStatus, type StateUpdate, type UnassignedSpan, type WorkRecord } from "./records.js";
+import { listRecords, recordEvidence, recordEvidenceCount, recordLinks, recordState, unassignedSpans, type LinkSource, type RecordKind, type RecordState, type RecordStatus, type StateUpdate, type UnassignedSpan, type WorkRecord } from "./records.js";
 import { clipSummary, INSTRUCTIONS_HEAD, RECENT_FILES_MINUTES, SUMMARY_BUDGET_SHARE, SUMMARY_MAX_TOKENS } from "./resume.js";
 import { eventLine, PREVIEW_MAX_CHARS } from "./evidence.js";
 import { defaultRemoteBranch, repoIdentity, repoRoot } from "./shadow.js";
@@ -79,6 +80,7 @@ export interface EvidenceItem { session_id: string; author: string; harness: str
 export interface LedgerRefStatus {
   id: string; version?: string; found: boolean; type: string | null; title: string | null; author: string | null; created: string | null;
   status: string | null; superseded_by: string | null;
+  authority_status: string; current_ids: string[]; version_matches: boolean | null; warnings: string[];
 }
 
 export interface RecordPack {
@@ -156,7 +158,7 @@ export interface RecordSummary extends WorkRecord {
 export async function listRecordSummaries(qq: Q, f: { repo?: string | null; kind?: RecordKind; status?: RecordStatus; author?: string; sinceHours?: number; q?: string; limit?: number } = {}): Promise<RecordSummary[]> {
   const recs = await listRecords(qq, f);
   if (!recs.length) return [];
-  const live = `u.status <> 'rejected' and not exists (select 1 from cont_state_updates v where v.record_id = u.record_id and v.supersedes = u.id and v.status <> 'rejected')`;
+  const live = `u.status <> 'rejected' and not exists (select 1 from cont_state_updates v where v.record_id = u.record_id and v.supersedes = u.id and v.status = 'confirmed')`;
   const r = await qq.query<{ id: string; sessions: number; proposed: number; confirmed: number; np_id: string | null; np_kind: string | null; np_text: string | null; np_by: string | null; np_at: Date | null }>(
     `select r.id,
             (select count(distinct l.session_id) from cont_record_links l where l.record_id = r.id)::int as sessions,
@@ -261,12 +263,28 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
   const all = refs.length ? loadAll(cfg, TYPES) : [];
   const ledgerRefs: LedgerRefStatus[] = refs.map((r) => {
     const o = all.find((x) => x.id === r.id);
-    return { id: r.id, version: r.version, found: Boolean(o), type: o?.type ?? null, title: o?.title ?? null, author: o?.author ?? null, created: o?.created ?? null, status: o?.status ?? null, superseded_by: o?.superseded_by ?? null };
+    const resolution = resolveAccepted(all,r.id);
+    const current = resolution.current.some(c=>c.id===r.id);
+    return { id: r.id, version: r.version, found: Boolean(o), type: o?.type ?? null, title: o?.title ?? null, author: o?.author ?? null, created: o?.created ?? null,
+      status: o ? (current ? 'stable' : o.status==='draft' ? 'draft' : 'deprecated') : null,
+      superseded_by: current ? null : resolution.current.length===1 ? resolution.current[0].id : null,
+      authority_status: resolution.status, current_ids: resolution.current.map(c=>c.id), version_matches: o && r.version ? objectVersion(o)===r.version : null, warnings:resolution.warnings };
   });
+  const acceptedRefs = [...new Map(refs.flatMap(r=>resolveAccepted(all,r.id).current).map(o=>[o.id,o])).values()];
+  const reviewImpacts = acceptedRefs.filter(o=>o.supersedes).map(o=>correctionImpact(all,o.id));
   const supersededRefs = ledgerRefs.filter((r) => r.status === "deprecated");
 
   // ----- evidence across sessions, ordered by occurred_at, each attributed -----
-  const evAll = await recordEvidence(pool, rec.id, { kinds: EVIDENCE_KINDS, limit: 2000, sources: COVERING });
+  const [evFirst, evLast, evidenceTotal, latestComp] = await Promise.all([
+    recordEvidence(pool, rec.id, { kinds: ['instruction.added'], limit: EVIDENCE_HEAD, sources: COVERING }),
+    recordEvidence(pool, rec.id, { kinds: EVIDENCE_KINDS, limit: 2000, sources: COVERING, order: 'desc' }),
+    recordEvidenceCount(pool, rec.id, EVIDENCE_KINDS, COVERING),
+    recordEvidence(pool, rec.id, { kinds: ['compaction'], limit: 1, sources: COVERING, order: 'desc' }),
+  ]);
+  const evAll = [...new Map([...evFirst, ...evLast].map(e => [e.id, e])).values()].sort((a,b) =>
+    (a.occurred_at ?? a.received_at).getTime() - (b.occurred_at ?? b.received_at).getTime()
+      || a.session_id.localeCompare(b.session_id) || a.seq - b.seq);
+  if (evidenceTotal > evAll.length) omitted.push(`${evidenceTotal - evAll.length} middle events not loaded; evidence counts cover the full history, file previews cover the sampled window; fetch exact linked spans with ledger_events`);
   const evItem = (e: (typeof evAll)[number]): EvidenceItem => ({ session_id: e.session_id, author: e.author, harness: e.harness, seq: e.seq, kind: e.kind, at: e.occurred_at ? e.occurred_at.toISOString() : null, link_source: e.link_source, line: eventLine(e, EVIDENCE_PREVIEW) });
   // one fetch per span, in time order (the first evidence event each span contains); spans with no events last
   const firstIdx = (l: { session_id: string; from_seq: number; to_seq: number }) => { const i = evAll.findIndex((e) => e.session_id === l.session_id && e.seq >= l.from_seq && e.seq <= l.to_seq); return i === -1 ? Number.MAX_SAFE_INTEGER : i; };
@@ -280,12 +298,12 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
     const shown = idx.map((i) => evItem(evAll[i]));
     const gapIdx = evAll.map((_, i) => i).filter((i) => !keep.has(i));
     let gap: RecordPack["evidence_summary"]["omitted"] = null;
-    if (gapIdx.length) gap = { count: gapIdx.length, fetch: spanFetches };
+    if (evidenceTotal > shown.length) gap = { count: evidenceTotal - shown.length, fetch: spanFetches };
     return { shown, gap, gapIdx };
   };
 
   // the latest compaction summary with text inside the spans
-  const comp = [...evAll].reverse().find((e) => e.kind === "compaction" && typeof e.payload?.text === "string" && e.payload.text.trim().length > 0) ?? null;
+  const comp = latestComp.find((e) => typeof e.payload?.text === "string" && e.payload.text.trim().length > 0) ?? null;
   let sessionSummary: RecordPack["session_summary"] = null;
   const summaryMaxChars = Math.min(SUMMARY_MAX_TOKENS * 4, Math.floor(budget * 4 * SUMMARY_BUDGET_SHARE));
   if (comp) {
@@ -318,10 +336,12 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
     });
   const recentFiles = files.filter((f) => f.recent).map(({ path: p, count, last_at }) => ({ path: p, count, last_at }));
 
-  // ----- pending operations from the most recent contributing session, inside its spans; last error inside any span -----
-  const pend = latest ? (await pendingOperations(pool, latest.session_id)).filter((p) => inSpans(latest.session_id, p.seq)).map((p) => ({ call_id: p.call_id, tool: p.tool, input: p.input, seq: p.seq, session_id: latest.session_id })) : [];
-  const errRows = await recordEvidence(pool, rec.id, { kinds: ["tool.finished"], limit: 2000, sources: COVERING });
-  const lastErrRow = [...errRows].reverse().find((e) => e.payload?.is_error || (typeof e.payload?.stderr_preview === "string" && e.payload.stderr_preview)) ?? null;
+  // An unfinished operation remains pending even after another contributor becomes active.
+  const pend = (await Promise.all(sessions.map(async (s) => (await pendingOperations(pool, s.session_id))
+    .filter((p) => inSpans(s.session_id, p.seq))
+    .map((p) => ({ call_id: p.call_id, tool: p.tool, input: p.input, seq: p.seq, session_id: s.session_id }))))).flat();
+  const errRows = await recordEvidence(pool, rec.id, { kinds: ["tool.finished"], limit: 1, sources: COVERING, order: 'desc', errorsOnly: true });
+  const lastErrRow = errRows.find((e) => e.payload?.is_error || (typeof e.payload?.stderr_preview === "string" && e.payload.stderr_preview)) ?? null;
   const lastErr = lastErrRow ? { session_id: lastErrRow.session_id, seq: lastErrRow.seq, payload: lastErrRow.payload } : null;
 
   // ----- unassigned spans in the contributing sessions -----
@@ -375,6 +395,7 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
     L.push(`# Record pack: ${rec.title}`);
     L.push(`record ${rec.id} · ${rec.kind} · ${rec.repo ? `repo ${rec.repo}` : "non-code work"} · status ${rec.status} · created by ${rec.created_by} ${fmt(rec.created_at)} · state v${rec.state_version} · updated ${fmt(rec.updated_at)}`);
     L.push(`goal: ${rec.goal ? oneLine(rec.goal) : "(none recorded)"}`);
+    for (const conflict of state.conflicts) L.push(`UNRESOLVED ACCEPTED CONFLICT: ${conflict.update_ids.join(', ')} replace ${conflict.supersedes}. Do not choose by recency; inspect evidence and explicitly resolve.`);
     L.push(`claim: ${claimInfo.note}`);
     L.push(``);
 
@@ -401,7 +422,10 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
       if (!items.length) continue;
       anyState = true;
       const cap = k.hard ? stateCap : level >= 5 ? 1 : level >= 3 ? 3 : stateCap;
-      const shown = items.slice(-cap);
+      // Unaccepted recent activity cannot consume the accepted-state allowance.
+      const accepted = items.filter(u=>u.status==='confirmed');
+      const proposals = items.filter(u=>u.status==='proposed');
+      const shown = [...(k.hard ? accepted : accepted.slice(-cap)),...proposals.slice(-cap)];
       L.push(`### ${k.label} (${items.length})`);
       for (const u of shown) L.push(stateLine(u));
       if (items.length > shown.length) {
@@ -419,6 +443,18 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
       if (!r.found) { L.push(`- ${r.id}${r.version ? ` @${r.version}` : ""}: NOT FOUND in the ledger (ledger_get ${q(r.id)})`); continue; }
       const flag = r.status === "deprecated" ? ` — SUPERSEDED by ${r.superseded_by ?? "(unknown)"}; the record relied on a version that is no longer in force` : r.status === "draft" ? " — draft, not in force" : " — in force";
       L.push(level >= 4 ? `- ${r.type} ${r.id}${flag}` : `- ${r.type} ${r.id}: ${r.title} (${r.author}, ${dateOf(r.created)})${r.version ? ` · pinned ${r.version}` : ""}${flag}`);
+      if (r.version_matches===false) L.push(`VERSION MISMATCH: ${r.id}; its pinned content does not match the retained object. Do not claim the original evidence was verified.`);
+      if (r.authority_status==='conflict') L.push(`UNRESOLVED ACCEPTED CONFLICT: ${r.current_ids.join(', ')}. No current answer has been selected.`);
+      for (const warning of r.warnings) L.push(`WARNING: ${warning}`);
+    }
+    for (const o of acceptedRefs) {
+      const resolution = resolveAccepted(all,o.id);
+      L.push(`${resolution.status==='conflict' ? 'CONFLICTING ACCEPTED SOURCE — resolve before reuse' : 'Accepted source candidate — check task applicability'}: ${o.type} ${o.id} @${objectVersion(o)}: ${String(o.fields.formula ?? o.fields.decision ?? o.fields.result ?? o.fields.what ?? '')}${o.fields.query ? `\nQuery: ${o.fields.query}` : ''}${o.fields.evidence_refs ? `\nEvidence: ${JSON.stringify(o.fields.evidence_refs)}` : ''}`);
+      if (!o.fields.analysis_scope) L.push(`SCOPE UNKNOWN: ${o.id}; use ledger_investigation with the analytical scope before applying it to a new analysis.`);
+    }
+    for (const impact of reviewImpacts) {
+      for (const item of impact.affected) L.push(`NEEDS REVIEW: ${item.id}; ${item.reason}; ${item.path.join(' -> ')}`);
+      for (const item of impact.incomplete) L.push(`INCOMPLETE IMPACT: ${item.id}; ${item.reason}`);
     }
     if (level >= 4 && ledgerRefs.length) om.push(`linked Ledger object titles (ids and status kept); ledger_get per id`);
     if (supersededRefs.length) L.push(`SUPERSEDED objects this record depends on: ${supersededRefs.map((r) => `${r.id} → ${r.superseded_by}`).join("; ")}`);
@@ -430,12 +466,12 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
     const ev = shapeEvidence(headN, tailN);
     let evidenceSummary: RecordPack["evidence_summary"];
     if (level >= 5) {
-      L.push(`## Evidence across sessions (${evAll.length} events in ${sources.spans} spans)`);
+      L.push(`## Evidence across sessions (${evidenceTotal} events in ${sources.spans} spans)`);
       L.push(`(omitted for budget; fetch per span: ${spanFetches.slice(0, 4).join("; ")}${spanFetches.length > 4 ? "; …" : ""}; search with ledger_evidence_search(q, record_id: ${q(rec.id)}))`);
       om.push(`evidence lines (omitted for budget); ${spanFetches.join("; ")}`);
-      evidenceSummary = { total: evAll.length, shown: [], omitted: evAll.length ? { count: evAll.length, fetch: spanFetches } : null };
+      evidenceSummary = { total: evidenceTotal, shown: [], omitted: evidenceTotal ? { count: evidenceTotal, fetch: spanFetches } : null };
     } else {
-      L.push(`## Evidence across sessions (${evAll.length} events in ${sources.spans} spans, time order${ev.gap ? `; first ${headN} instruction${headN === 1 ? "" : "s"} and last ${tailN} shown` : ""})`);
+      L.push(`## Evidence across sessions (${evidenceTotal} events in ${sources.spans} spans, time order${ev.gap ? `; first ${headN} instruction${headN === 1 ? "" : "s"} and last ${tailN} shown` : ""})`);
       if (!evAll.length) L.push(`(no events inside the record's spans)`);
       let gapPrinted = false;
       const gapStart = ev.gapIdx.length ? ev.gapIdx[0] : -1;
@@ -455,7 +491,7 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
       });
       if (ev.gap) om.push(`${ev.gap.count} evidence events omitted${level >= 1 ? " (tail shortened for budget)" : ""}; ${spanFetches.join("; ")}`);
       om.push(`evidence search: ledger_evidence_search(q: "…", record_id: ${q(rec.id)})`);
-      evidenceSummary = { total: evAll.length, shown: ev.shown, omitted: ev.gap };
+      evidenceSummary = { total: evidenceTotal, shown: ev.shown, omitted: ev.gap };
     }
     L.push(``);
     if (sessionSummary) {
@@ -487,8 +523,8 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
     L.push(``);
 
     // pending / last error
-    L.push(`## Pending / unknown operations (${pend.length})${latest ? ` — most recent contributing session ${short(latest.session_id)} (${latest.author}, ${harnessName(latest.harness)}), inside its linked spans` : ""}`);
-    for (const p of pend) L.push(`- seq ${p.seq} ${p.tool}: ${oneLine(p.input).slice(0, 200)}  ← outcome unknown; do not blindly rerun if it mutates anything`);
+    L.push(`## Pending / unknown operations (${pend.length}) — all contributing sessions, inside linked spans`);
+    for (const p of pend) L.push(`- session ${short(p.session_id)} seq ${p.seq} ${p.tool}: ${oneLine(p.input).slice(0, 200)}  ← outcome unknown; do not blindly rerun if it mutates anything`);
     if (lastErr) {
       L.push(``); L.push(`## Last error inside the spans`);
       const fetch = `ledger_events(session_id: ${q(lastErr.session_id)}, after_seq: ${lastErr.seq - 1}, limit: 1, preview_chars: 2000)`;

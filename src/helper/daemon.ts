@@ -204,8 +204,21 @@ async function awaitClassifications(ms: number): Promise<void> {
  * artifact id. Above the cap, the event carries an explicit `oversized` gap
  * with size and, when known, the local path; nothing is silently dropped.
  */
-async function materializeArtifacts(pool: pg.Pool, sessionId: string, events: NormEvent[]): Promise<void> {
+export async function materializeArtifacts(pool: pg.Pool, sessionId: string, events: NormEvent[], storeArtifact: typeof putArtifact = putArtifact): Promise<void> {
   for (const e of events) {
+    if (e.kind === "tool.requested") {
+      const p = e.payload as Record<string, any>;
+      if (typeof p._full_input === "string") {
+        const bytes = Buffer.from(p._full_input, "utf8"), sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
+        // Failure leaves the spool batch unacknowledged. Retry exact input delivery even if no new source event arrives.
+        const artifact = await storeArtifact(pool, { sha256, kind: "tool_input", bytes, session_id: sessionId });
+        p.input_artifact_id = artifact.id;
+        p.input_artifact_sha256 = sha256;
+        p.input_availability = "stored";
+        delete p._full_input;
+      }
+      continue;
+    }
     if (e.kind !== "tool.finished") continue;
     const p = e.payload as Record<string, any>;
     let full: string | undefined = typeof p._full === "string" ? p._full : undefined;
@@ -221,7 +234,7 @@ async function materializeArtifacts(pool: pg.Pool, sessionId: string, events: No
     const buf = Buffer.from(full, "utf8");
     const sha = crypto.createHash("sha256").update(buf).digest("hex");
     try {
-      const a = await putArtifact(pool, { sha256: sha, kind: "tool_output", bytes: buf, session_id: sessionId });
+      const a = await storeArtifact(pool, { sha256: sha, kind: "tool_output", bytes: buf, session_id: sessionId });
       p.artifact_id = a.id;
       p.artifact_sha256 = sha;
     } catch (err: any) {

@@ -4,7 +4,7 @@ import path from "node:path";
 import { execFileSync, execSync, execFile, exec } from "node:child_process";
 import { type Config, loadAll, recordDraft } from "./store.js";
 import { TYPES, type LedgerType } from "./schema.js";
-import { type Journal, debt, loadJournal, saveJournal, sessionsDir, DEFAULT_DATA_TOOLS } from "./hooks.js";
+import { type Journal, type JournalEntry, acknowledgeCapture, debt, loadJournal, saveJournal, withJournalLock, sessionsDir, DEFAULT_DATA_TOOLS } from "./hooks.js";
 import { type Agent, type Evidence, type Roots, evidenceText, findTranscript, hasMaterialActivity, parseTranscript } from "./transcript.js";
 
 /**
@@ -19,8 +19,8 @@ import { type Agent, type Evidence, type Roots, evidenceText, findTranscript, ha
  * It never writes trusted memory. Every object it creates is `status: draft`
  * with `capture_method: transcript_fallback`, `source_session`, and the reason
  * the fallback ran. A human or their agent promotes (records a stable object
- * with `supersedes`) or discards. Each session is reconciled at most once;
- * the journal records the outcome.
+ * with `supersedes`) or discards. The journal records exact processed evidence
+ * IDs so new obligations in a resumed session remain eligible for fallback.
  */
 
 export interface Candidate {
@@ -28,6 +28,7 @@ export interface Candidate {
   transcript: { path: string; agent: Agent };
   trigger: "session_end" | "quiet" | "manual";
   reason: string;
+  evidence: JournalEntry[];
 }
 
 export interface ReconcileOpts {
@@ -51,8 +52,7 @@ const PROMPTS = path.resolve(path.dirname(new URL(import.meta.url).pathname), ".
 export const DEFAULT_QUIET_MS = 20 * 60_000;
 export const MAX_ATTEMPTS = 3;
 
-function debtReason(j: Journal): string {
-  const d = debt(j);
+function debtReason(j: Journal, d = debt(j)): string {
   const tools = [...new Set(d.map((e) => e.tool))].slice(0, 4).join(", ");
   const compacted = j.entries.some((e) => e.kind === "compact");
   const ended = j.entries.some((e) => e.kind === "end");
@@ -60,6 +60,18 @@ function debtReason(j: Journal): string {
   const how = ended ? "session ended" : "session went quiet";
   const why = ignored ? "the Stop checkpoint was ignored" : compacted ? "work preceded a compaction" : "no checkpoint fired";
   return `${d.length} data quer${d.length === 1 ? "y" : "ies"} ran (${tools}) and no ledger object was recorded; ${how}, ${why}`;
+}
+
+/** Process unresolved IDs once per successful extraction batch, not once per session. Review remains separate. */
+export function extractionDebt(j: Journal, manual = false): JournalEntry[] {
+  const batches = j.extractions ?? (j.extracted ? [j.extracted] : []);
+  return debt(j).filter(query => {
+    if (manual) return true;
+    const related = batches.filter(batch => batch.evidence_ids?.includes(query.evidence_id!) ||
+      (!batch.evidence_ids && query.at <= batch.at)); // migration: old reconciler recorded a through-time, never coverage
+    const errors = related.filter(batch => batch.result === "error");
+    return !related.some(batch => batch.result !== "error") && Math.max(errors.length, ...errors.map(batch => batch.attempts ?? 1)) < MAX_ATTEMPTS;
+  });
 }
 
 /** Journals with capture debt that are not yet reconciled and whose transcript exists and is quiet (or ended, or named). */
@@ -79,18 +91,18 @@ export function findCandidates(opts: ReconcileOpts = {}): Candidate[] {
       continue;
     }
     if (opts.sessionId && j.session_id !== opts.sessionId) continue;
-    // reconciled once: done. An error (extractor down, CLI not logged in) is
-    // not a decision about the session, so it is retried, up to MAX_ATTEMPTS.
-    if (j.extracted && (j.extracted.result !== "error" || (j.extracted.attempts ?? 1) >= MAX_ATTEMPTS)) continue;
-    if (new Date(j.started).getTime() < since) continue;
-    if (!debt(j).length) continue;
+    const activityAt = Math.max(Date.parse(j.started), Date.parse(j.entries.at(-1)?.at ?? j.started));
+    if (activityAt < since) continue;
+    const evidence = extractionDebt(j, Boolean(opts.sessionId)).slice(0, 20);
+    if (!evidence.length) continue;
     const t = findTranscript(j.session_id, j.transcript_path, opts.roots);
     if (!t) continue;
-    const ended = j.entries.some((e) => e.kind === "end");
+    const lastEnd = j.entries.reduce((last, e, i) => e.kind === "end" ? i : last, -1), lastQuery = j.entries.reduce((last, e, i) => e.kind === "query" ? i : last, -1);
+    const ended = lastEnd > lastQuery;
     const quietFor = now.getTime() - fs.statSync(t.path).mtimeMs;
     const trigger: Candidate["trigger"] = opts.sessionId ? "manual" : ended ? "session_end" : "quiet";
     if (trigger === "quiet" && quietMs > 0 && quietFor < quietMs) continue; // still live: let the hooks do their job
-    out.push({ journal: j, transcript: t, trigger, reason: debtReason(j) });
+    out.push({ journal: j, transcript: t, trigger, reason: debtReason(j, evidence), evidence });
   }
   return out;
 }
@@ -108,6 +120,7 @@ export function composePrompt(cfg: Config, ev: Evidence, candidate: Pick<Candida
     `# This run`,
     `Today is ${today}. The human who owns anything you write is "${cfg.author}"; use that as owner where a field asks for a person.`,
     `Why the fallback ran: ${candidate.reason}.`,
+    `Coverage contract: each draft must include evidence_ids next to type and fields, listing only exact query IDs in the evidence below that this draft actually captures. Do not cover unrelated queries. A draft is pending review, never accepted knowledge. Missing, redacted, unresolved or aggregate outputs must be stated as limitations; never invent a completed query result.`,
     `# Transcript evidence`,
     evidenceText(ev),
   ].join("\n\n");
@@ -207,7 +220,7 @@ export function runExtractorAsync(prompt: string, cfg: Config): Promise<string> 
 }
 
 export interface ExtractorOutput {
-  drafts: { type: LedgerType; fields: Record<string, unknown> }[];
+  drafts: { type: LedgerType; fields: Record<string, unknown>; evidence_ids?: string[] }[];
   reason: string;
 }
 
@@ -235,17 +248,29 @@ export function reconcile(cfg: Config, opts: ReconcileOpts = {}): ReconcileResul
   const results: ReconcileResult[] = [];
   for (const c of findCandidates(opts)) {
     const j = loadJournal(c.journal.session_id, dir);
-    const mark = (result: ReconcileResult["result"], reason: string, draft_ids: string[] = []) => {
+    const idsConsidered = c.evidence.map(e => e.evidence_id!);
+    const mark = (result: ReconcileResult["result"], reason: string, draft_ids: string[] = [], processedIds = idsConsidered) => {
       if (!opts.dryRun) {
-        const attempts = (j.extracted?.attempts ?? 0) + 1;
-        j.extracted = { at: (opts.now ?? new Date()).toISOString(), result, reason, draft_ids, attempts };
-        saveJournal(j, dir);
+        withJournalLock(j.session_id, () => {
+        // Reload: successful draft acknowledgment or another hook may have appended since parsing began.
+        const current = loadJournal(j.session_id, dir);
+        const history = current.extractions ?? (current.extracted ? [current.extracted] : []);
+        const attempts = history.filter(batch => JSON.stringify(batch.evidence_ids) === JSON.stringify(processedIds)).length + 1;
+        current.extracted = { at: (opts.now ?? new Date()).toISOString(), result, reason, draft_ids, attempts, evidence_ids: processedIds };
+        current.extractions = [...history, current.extracted];
+        saveJournal(current, dir);
+        }, dir);
       }
       results.push({ session_id: j.session_id, result, draft_ids, reason });
     };
     let ev: Evidence;
     try {
       ev = parseTranscript(c.transcript.path, c.transcript.agent, cfg.data_tools ?? DEFAULT_DATA_TOOLS);
+      const wanted = new Set(idsConsidered);
+      ev.queries = ev.queries.filter(query => query.evidence_id && wanted.has(query.evidence_id));
+      const captured = new Set(ev.queries.map(query => query.evidence_id));
+      const missing = idsConsidered.filter(id => !captured.has(id));
+      if (missing.length) throw new Error(`Owed query IDs are missing from normalized transcript evidence: ${missing.join(", ")}. No unrelated transcript query can satisfy them.`);
     } catch (e: any) {
       mark("error", `could not read transcript: ${e?.message ?? e}`);
       continue;
@@ -270,20 +295,25 @@ export function reconcile(cfg: Config, opts: ReconcileOpts = {}): ReconcileResul
       continue;
     }
     const ids: string[] = [];
+    const covered = new Set<string>();
     const errors: string[] = [];
     for (const d of parsed.drafts) {
       try {
+        if (!Array.isArray(d.evidence_ids) || !d.evidence_ids.length || new Set(d.evidence_ids).size !== d.evidence_ids.length || d.evidence_ids.some(id => !idsConsidered.includes(id))) throw new Error("draft must name nonempty, distinct evidence_ids from this exact owed batch");
+        const coverage = [{ session_id: j.session_id, evidence_ids: d.evidence_ids }];
         const r = recordDraft(cfg, {
           type: d.type,
-          fields: d.fields,
+          fields: { ...d.fields, capture_coverage: coverage },
           capture: { method: "transcript_fallback", session: j.session_id, agent: ev.agent, reason: c.reason },
         });
         ids.push(r.id);
+        acknowledgeCapture({ schema: "ledger-capture/v1", action: "record", status: "pending_review", record_id: r.id, coverage }, { dir, now: opts.now });
+        d.evidence_ids.forEach(id => covered.add(id));
       } catch (e: any) {
         errors.push(`${d.type}: ${String(e?.message ?? e).slice(0, 160)}`);
       }
     }
-    if (ids.length) mark("drafts", `${parsed.reason}${errors.length ? ` (${errors.length} draft(s) rejected: ${errors.join("; ")})` : ""}`, ids);
+    if (ids.length) mark("drafts", `${parsed.reason}${errors.length ? ` (${errors.length} draft(s) rejected: ${errors.join("; ")})` : ""}`, ids, [...covered]);
     else mark("error", `every draft was rejected: ${errors.join("; ")}`);
   }
   return results;

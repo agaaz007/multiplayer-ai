@@ -360,7 +360,10 @@ export function threadLine(s: ThreadSummary, now = new Date()): string {
   const ago = (d: Date | null | undefined) => (d ? `${Math.round((now.getTime() - new Date(d).getTime()) / 60000)}m ago` : "never");
   const ended = ls?.ended_at ? "ended" : ls?.last_seen_at && now.getTime() - new Date(ls.last_seen_at).getTime() > 10 * 60_000 ? "went quiet" : "active";
   const claim = s.claim ? `claimed by ${s.claim.holder_author}` : "unclaimed";
-  const snap = s.head?.verified_snapshot_at ? `snapshot ${ago(s.head.verified_snapshot_at)}` : "no verified snapshot";
+  // The head checkpoint can be a later `turn` checkpoint with no snapshot verification of its own; the
+  // session row keeps the last remotely verified snapshot, so fall back to it before saying "none".
+  const verifiedAt = s.head?.verified_snapshot_at ?? ls?.last_verified_snapshot_at ?? null;
+  const snap = verifiedAt ? `snapshot ${ago(verifiedAt)}` : "no verified snapshot";
   const first = (s.first_instruction ?? s.goal ?? "").replace(/\s+/g, " ").slice(0, 90);
   const last = (s.last_message ?? "").replace(/\s+/g, " ").slice(0, 90);
   return `- ${s.created_by} · ${ls?.harness ?? "?"} · ${path.basename(s.repo)}${s.branch ? ` · ${s.branch}` : ""} · last seen ${ago(ls?.last_seen_at)} (${ended}) · ${snap} · ${claim}\n  "${first}"${last ? ` → "${last}"` : ""}\n  ${s.id}`;

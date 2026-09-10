@@ -290,16 +290,16 @@ await R.linkSpan(pool, { record_id: recTypo.id, session_id: sidU, from_seq: 4, t
   const p2 = await R.addStateUpdate(pool, { record_id: recBanner.id, session_id: sidR, from_seq: 1, to_seq: 4, kind: "progress", text: "Banner added; 360px CTA fix landed", created_by: "agaaz", supersedes: p1.id });
   assert.equal(p2.supersedes, p1.id);
   st = (await R.recordState(pool, recBanner.id))!;
-  assert.deepEqual(st.progress.map((u) => u.id), [p2.id], "superseded p1 excluded, p2 included");
+  assert.deepEqual(st.progress.map((u) => u.id), [p1.id, p2.id], "proposal remains visible alongside accepted predecessor");
   assert.equal(st.proposed_count, 1);
-  assert.equal(st.confirmed_count, 0, "the superseded confirmed update no longer counts");
+  assert.equal(st.confirmed_count, 1, "a proposal cannot hide a confirmed update");
   assert.equal(st.record.state_version, 1);
   assert.equal((await pool.query(`select status from cont_state_updates where id = $1`, [p1.id])).rows[0].status, "confirmed", "p1 is kept, not edited");
 
   const p3 = await R.addStateUpdate(pool, { record_id: recBanner.id, kind: "progress", text: "mistaken refresh", created_by: "agaaz", supersedes: p2.id });
   await R.rejectStateUpdate(pool, p3.id, "rachit", "wrong record");
   st = (await R.recordState(pool, recBanner.id))!;
-  assert.deepEqual(st.progress.map((u) => u.id), [p2.id], "a rejected superseder does not hide what it tried to replace");
+  assert.deepEqual(st.progress.map((u) => u.id), [p1.id, p2.id], "rejection leaves accepted predecessor and pending proposal visible");
 
   await R.confirmStateUpdate(pool, p2.id, "rachit");
   st = (await R.recordState(pool, recBanner.id))!;
@@ -427,5 +427,17 @@ await R.linkSpan(pool, { record_id: recTypo.id, session_id: sidU, from_seq: 4, t
   ok("invalid inputs: reversed/negative spans, unknown session/record/source/kind, out-of-range confidence, malformed evidence all throw; confirm/reject on a missing id return null");
 }
 
+{
+  const rec = await R.createRecord(pool,{kind:'investigation',title:'Branch conflict regression',created_by:'agaaz'});
+  const a = await R.addStateUpdate(pool,{record_id:rec.id,kind:'decision',text:'original',created_by:'agaaz',status:'confirmed'});
+  const b = await R.addStateUpdate(pool,{record_id:rec.id,kind:'decision',text:'left branch',created_by:'agaaz',status:'confirmed',supersedes:a.id});
+  const c = await R.addStateUpdate(pool,{record_id:rec.id,kind:'decision',text:'right branch',created_by:'rachit',status:'confirmed',supersedes:a.id});
+  const d = await R.addStateUpdate(pool,{record_id:rec.id,kind:'decision',text:'left branch continued',created_by:'agaaz',status:'confirmed',supersedes:b.id});
+  const state = (await R.recordState(pool,rec.id))!;
+  assert.equal(state.conflicts.length,1);
+  assert.deepEqual(new Set(state.conflicts[0].update_ids),new Set([c.id,d.id]));
+  await assert.rejects(R.addStateUpdate(pool,{record_id:rec.id,kind:'note',text:'invented evidence',created_by:'agaaz',evidence:[{session_id:sidR,seq:99999}]}),/evidence event not found/);
+  ok('advancing one accepted branch cannot erase a conflict; fabricated event references rejected');
+}
 await closePools();
 console.log(`selftest-records: ok (${step} checks) — tmp ${tmp}`);

@@ -270,6 +270,40 @@ const packB = await buildResumePack(cfg, pool, B.t.id, { mode: "inspect", author
   assert.equal(none.total, 0);
   assert.match(none.text, /^no events match/);
   ok("queryEvents: kinds, path, q (text and output_preview), after/before seq, limit with trailer and cursor, seq ordering, line format with artifact marker, full text via preview_chars");
+
+  // A rendered session id is a prefix: every surface shortens it to 8 characters, so the shortened
+  // form must work. Before this resolved, a prefix matched no rows and read exactly like an empty
+  // session, which sent agents to bulk thread reads instead.
+  const short = A.sid.slice(0, 8);
+  assert.notEqual(short, A.sid, "fixture id is longer than the rendered prefix");
+  const byPrefix = await queryEvents(pool, { session_id: short, kinds: ["instruction.added"] });
+  const byFull = await queryEvents(pool, { session_id: A.sid, kinds: ["instruction.added"] });
+  assert.ok(byFull.events.length > 0, "the fixture session has instruction events");
+  assert.deepEqual(byPrefix.events.map((e) => e.producer_event_id), byFull.events.map((e) => e.producer_event_id), "a prefix returns exactly what the full id returns");
+  assert.equal(byPrefix.session_id, A.sid, "the resolved id is reported");
+  assert.equal(byPrefix.lines[0], `session ${short} is ${A.sid}; pass the full id.`, "the full id is taught on the first line");
+  assert.ok(!byFull.lines[0].startsWith("session "), "an exact id adds no resolution line");
+
+  // An unknown id is an error, never an empty result: that conflation was the bug.
+  await assert.rejects(queryEvents(pool, { session_id: "01a08bad" }), /unknown session id "01a08bad": no captured session has that id or prefix/);
+  // An ambiguous prefix names the candidates instead of silently picking one.
+  await assert.rejects(queryEvents(pool, { session_id: B.sid.slice(0, 8) }), /ambiguous session id "sess-com": matches sess-compact, sess-compact-2\. Pass more characters\./);
+  // A session that exists but has nothing matching still reports empty, not an error.
+  assert.equal((await queryEvents(pool, { session_id: short, q: "zzz-nothing-matches" })).total, 0, "a resolvable id with no matches is still an empty result");
+  ok("queryEvents: rendered 8-char session ids resolve, unknown and ambiguous ids throw, genuinely empty stays empty");
+
+  // Record packs print `thread ${short(id)}` beside each session, and thread ids are a real uuid
+  // column: an unresolved prefix used to fail the ::uuid cast with an opaque database error.
+  const tShort = A.t.id.slice(0, 8);
+  const byThreadPrefix = await queryEvents(pool, { thread_id: tShort, kinds: ["instruction.added"] });
+  const byThreadFull = await queryEvents(pool, { thread_id: A.t.id, kinds: ["instruction.added"] });
+  assert.ok(byThreadFull.events.length > 0, "the fixture thread has instruction events");
+  assert.deepEqual(byThreadPrefix.events.map((e) => e.producer_event_id), byThreadFull.events.map((e) => e.producer_event_id), "a thread prefix returns what the full id returns");
+  await assert.rejects(queryEvents(pool, { thread_id: "ffffffff" }), /not a thread id: ffffffff \(no thread has that id or prefix\)/);
+  // getThread backs ledger_thread_get/note/bind/release; the same rendered prefix must work there.
+  assert.equal((await S.getThread(pool, tShort))?.id, A.t.id, "getThread resolves the rendered prefix");
+  assert.equal(await S.getThread(pool, "ffffffff"), null, "an unknown thread prefix is still null, not a database error");
+  ok("thread ids: rendered 8-char prefixes resolve in queryEvents and getThread; unknown stays a clean miss");
 }
 
 // ---------- 6. getArtifact ----------

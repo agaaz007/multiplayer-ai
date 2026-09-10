@@ -45,8 +45,80 @@ export interface EventQueryResult {
   total: number;
   truncated: boolean;
   next_after_seq: number | null;
+  /** the full session id the query ran against, once a prefix has been resolved */
+  session_id: string | null;
   lines: string[];
   text: string;
+}
+
+/** How many candidates an ambiguous-prefix error names before it says "and N more". */
+const AMBIGUOUS_SHOWN = 5;
+
+/**
+ * Resolve a session id that may be a prefix of the real one.
+ *
+ * Session ids are opaque text (`cont_sessions.id`), not uuids: harnesses mint
+ * their own. Every surface that *renders* one shortens it to 8 characters
+ * (`recordpack.ts`'s `short`, the `ledger_evidence_search` line format), so the
+ * only id an agent ever sees is a prefix. Matching on equality alone therefore
+ * turned every id an agent could actually obtain into a silent empty result,
+ * indistinguishable from a session that genuinely has no matching events.
+ *
+ * Exact match wins; otherwise a prefix is accepted when exactly one session
+ * shares it. Unknown and ambiguous ids throw, so they can never again be read
+ * as "this session has nothing".
+ */
+export async function resolveSessionId(q: Q, given: string): Promise<{ id: string; resolvedFromPrefix: boolean }> {
+  const raw = String(given ?? "").trim();
+  if (!raw) throw new Error("session_id is empty");
+  const exact = await q.query<{ ok: number }>(
+    `select 1 as ok from cont_sessions where id = $1
+      union all
+     select 1 as ok from cont_events where session_id = $1
+      limit 1`,
+    [raw]
+  );
+  if (exact.rows.length) return { id: raw, resolvedFromPrefix: false };
+  // left(id, length($1)) = $1 is a prefix test that cannot be confused by the
+  // LIKE metacharacters (_ and %) that appear in real harness session ids.
+  const pref = await q.query<{ id: string }>(
+    `select id from (
+       select id from cont_sessions where left(id, length($1)) = $1
+        union
+       select distinct session_id as id from cont_events where left(session_id, length($1)) = $1
+     ) c order by id limit ${AMBIGUOUS_SHOWN + 1}`,
+    [raw]
+  );
+  const ids = pref.rows.map((r) => r.id);
+  if (!ids.length) throw new Error(`unknown session id ${JSON.stringify(raw)}: no captured session has that id or prefix`);
+  if (ids.length > 1) {
+    const shown = ids.slice(0, AMBIGUOUS_SHOWN).join(", ");
+    const more = ids.length > AMBIGUOUS_SHOWN ? ` (and more)` : "";
+    throw new Error(`ambiguous session id ${JSON.stringify(raw)}: matches ${shown}${more}. Pass more characters.`);
+  }
+  return { id: ids[0], resolvedFromPrefix: true };
+}
+
+/**
+ * Resolve a thread id that may be the 8-character form record packs render
+ * (`recordpack.ts` prints `thread ${short(id)}` beside each session). Thread ids
+ * are real uuids, so an unresolved prefix does not merely miss — it fails the
+ * `::uuid` cast with an opaque database error. Returns null when nothing matches,
+ * so callers that treat "no such thread" as null keep doing so; an ambiguous
+ * prefix throws rather than picking one.
+ */
+export async function resolveThreadId(q: Q, given: string): Promise<string | null> {
+  const raw = String(given ?? "").trim();
+  if (!raw) return null;
+  if (UUID.test(raw)) return raw;
+  const r = await q.query<{ id: string }>(
+    `select id::text as id from cont_threads where left(id::text, length($1)) = $1 order by id limit ${AMBIGUOUS_SHOWN + 1}`,
+    [raw]
+  );
+  const ids = r.rows.map((x) => x.id);
+  if (!ids.length) return null;
+  if (ids.length > 1) throw new Error(`ambiguous thread id ${JSON.stringify(raw)}: matches ${ids.slice(0, AMBIGUOUS_SHOWN).join(", ")}${ids.length > AMBIGUOUS_SHOWN ? " (and more)" : ""}. Pass more characters.`);
+  return ids[0];
 }
 
 /**
@@ -57,13 +129,16 @@ export interface EventQueryResult {
  */
 export async function queryEvents(q: Q, f: EventFilters): Promise<EventQueryResult> {
   if (!f.thread_id && !f.session_id) throw new Error("thread_id or session_id is required");
-  if (f.thread_id && !UUID.test(f.thread_id)) throw new Error(`not a thread id: ${f.thread_id}`);
+  const thread_id = f.thread_id ? await resolveThreadId(q, f.thread_id) : undefined;
+  if (f.thread_id && !thread_id) throw new Error(`not a thread id: ${f.thread_id} (no thread has that id or prefix)`);
+  const session = f.session_id ? await resolveSessionId(q, f.session_id) : null;
+  const session_id = session?.id;
   const limit = Math.min(Math.max(1, Math.floor(f.limit ?? EVENTS_DEFAULT_LIMIT)), EVENTS_MAX_LIMIT);
   const preview = Math.min(Math.max(20, Math.floor(f.preview_chars ?? PREVIEW_CHARS)), PREVIEW_MAX_CHARS);
   const params: unknown[] = [];
   const where: string[] = [];
-  if (f.thread_id) { params.push(f.thread_id); where.push(`thread_id = $${params.length}::uuid`); }
-  if (f.session_id) { params.push(f.session_id); where.push(`session_id = $${params.length}`); }
+  if (thread_id) { params.push(thread_id); where.push(`thread_id = $${params.length}::uuid`); }
+  if (session_id) { params.push(session_id); where.push(`session_id = $${params.length}`); }
   if (f.kinds?.length) { params.push(f.kinds); where.push(`kind = any($${params.length})`); }
   if (f.path) { params.push(f.path); where.push(`(position($${params.length} in coalesce(payload->>'path','')) > 0 or position($${params.length} in coalesce(payload->>'input','')) > 0)`); }
   if (f.q) { params.push(f.q.toLowerCase()); where.push(`position($${params.length} in lower(coalesce(payload->>'text','') || ' ' || coalesce(payload->>'input','') || ' ' || coalesce(payload->>'output_preview',''))) > 0`); }
@@ -71,7 +146,7 @@ export async function queryEvents(q: Q, f: EventFilters): Promise<EventQueryResu
   if (f.before_seq != null) { params.push(Math.floor(f.before_seq)); where.push(`seq < $${params.length}`); }
   const w = where.join(" and ");
   const total = (await q.query<{ n: number }>(`select count(*)::int as n from cont_events where ${w}`, params)).rows[0].n;
-  const order = f.session_id ? "e.seq asc, e.id asc" : "e.id asc";
+  const order = session_id ? "e.seq asc, e.id asc" : "e.id asc";
   // a result row often carries no tool name (Codex outputs only have call_id): borrow it from the matching request
   const r = await q.query<EventLineRow>(
     `select e.*, case when e.kind = 'tool.finished' and e.payload->>'tool' is null and e.call_id is not null
@@ -84,9 +159,11 @@ export async function queryEvents(q: Q, f: EventFilters): Promise<EventQueryResu
   const lines = events.map((e) => eventLine(e, preview));
   const last = events[events.length - 1];
   const next_after_seq = truncated && last ? last.seq : null;
-  if (!events.length) lines.push(`no events match${f.thread_id ? ` on thread ${f.thread_id}` : ""}${f.session_id ? ` in session ${f.session_id}` : ""}.`);
-  else if (truncated) lines.push(`showing ${events.length} of ${total} matching; next: after_seq=${last.seq}${f.thread_id && !f.session_id && new Set(events.map((e) => e.session_id)).size > 1 ? ` (thread spans several sessions; seq is per session, add session_id="${last.session_id}" for an exact cursor)` : ""}`);
-  return { events, total, truncated, next_after_seq, lines, text: lines.join("\n") };
+  if (!events.length) lines.push(`no events match${thread_id ? ` on thread ${thread_id}` : ""}${session_id ? ` in session ${session_id}` : ""}.`);
+  else if (truncated) lines.push(`showing ${events.length} of ${total} matching; next: after_seq=${last.seq}${thread_id && !session_id && new Set(events.map((e) => e.session_id)).size > 1 ? ` (thread spans several sessions; seq is per session, add session_id="${last.session_id}" for an exact cursor)` : ""}`);
+  // Teach the full id once, so the next call can skip the prefix lookup.
+  if (session?.resolvedFromPrefix) lines.unshift(`session ${f.session_id} is ${session.id}; pass the full id.`);
+  return { events, total, truncated, next_after_seq, session_id: session_id ?? null, lines, text: lines.join("\n") };
 }
 
 /** `seq · HH:MM · kind · <preview>`; tool.finished adds `[artifact <id>]` when one was stored. */
@@ -123,6 +200,11 @@ export function eventLine(e: EventLineRow, previewChars = PREVIEW_CHARS): string
   }
   let line = `${e.seq} · ${hhmm} · ${e.kind} · ${clip(body)}`;
   if (e.kind === "tool.finished" && p.artifact_id) line += ` [artifact ${p.artifact_id}]`;
+  if (e.kind === 'tool.requested') {
+    if (p.input_artifact_id) line += ` [input artifact ${p.input_artifact_id}; sha256 ${p.input_artifact_sha256 ?? p.input_sha256 ?? 'unknown'}]`;
+    if (p.input_complete === false) line += ' [input incomplete: do not claim this preview is the original query]';
+    if (Array.isArray(p.evidence_ids) && p.evidence_ids.length) line += ` [capture evidence ${p.evidence_ids.join(', ')}]`;
+  }
   return line;
 }
 

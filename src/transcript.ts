@@ -2,6 +2,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DEFAULT_DATA_TOOLS, isDataTool, summarize } from "./hooks.js";
+import { canonicalToolName, dataToolCalls, evidenceId, inputText, savedRecord, type CapturedToolCall } from "./capture-tools.js";
+import { redactText } from "./continuity/redact.js";
 
 /**
  * Read a Claude Code or Codex transcript into the evidence the fallback
@@ -25,6 +27,13 @@ export interface EvidenceQuery {
   input: string;
   output: string;
   at?: string;
+  evidence_id?: string;
+  call_id?: string;
+  input_json?: string;
+  input_complete?: boolean;
+  output_complete?: boolean;
+  output_binding?: "direct" | "wrapper_aggregate";
+  input_limitations?: string[];
 }
 
 export interface Evidence {
@@ -126,12 +135,36 @@ function textOf(content: unknown): string {
 }
 
 function isLedgerRecord(name: string): boolean {
-  return RECORD_TOOL.test(name);
+  return RECORD_TOOL.test(canonicalToolName(name));
+}
+
+function queryFromCall(call: CapturedToolCall, at?: string): EvidenceQuery {
+  const raw = inputText(call.input);
+  let query = raw;
+  if (call.input && typeof call.input === "object") {
+    for (const key of ["sql", "query", "command", "cmd", "question", "text", "prompt", "q", "jql", "expression"]) {
+      const value = (call.input as any)[key]; if (typeof value === "string" && value.trim()) { query = value; break; }
+    }
+  }
+  // Full permitted inputs are retained here; display packing must refuse oversize required evidence explicitly.
+  const redQuery = redactText(query), redParams = redactText(raw);
+  const limitations = [...(!call.input_complete ? ["wrapper arguments unresolved"] : []), ...(redQuery.hits || redParams.hits ? ["input redacted"] : [])];
+  return { tool: call.tool, input: redQuery.text, input_json: redParams.text, output: "", at,
+    call_id: call.call_id, evidence_id: evidenceId(call.call_id, call.tool, at, call.input), input_complete: !limitations.length, input_limitations: limitations,
+    output_complete: false, output_binding: call.wrapper ? "wrapper_aggregate" : "direct" };
+}
+
+function attachOutput(queries: EvidenceQuery[], output: string): void {
+  for (const query of queries) {
+    const result = redactText(output), redacted = result.text;
+    query.output = redacted.length > 12_000 ? `${redacted.slice(0, 12_000)}\n[output truncated; inspect original artifact]` : redacted;
+    query.output_complete = result.hits === 0 && redacted.length <= 12_000 && query.output_binding !== "wrapper_aggregate";
+  }
 }
 
 function parseClaude(file: string, dataTools: string[]): Evidence {
   const ev: Evidence = { agent: "claude", session_id: path.basename(file, ".jsonl"), path: file, mtime: fs.statSync(file).mtimeMs, prompts: [], queries: [], records: [], conclusions: [] };
-  const pending = new Map<string, EvidenceQuery>(); // tool_use id -> query awaiting its result
+  const pending = new Map<string, EvidenceQuery[]>(); // wrapper/native request id -> query obligations
   const recordIds = new Map<string, { tool: string; title: string }>();
   for (const j of lines(file)) {
     if (j.sessionId && !ev.session_id) ev.session_id = j.sessionId;
@@ -151,12 +184,12 @@ function parseClaude(file: string, dataTools: string[]): Evidence {
         if (c?.type === "tool_result") {
           const q = pending.get(c.tool_use_id);
           if (q) {
-            q.output = clip(textOf(c.content) || j.toolUseResult?.stdout || "", 1200);
+            attachOutput(q, textOf(c.content) || j.toolUseResult?.stdout || "");
             pending.delete(c.tool_use_id);
           }
           const r = recordIds.get(c.tool_use_id);
           if (r) {
-            ev.records.push({ ...r, ok: !c.is_error && /Recorded /.test(textOf(c.content)) });
+            ev.records.push({ ...r, ok: !c.is_error && !!savedRecord(textOf(c.content)) });
             recordIds.delete(c.tool_use_id);
           }
         }
@@ -167,10 +200,9 @@ function parseClaude(file: string, dataTools: string[]): Evidence {
         if (c?.type === "tool_use") {
           const name = String(c.name ?? "");
           if (isLedgerRecord(name)) recordIds.set(c.id, { tool: name, title: clip(c.input?.title, 140) });
-          else if (isDataTool(name, c.input, dataTools)) {
-            const q: EvidenceQuery = { tool: name, input: summarize(c.input, 4000), output: "", at: j.timestamp };
-            ev.queries.push(q);
-            pending.set(c.id, q);
+          else {
+            const queries = dataToolCalls(name, c.input, String(c.id), dataTools).map(call => queryFromCall(call, j.timestamp));
+            if (queries.length) { ev.queries.push(...queries); pending.set(c.id, queries); }
           }
         }
       }
@@ -181,7 +213,7 @@ function parseClaude(file: string, dataTools: string[]): Evidence {
 
 function parseCodex(file: string, dataTools: string[]): Evidence {
   const ev: Evidence = { agent: "codex", session_id: "", path: file, mtime: fs.statSync(file).mtimeMs, prompts: [], queries: [], records: [], conclusions: [] };
-  const pending = new Map<string, EvidenceQuery>();
+  const pending = new Map<string, EvidenceQuery[]>();
   const recordIds = new Map<string, { tool: string; title: string }>();
   // Older rollouts carry prompts/replies as event_msg user_message/agent_message; newer ones as
   // response_item message with a role. A file may contain both for the same turn, so collect the
@@ -217,7 +249,7 @@ function parseCodex(file: string, dataTools: string[]): Evidence {
       const name = String(p.name ?? "");
       let input: any;
       if (p.type === "custom_tool_call") {
-        input = name === "exec" ? codexExecCommands(String(p.input ?? "")) : String(p.input ?? "");
+        input = String(p.input ?? "");
       } else {
         try {
           input = typeof p.arguments === "string" ? JSON.parse(p.arguments) : p.arguments ?? {};
@@ -226,21 +258,20 @@ function parseCodex(file: string, dataTools: string[]): Evidence {
         }
       }
       if (isLedgerRecord(name)) recordIds.set(p.call_id, { tool: name, title: clip(input?.title, 140) });
-      else if (isDataTool(name, input, dataTools)) {
-        const q: EvidenceQuery = { tool: name, input: summarize(input, 4000), output: "", at: j.timestamp };
-        ev.queries.push(q);
-        pending.set(p.call_id, q);
+      else {
+        const queries = dataToolCalls(name, input, String(p.call_id), dataTools).map(call => queryFromCall(call, j.timestamp));
+        if (queries.length) { ev.queries.push(...queries); pending.set(p.call_id, queries); }
       }
     } else if (j.type === "response_item" && (p.type === "function_call_output" || p.type === "custom_tool_call_output")) {
       const out = codexOutputText(p.output);
       const q = pending.get(p.call_id);
       if (q) {
-        q.output = clip(out, 1200);
+        attachOutput(q, out);
         pending.delete(p.call_id);
       }
       const r = recordIds.get(p.call_id);
       if (r) {
-        ev.records.push({ ...r, ok: /Recorded /.test(out) });
+        ev.records.push({ ...r, ok: !!savedRecord(out) });
         recordIds.delete(p.call_id);
       }
     }
@@ -263,25 +294,26 @@ export function hasMaterialActivity(ev: Evidence): boolean {
   return ev.queries.length > 0;
 }
 
-/** The evidence pack the extractor reads. Most recent material wins when the cap bites. */
+/** Required query evidence wins the budget. Never turn missing input into an apparently complete finding. */
 export function evidenceText(ev: Evidence, maxChars = 40_000): string {
   const head = [
     `Session ${ev.session_id} (${ev.agent})${ev.cwd ? ` in ${ev.cwd}` : ""}${ev.started ? `, ${ev.started.slice(0, 16)} to ${ev.ended?.slice(0, 16) ?? "?"}` : ""}.`,
     `${ev.queries.length} data-tool calls, ${ev.records.length} ledger records, ${ev.prompts.length} human messages.`,
   ].join("\n");
   const blocks: string[] = [];
+  const required = ev.queries.length ? `## Data-tool calls and results\n` + ev.queries.map((q, i) =>
+    `### ${q.evidence_id ?? `query-${i + 1}`} · ${q.tool}${q.at ? ` @ ${q.at}` : ""}\ninput: ${q.input}\n` +
+    (q.input_json && q.input_json !== q.input ? `exact tool parameters: ${q.input_json}\n` : "") +
+    `input complete: ${q.input_complete === false ? `no; ${q.input_limitations?.join("; ") || "source incomplete"}` : "yes"}\n` +
+    `output binding: ${q.output_binding ?? "direct"}${q.output_complete === false ? "; incomplete or not independently bound" : ""}\noutput: ${q.output || "(no output captured)"}`
+  ).join("\n\n") : "";
+  if (head.length + required.length + 100 > maxChars) throw new Error(`Required query evidence exceeds ${maxChars} characters; no queries were discarded. Split this batch or retrieve the exact input/output artifacts. Evidence: ${ev.queries.map(q => q.evidence_id ?? q.call_id ?? q.tool).join(", ")}`);
   if (ev.records.length) {
     blocks.push(`## Already recorded live (do not duplicate)\n` + ev.records.map((r) => `- ${r.tool}: ${r.title}${r.ok ? "" : " (rejected)"}`).join("\n"));
   }
   if (ev.prompts.length) blocks.push(`## Human messages\n` + ev.prompts.map((p, i) => `${i + 1}. ${p}`).join("\n"));
-  if (ev.queries.length) {
-    blocks.push(
-      `## Data-tool calls and results\n` +
-        ev.queries.map((q, i) => `### ${i + 1}. ${q.tool}${q.at ? ` @ ${q.at.slice(11, 16)}` : ""}\ninput: ${q.input}\noutput: ${q.output || "(no output captured)"}`).join("\n\n")
-    );
-  }
   if (ev.conclusions.length) blocks.push(`## Agent's stated conclusions\n` + ev.conclusions.map((c, i) => `${i + 1}. ${c}`).join("\n"));
-  let body = blocks.join("\n\n");
-  if (body.length > maxChars) body = "…(earlier material trimmed)…\n" + body.slice(body.length - maxChars);
-  return head + "\n\n" + body;
+  const optional = blocks.join("\n\n"), room = Math.max(0, maxChars - head.length - required.length - 100);
+  const context = optional.length > room ? `[Narrative context omitted: ${optional.length - room} characters; all required queries retained.]\n${optional.slice(0, room)}` : optional;
+  return `${head}\n\n${required}\n\n${context}`;
 }

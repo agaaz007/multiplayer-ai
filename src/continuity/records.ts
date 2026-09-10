@@ -1,5 +1,6 @@
 import type pg from "pg";
 import type { EventRow } from "./store.js";
+import { resolveSessionId } from "./evidence.js";
 
 /**
  * Work records: the logical unit of work, separate from threads (the physical
@@ -91,6 +92,7 @@ export interface RecordState {
   proposed_count: number;
   confirmed_count: number;
   last_update_at: Date | null;
+  conflicts: { supersedes: string; update_ids: string[] }[];
   contributing_sessions: { session_id: string; author: string; harness: string; last_seen_at: Date | null; spans: number }[];
 }
 
@@ -191,11 +193,6 @@ function normalizeEvidence(ev: unknown): { session_id: string; seq: number }[] {
   });
 }
 
-async function sessionExists(q: Q, session_id: string): Promise<boolean> {
-  const r = await q.query(`select 1 from cont_sessions where id = $1`, [session_id]);
-  return (r.rowCount ?? 0) > 0;
-}
-
 async function requireRecord(q: Q, id: string): Promise<WorkRecord> {
   const rec = await getRecord(q, id);
   if (!rec) throw new Error(`record not found: ${id}`);
@@ -262,6 +259,20 @@ export async function updateRecordMeta(q: Q, id: string, patch: { title?: string
 
 // ---------- links (spans of a session's events that contribute to a record) ----------
 
+/**
+ * Resolve a session id that may be the shortened form every surface renders,
+ * keeping the historical "session not found" wording for genuinely unknown
+ * ids so existing callers and their error handling are unaffected.
+ */
+async function requireSession(q: Q, given: string): Promise<string> {
+  try {
+    return (await resolveSessionId(q, given)).id;
+  } catch (e: any) {
+    if (/^ambiguous session id/.test(String(e?.message))) throw e;
+    throw new Error(`session not found: ${given}`);
+  }
+}
+
 export async function linkSpan(q: Q, l: { record_id: string; session_id: string; from_seq: number; to_seq: number; source: LinkSource; confidence?: number | null; note?: string | null; created_by: string }): Promise<RecordLink> {
   assertOneOf(LINK_SOURCES, l.source, "link source");
   assertSeq(l.from_seq, "from_seq");
@@ -272,7 +283,7 @@ export async function linkSpan(q: Q, l: { record_id: string; session_id: string;
   const createdBy = requireText(l.created_by, "created_by");
   const sessionId = requireText(l.session_id, "session_id");
   await requireRecord(q, l.record_id);
-  if (!(await sessionExists(q, sessionId))) throw new Error(`session not found: ${sessionId}`);
+  const resolvedSessionId = await requireSession(q, sessionId);
   // Overlapping links from different sources are allowed on purpose: an explicit link can sit over a suggested one.
   // The record's updated_at moves in the same statement so listRecords reflects new evidence.
   const r = await q.query<RecordLink>(
@@ -281,7 +292,7 @@ export async function linkSpan(q: Q, l: { record_id: string; session_id: string;
        values ($1,$2,$3,$4,$5,$6,$7,$8) returning *
      ), r as (update cont_records set updated_at = now() where id = $1)
      select * from l`,
-    [l.record_id, sessionId, l.from_seq, l.to_seq, l.source, confidence, l.note ?? null, createdBy]
+    [l.record_id, resolvedSessionId, l.from_seq, l.to_seq, l.source, confidence, l.note ?? null, createdBy]
   );
   return r.rows[0];
 }
@@ -307,7 +318,8 @@ export async function sessionLinks(q: Q, session_id: string): Promise<RecordLink
 export async function unassignedSpans(q: Q, f: { session_id?: string; sinceHours?: number; author?: string; limit?: number } = {}): Promise<UnassignedSpan[]> {
   const params: unknown[] = [CONTENT_KINDS];
   const where: string[] = [`e.kind = any($1)`];
-  if (f.session_id) { params.push(f.session_id); where.push(`e.session_id = $${params.length}`); }
+  // a rendered session id is always an 8-char prefix; resolve it or fail loudly
+  if (f.session_id) { params.push((await resolveSessionId(q, f.session_id)).id); where.push(`e.session_id = $${params.length}`); }
   if (f.author) { params.push(f.author); where.push(`s.author = $${params.length}`); }
   if (f.sinceHours != null) { params.push(hours(f.sinceHours)); where.push(`coalesce(e.occurred_at, e.received_at) > now() - ($${params.length}::float8 * interval '1 hour')`); }
   type Ev = { session_id: string; seq: number; kind: string; at: Date; author: string; harness: string; text: string | null; input: string | null; path: string | null; tool: string | null };
@@ -387,7 +399,17 @@ export async function addStateUpdate(q: Q, u: { record_id: string; session_id?: 
   const sessionId = u.session_id ?? null;
   if (from != null && !sessionId) throw new Error("session_id is required when from_seq/to_seq are given");
   await requireRecord(q, u.record_id);
-  if (sessionId && !(await sessionExists(q, sessionId))) throw new Error(`session not found: ${sessionId}`);
+  const resolvedSessionId = sessionId ? await requireSession(q, sessionId) : sessionId;
+  for (const ref of evidence) {
+    // the caller's id may be the shortened form the brief and record packs print
+    try {
+      ref.session_id = await requireSession(q, ref.session_id);
+    } catch {
+      throw new Error(`evidence event not found: ${ref.session_id}:${ref.seq}`);
+    }
+    const exists = await q.query(`select 1 from cont_events where session_id = $1 and seq = $2`, [ref.session_id, ref.seq]);
+    if (!exists.rows.length) throw new Error(`evidence event not found: ${ref.session_id}:${ref.seq}`);
+  }
   const supersedes = u.supersedes ?? null;
   if (supersedes) {
     if (!isUuid(supersedes)) throw new Error(`superseded update not found: ${supersedes}`);
@@ -406,7 +428,7 @@ export async function addStateUpdate(q: Q, u: { record_id: string; session_id?: 
        update cont_records set state_version = state_version + $12::int, updated_at = now() where id = $1
      )
      select * from u`,
-    [u.record_id, sessionId, from, to, status, u.kind, text, JSON.stringify(evidence), createdBy, supersedes, confirmed ? createdBy : null, confirmed ? 1 : 0]
+    [u.record_id, resolvedSessionId, from, to, status, u.kind, text, JSON.stringify(evidence), createdBy, supersedes, confirmed ? createdBy : null, confirmed ? 1 : 0]
   );
   return r.rows[0];
 }
@@ -458,13 +480,13 @@ export async function recordState(q: Q, record_id: string): Promise<RecordState 
   const ups = await q.query<StateUpdate>(
     `select u.* from cont_state_updates u
       where u.record_id = $1 and u.status <> 'rejected'
-        and not exists (select 1 from cont_state_updates v where v.record_id = u.record_id and v.supersedes = u.id and v.status <> 'rejected')
+        and not exists (select 1 from cont_state_updates v where v.record_id = u.record_id and v.supersedes = u.id and v.status = 'confirmed')
       order by u.created_at, u.id`,
     [record_id]
   );
   const state: RecordState = {
     record, progress: [], decisions: [], hypotheses: [], blockers: [], next: [], contradictions: [], notes: [],
-    proposed_count: 0, confirmed_count: 0, last_update_at: null, contributing_sessions: [],
+    proposed_count: 0, confirmed_count: 0, last_update_at: null, conflicts: [], contributing_sessions: [],
   };
   const bucket: Record<UpdateKind, StateUpdate[]> = {
     progress: state.progress, decision: state.decisions, hypothesis: state.hypotheses, blocker: state.blockers,
@@ -488,19 +510,30 @@ export async function recordState(q: Q, record_id: string): Promise<RecordState 
     [record_id]
   );
   state.contributing_sessions = cs.rows;
+  const lineage = await q.query<{id:string;supersedes:string|null}>(`select id, supersedes from cont_state_updates where record_id=$1`,[record_id]);
+  const parents = new Map(lineage.rows.map(u=>[u.id,u.supersedes]));
+  const replacements = new Map<string, string[]>();
+  for (const u of ups.rows) if (u.status === 'confirmed' && u.supersedes) {
+    let root = u.supersedes;
+    const seen = new Set<string>();
+    while (parents.get(root) && !seen.has(root)) {seen.add(root);root=parents.get(root)!;}
+    replacements.set(root, [...(replacements.get(root) ?? []), u.id]);
+  }
+  state.conflicts = [...replacements].filter(([, ids]) => ids.length > 1).map(([supersedes, update_ids]) => ({ supersedes, update_ids }));
   return state;
 }
 
 // ---------- evidence retrieval across sessions ----------
 
 /** Events across every linked span of a record, ordered by occurred_at, each annotated with session author/harness. */
-export async function recordEvidence(q: Q, record_id: string, f: { kinds?: string[]; limit?: number; after?: Date | null; sources?: LinkSource[] } = {}): Promise<(EventRow & { author: string; harness: string; link_source: LinkSource })[]> {
+export async function recordEvidence(q: Q, record_id: string, f: { kinds?: string[]; limit?: number; after?: Date | null; sources?: LinkSource[]; order?: 'asc' | 'desc'; errorsOnly?: boolean } = {}): Promise<(EventRow & { author: string; harness: string; link_source: LinkSource })[]> {
   if (!isUuid(record_id)) return [];
   const params: unknown[] = [record_id];
   const where: string[] = [`l.record_id = $1`];
   if (f.sources?.length) { for (const s of f.sources) assertOneOf(LINK_SOURCES, s, "link source"); params.push(f.sources); where.push(`l.source = any($${params.length})`); }
   if (f.kinds?.length) { params.push(f.kinds); where.push(`e.kind = any($${params.length})`); }
   if (f.after) { params.push(f.after); where.push(`coalesce(e.occurred_at, e.received_at) > $${params.length}`); }
+  if (f.errorsOnly) where.push(`(e.payload->>'is_error' = 'true' or coalesce(e.payload->>'stderr_preview','') <> '')`);
   const limit = lim(f.limit, 200, 2000);
   // distinct on (e.id) keeps one row per event when spans overlap; the strongest link source wins.
   const r = await q.query<EventRow & { author: string; harness: string; link_source: LinkSource }>(
@@ -512,11 +545,21 @@ export async function recordEvidence(q: Q, record_id: string, f: { kinds?: strin
         where ${where.join(" and ")}
         order by e.id, ${SOURCE_RANK}, l.created_at
      ) x
-     order by x.occurred_at asc nulls last, x.id asc
+     order by coalesce(x.occurred_at, x.received_at) ${f.order === 'desc' ? 'desc' : 'asc'}, x.session_id ${f.order === 'desc' ? 'desc' : 'asc'}, x.seq ${f.order === 'desc' ? 'desc' : 'asc'}
      limit ${limit}`,
     params
   );
   return r.rows;
+}
+
+/** Count the entire linked history independently of a displayed head/tail window. */
+export async function recordEvidenceCount(q: Q, record_id: string, kinds: string[], sources: LinkSource[]): Promise<number> {
+  if (!isUuid(record_id)) return 0;
+  const r = await q.query<{ n: number }>(`select count(*)::int as n from cont_events e
+    where e.kind = any($2) and exists (select 1 from cont_record_links l
+      where l.record_id = $1 and l.session_id = e.session_id
+      and e.seq between l.from_seq and l.to_seq and l.source = any($3))`, [record_id, kinds, sources]);
+  return r.rows[0]?.n ?? 0;
 }
 
 /** Full-text search over event text (instructions, assistant messages, tool inputs, output previews, compaction summaries). */
@@ -528,7 +571,8 @@ export async function searchEvents(q: Q, query: string, f: { repo?: string | nul
   const where: string[] = [`${fts("e")} @@ ${tsq}`];
   if (f.repo === null) where.push(`s.repo is null`);
   else if (f.repo) { params.push(f.repo); where.push(`s.repo = $${params.length}`); }
-  if (f.session_id) { params.push(f.session_id); where.push(`e.session_id = $${params.length}`); }
+  // a rendered session id is always an 8-char prefix; resolve it, and let an unknown id be an error rather than an empty search
+  if (f.session_id) { params.push((await resolveSessionId(q, f.session_id)).id); where.push(`e.session_id = $${params.length}`); }
   if (f.record_id) {
     if (!isUuid(f.record_id)) return [];
     params.push(f.record_id);
