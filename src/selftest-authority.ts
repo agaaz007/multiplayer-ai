@@ -224,7 +224,20 @@ try {
   fs.writeFileSync(lock, JSON.stringify({ pid: process.pid + 1_000_000, host: os.hostname() }));
   try { assert.match(pull(a, true) ?? "", /pull deferred: another Ledger writer/); }
   finally { fs.unlinkSync(lock); }
-  console.log("authority: draft preservation, acceptance/version/scope guards, legacy recovery, exact dependencies, historical/future impact, and two-replica conflict tests passed");
+  // The value a ledger_record_* call hands back must be the one a dependency pin is checked
+  // against, or callers are forced back into ledger_get on objects they just wrote.
+  {
+    const fresh = get(record(cfg, { type: "definition", fields: definition({ title: "Pin round trip", metric: "pin_round_trip", analysis_scope: { ...scope, metric: "pin_round_trip" } }) }).id);
+    const handedBack = objectVersion(fresh);           // exactly what mcp.ts returns as content_version
+    const all = loadAll(cfg, undefined, false);
+    validateDependencies(all, { status: "stable", analysis_scope: { ...scope, metric: "pin_round_trip" },
+      dependencies: [{ relation: "uses-definition", id: fresh.id, version: handedBack }] }, "finding");
+    assert.throws(() => validateDependencies(all, { status: "stable", analysis_scope: { ...scope, metric: "pin_round_trip" },
+      dependencies: [{ relation: "uses-definition", id: fresh.id, version: "0".repeat(64) }] }, "finding"), /version mismatch/,
+      "and a wrong version is still refused");
+  }
+
+  console.log("authority: draft preservation, acceptance/version/scope guards, legacy recovery, exact dependencies, historical/future impact, two-replica conflict, and write-to-pin round trip tests passed");
 } finally {
   fs.rmSync(tmp, { recursive: true, force: true });
 }
