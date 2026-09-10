@@ -1,4 +1,4 @@
-# Ledger — shared team memory, read first, written last
+# Ledger — shared team memory, read before the work, recorded after the answer
 
 This machine has a `ledger` MCP server. It holds the team's canonical metric **definitions**, past **findings**, shipped **changes**, and **decisions** in force, as markdown files in a git repo that every teammate's agents read and write. You are the primary reader and the primary writer. A checkpoint names query evidence that still needs a scoped record or an explicit dismissal. Live recording is the primary path; transcript fallback can propose drafts, never accepted findings.
 
@@ -23,6 +23,21 @@ The brief is a bounded activity summary. It is not exhaustive task context. `led
 
 ---
 
+## Deliver first, then record
+
+The answer is the deliverable. The record is derived from it. Produce the answer for the person
+who asked, then record. Never spend the end of a bounded turn on bookkeeping while the answer is
+still unwritten: **a saved record with no delivered answer is a failed turn**, and it is the one
+failure the ledger cannot repair, because nothing in it reconstructs an answer you never gave.
+
+Recording early buys insurance you already hold: the Stop checkpoint, the SessionEnd transcript
+fallback and the 30-minute reconciler all run whether or not you remember them (see *What runs
+automatically*). It is paid for with the only budget that cannot be recovered. Short on time or
+context? Answer, then record compactly with `confidence: low` — a rough record with its
+assumptions written down beats a perfect one that arrived after the turn was killed.
+
+---
+
 ## The read loop
 
 Do these before the work, not after.
@@ -32,7 +47,7 @@ Do these before the work, not after.
 - **Before attributing a metric move:** `ledger_search` with type `change` over the window. Something probably shipped.
 - **Before proposing direction:** `ledger_search` with type `decision`. It may already be decided, or decided against.
 
-Pin analytical findings with `dependencies: [{relation: "uses-definition", id, version}]`, where `version` is the `content_version` returned by `ledger_get`. Use `derived-from` and `based-on` for exact prior-result dependencies. Keep `definitions_used` friendly names for compatibility; names alone do not establish lineage. New stable findings cannot use a corrected definition that is no longer applicable to their reporting window. Preserve old claims as historical evidence or drafts, rather than reviving them as current results.
+Pin analytical findings with `dependencies: [{relation: "uses-definition", id, version}]`, where `version` is the `content_version` returned by the `ledger_record_*` call that saved the object, or by `ledger_get` for one you did not write. Use `derived-from` and `based-on` for exact prior-result dependencies. Keep `definitions_used` friendly names for compatibility; names alone do not establish lineage. New stable findings cannot use a corrected definition that is no longer applicable to their reporting window. Preserve old claims as historical evidence or drafts, rather than reviving them as current results.
 
 A correction states its reason and whether it is `historical` or `future_only`, with effective dates. To replace accepted knowledge, include `acceptance: {actor, accepted_at, expected_predecessor: {id, version}, evidence_refs: [...]}`. Evidence references carry an `artifact_id` (a retained artifact or a Ledger object ID), SHA-256 and role. Fetch the original evidence and verify the query before accepting. Tool-boundary checks verify referenced content availability and hashes; they do not establish that the analytical reasoning is correct.
 
@@ -61,6 +76,12 @@ Compatible MCP Apps hosts can show expandable evidence cards. The chat receipt r
 "iOS users seem to convert better" is useless to a teammate two days later. What they need is: what exactly was concluded, from what inputs, by what method, under what assumptions, and how to reproduce it.
 
 `ledger_record_finding` rejects a record that lacks inputs, method, or assumptions. It also rejects an assumptions list with no implicit assumption, and tells you what to add. This is deliberate. The parts of an analysis people leave out are the parts that make two PMs get two different numbers.
+
+A successful write is its own confirmation. It returns the new id, the `content_version` to pin
+dependencies to, any supersession, the git sync status, similar prior findings, and the capture
+acknowledgment. **Do not re-read an object you just wrote** — `ledger_get` on it returns nothing
+the write did not already give you, and at a full context window that round trip is one of the
+most expensive calls you can make.
 
 Before recording, run the **key assumptions check**, three questions:
 

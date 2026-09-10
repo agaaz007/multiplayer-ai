@@ -859,6 +859,12 @@ const r2 = await client.callTool({
 const txt = JSON.stringify(r2);
 assert.ok(txt.includes("Recorded finding"), txt);
 assert.ok(txt.includes("superseded " + f1.id), "supersede via MCP");
+// The write hands back the pin the caller needs next, so nothing has to re-read a freshly
+// written object just to learn its content_version.
+const writtenVersion = (r2.structuredContent as any).content_version;
+assert.match(String(writtenVersion), /^[a-f0-9]{64}$/, "the record result carries content_version");
+assert.ok(txt.includes(`content_version: ${writtenVersion}`), "and states it in the text body");
+assert.ok(txt.includes("do not re-read this object"), "and says the re-read is unnecessary");
 const saved = (r2.structuredContent as any).receipt;
 assert.equal(saved.action, "saved");
 assert.equal(saved.records[0].id, saved.record_id);

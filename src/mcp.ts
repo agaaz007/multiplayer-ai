@@ -178,12 +178,20 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
         let objects: LedgerObject[] | null = null;
         try { objects = loadAll(cfg, TYPES, false); } catch { /* receipt reports unavailable details */ }
         const receipt = savedReceipt(type, fields, res, objects, cfg.git_sync);
+        // Hand back the pin the caller needs next. Without this the only way to learn a new
+        // object's content_version was ledger_get on the object you had just written, so every
+        // "record a definition, then pin a finding to it" cost an extra round trip.
+        const saved = objects?.find((o) => o.id === res.id) ?? null;
+        const contentVersion = saved ? objectVersion(saved) : null;
         const details =
           `Recorded ${type} ${res.id}` +
             (res.superseded ? ` (superseded ${res.superseded})` : "") +
             (res.git ? ` — ${res.git}` : "") +
+            (contentVersion
+              ? `\ncontent_version: ${contentVersion} — pin dependencies to this value; do not re-read this object to fetch it.`
+              : `\ncontent_version unavailable (the ledger could not be re-read); fetch it with ledger_get(${res.id}) before pinning a dependency.`) +
             warn + captureWarning;
-        return { content: [receiptText(receipt, details)], structuredContent: { receipt, ...(captureAck ? {capture_ack:captureAck} : {}) } };
+        return { content: [receiptText(receipt, details)], structuredContent: { receipt, ...(contentVersion ? { content_version: contentVersion } : {}), ...(captureAck ? {capture_ack:captureAck} : {}) } };
       }
     );
 
