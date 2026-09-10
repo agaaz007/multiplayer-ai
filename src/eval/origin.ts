@@ -1,8 +1,11 @@
 import path from "node:path";
 import { streamTranscript } from "../continuity/events.js";
 import type { FixtureEvent, Harness, OriginRun, OriginTurnResult, TrialContext } from "./types.js";
-import { appendJsonl, codexModelArgs, countCompactions, defaultModel, envKeys, newSessionId, otherHarness, runHarnessTurn, waitForTranscript, writeJson, type FakeToolCall, type TurnSpec } from "./harness.js";
+import { appendJsonl, codexModelArgs, countCompactions, defaultModel, envKeys, isFakeHarness, newSessionId, otherHarness, runHarnessTurn, waitForTranscript, writeJson, type FakeToolCall, type TurnSpec } from "./harness.js";
+import { prepareCodexHome } from "./successor.js";
 import { trialEnv, writeEmptyMcpConfig, writeTrialConfig } from "./fixture.js";
+import { claudeIsolationArgs } from "./claude-isolation.js";
+import { retainTranscript } from "./transcript-evidence.js";
 
 /**
  * Origin driver: one real harness turn per fixture event, in fixture order, each event
@@ -24,7 +27,7 @@ export const ORIGIN_TURN_TIMEOUT_MS = 300_000;
 export interface RunOriginOptions {
   /** per turn; on timeout the process group is killed and the turn is recorded as failed. Default 300 s. */
   timeoutMs?: number;
-  /** Claude only. undefined: an empty strict config (the user's global MCP servers alone exceed Haiku's 200k context); null: no --mcp-config; string: that file. */
+  /** Claude only. undefined: an empty strict config; null: strict MCP with no configured servers; string: that file. */
   mcpConfigPath?: string | null;
   allowedTools?: string[];
   extraEnv?: Record<string, string>;
@@ -69,8 +72,9 @@ export function originPrompt(text: string): string {
 
 /** Claude argv. The prompt sits right after -p because --add-dir / --allowedTools / --mcp-config are variadic and would swallow it. */
 export function claudeOriginArgs(prompt: string, sessionId: string, resume: boolean, model: string, addDir: string, mcpConfigPath: string | null, allowedTools?: string[]): string[] {
-  const a = ["-p", prompt, ...(resume ? ["--resume", sessionId] : ["--session-id", sessionId]), "--model", model, "--output-format", "json", "--dangerously-skip-permissions", "--append-system-prompt", ORIGIN_PROMPT_PREFIX];
-  if (mcpConfigPath) a.push("--mcp-config", mcpConfigPath, "--strict-mcp-config");
+  const a = ["-p", prompt, ...(resume ? ["--resume", sessionId] : ["--session-id", sessionId]), "--model", model, "--output-format", "json", "--dangerously-skip-permissions", "--append-system-prompt", ORIGIN_PROMPT_PREFIX, ...claudeIsolationArgs()];
+  if (mcpConfigPath) a.push("--mcp-config", mcpConfigPath);
+  a.push("--strict-mcp-config");
   a.push("--add-dir", addDir);
   if (allowedTools?.length) a.push("--allowedTools", ...allowedTools);
   return a;
@@ -99,6 +103,11 @@ export async function runOrigin(ctx: TrialContext, events: FixtureEvent[], opts:
   const primary = primarySessionLabel(events);
   const raw = ctx.paths.rawDir;
   const mcpConfigPath = opts.mcpConfigPath === undefined ? writeEmptyMcpConfig(ctx, "origin-mcp-empty.json") : opts.mcpConfigPath;
+  // Origin and successor have separate isolated Codex configs. Real personal MCP servers,
+  // hooks and memory must not contaminate a fixture or escape into the team database.
+  const originCodex = events.some((e) => harnessFor(ctx, e.session || primary, primary) === "codex")
+    ? prepareCodexHome(ctx, { cwd: ctx.paths.repo, mcpConfigPath, env: {}, allowedTools: [], preamble: "" }, "origin")
+    : null;
   const sessions = new Map<string, SessionState>();
   const turns: OriginTurnDetail[] = [];
   const invocations: Record<string, unknown>[] = [];
@@ -142,7 +151,7 @@ export async function runOrigin(ctx: TrialContext, events: FixtureEvent[], opts:
       const args = s.harness === "claude"
         ? claudeOriginArgs(prompt, s.sessionId!, resume, s.model, ctx.paths.repo, mcpConfigPath, opts.allowedTools)
         : codexOriginArgs(prompt, resume ? s.sessionId : null, s.model, ctx.paths.repo, lastMessageFile);
-      const env = trialEnv(ctx, opts.extraEnv);
+      const env = trialEnv(ctx, { ...opts.extraEnv, ...(s.harness === "codex" && originCodex ? { CODEX_HOME: originCodex.home } : {}) });
       const fakeCalls: FakeToolCall[] = s.harness === "claude"
         ? [{ name: "Bash", input: { command: "git status --short" }, output: "" }]
         : [{ name: "exec", input: { command: "git status --short" }, output: "Script completed\nOutput:\n" }];
@@ -179,6 +188,7 @@ export async function runOrigin(ctx: TrialContext, events: FixtureEvent[], opts:
       turns.push(detail);
       appendJsonl(path.join(raw, "origin-turns.jsonl"), { ...detail, stdout_chars: out.spawn.stdout.length, boot_tokens: out.bootTokens, total_input_tokens: out.totalInputTokens });
       ctx.log(`origin turn ${i + 1}/${events.length} ${label} ${s.harness} ${out.ok ? "ok" : `FAILED (${out.failure})`} wall_ms=${out.spawn.wallMs} in=${out.usage?.input_tokens ?? "?"} cache_read=${out.usage?.cache_read ?? "?"} out=${out.usage?.output_tokens ?? "?"} event=${ev.id}`);
+      if (!out.ok) break; // preserve the failed turn, then reject instead of spending more calls
     }
   } finally {
     if (configAuthor !== ctx.originAuthor) writeTrialConfig(ctx, ctx.originAuthor);
@@ -195,24 +205,28 @@ export async function runOrigin(ctx: TrialContext, events: FixtureEvent[], opts:
       continue;
     }
     sessionIds.push(s.sessionId);
-    const found = await waitForTranscript(s.sessionId);
+    const roots = s.harness === "codex" && originCodex && !isFakeHarness() ? { codex: path.join(originCodex.home, "sessions") } : undefined;
+    const found = await waitForTranscript(s.sessionId, 10_000, roots);
     if (!found) {
       ctx.log(`session ${s.label}: transcript for ${s.sessionId} not found`);
       transcriptNotes.push({ label: s.label, harness: s.harness, session_id: s.sessionId, transcript: null });
       continue;
     }
-    transcriptPaths.push(found.path);
-    const r = streamTranscript(found.path, 0, s.harness);
+    const retained = retainTranscript(raw, found.path, { role: "origin", harness: s.harness, sessionId: s.sessionId, synthetic: isFakeHarness() });
+    transcriptPaths.push(retained.path);
+    const r = streamTranscript(retained.path, 0, s.harness);
     const n = countCompactions(r.events, s.harness);
     compactions += n;
-    for (const t of turns) if (t.sessionId === s.sessionId) t.transcriptPath = found.path;
-    transcriptNotes.push({ label: s.label, harness: s.harness, session_id: s.sessionId, transcript: found.path, events: r.events.length, compactions: n, unknown_shapes: r.unknown });
-    ctx.log(`session ${s.label}: transcript ${found.path} (${r.events.length} events, ${n} compactions)`);
+    for (const t of turns) if (t.sessionId === s.sessionId) t.transcriptPath = retained.path;
+    transcriptNotes.push({ label: s.label, harness: s.harness, session_id: s.sessionId, transcript: retained.path, source_transcript: found.path, provenance: retained.provenancePath, sha256: retained.sha256, events: r.events.length, compactions: n, unknown_shapes: r.unknown });
+    ctx.log(`session ${s.label}: retained transcript ${retained.path} (${r.events.length} events, ${n} compactions)`);
   }
   const totalInputTokens = turns.reduce((n, t) => n + (t.usage?.input_tokens ?? 0) + (t.usage?.cache_read ?? 0), 0);
   const run: OriginRun = { harness: ctx.originHarness, sessionIds, turns, transcriptPaths, totalInputTokens, compactions };
   writeJson(path.join(raw, "origin-invocations.json"), { invocations, transcripts: transcriptNotes });
   writeJson(path.join(raw, "origin-run.json"), run);
+  const failed = turns.find((turn) => !turn.ok);
+  if (failed) throw new Error(`origin harness failed on turn ${failed.turnIndex + 1}: ${failed.failure}; see raw/origin-turns.jsonl. No continuation may be scored from failed origin turns.`);
   ctx.log(`origin run done: ${turns.filter((t) => t.ok).length}/${turns.length} turns ok, ${sessionIds.length} sessions, ${transcriptPaths.length} transcripts, ${totalInputTokens} input tokens (incl. cache reads), ${compactions} compactions`);
   return run;
 }

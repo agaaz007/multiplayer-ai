@@ -170,10 +170,12 @@ async function runTrial(request: AdapterRequest, args: Args, log: (l: string) =>
 
     const events = runner.originEvents?.(ctx) ?? request.case.events;
     let t = Date.now();
-    const origin: OriginRun = await drivers.runOrigin(ctx, events);
+    const origin: OriginRun = runner.runOrigin ? await runner.runOrigin(ctx) : await drivers.runOrigin(ctx, events);
     timings.origin_ms = Date.now() - t;
     log(`origin: ${origin.harness}, ${origin.turns.length} turns over ${origin.sessionIds.length} session(s), ${origin.totalInputTokens} input tokens, ${origin.compactions} compactions`);
     fs.writeFileSync(path.join(ctx.paths.rawDir, "origin-run.json"), JSON.stringify({ harness: origin.harness, sessionIds: origin.sessionIds, transcriptPaths: origin.transcriptPaths, totalInputTokens: origin.totalInputTokens, compactions: origin.compactions, turns: origin.turns.map((x) => ({ turn: x.turnIndex, event: x.fixtureEventId, session: x.sessionId, wall_ms: x.wallMs, usage: x.usage ?? null, assistant: x.assistantText.slice(0, 2000) })) }, null, 2) + "\n");
+
+    if (runner.afterOrigin) await runner.afterOrigin(ctx, origin);
 
     t = Date.now();
     const prep = await plugin.prepare(ctx, origin);
@@ -195,12 +197,14 @@ async function runTrial(request: AdapterRequest, args: Args, log: (l: string) =>
         log(`bootstrap(${args.condition}): no snapshot in this condition; recovered/ is the fresh clone at ${boot.worktree}`);
       }
       const recovered = path.join(ctx.paths.outputDir, "recovered");
+      if (fs.existsSync(recovered)) throw new Error("recovered/ already exists; use a fresh output directory so stale files cannot satisfy checks");
       copyTree(boot.worktree, recovered);
       const files = manifest(recovered);
       fs.writeFileSync(path.join(ctx.paths.rawDir, "bootstrap.json"), JSON.stringify({ condition: args.condition, ...boot, copied_to: "recovered", copied_at: new Date().toISOString(), files }, null, 2) + "\n");
       log(`recovered/: ${files.length} files copied before the successor started`);
     }
 
+    if (runner.beforeSuccessor) await runner.beforeSuccessor(ctx);
     t = Date.now();
     const successorStartedAt = Date.now();
     const successor: SuccessorRun = await drivers.runSuccessor(ctx, setup, request.case.resume_prompt, request.case.answer_keys);
@@ -209,6 +213,7 @@ async function runTrial(request: AdapterRequest, args: Args, log: (l: string) =>
 
     if (needsSnapshot(request.case)) {
       const final = path.join(ctx.paths.outputDir, "final");
+      if (fs.existsSync(final)) throw new Error("final/ already exists; use a fresh output directory so stale files cannot satisfy checks");
       copyTree(setup.cwd, final);
       fs.writeFileSync(path.join(ctx.paths.rawDir, "final-manifest.json"), JSON.stringify({ from: setup.cwd, files: manifest(final) }, null, 2) + "\n");
     }
@@ -226,9 +231,10 @@ async function runTrial(request: AdapterRequest, args: Args, log: (l: string) =>
       condition: args.condition, topology: "same-machine",
     };
     obs = { status: "completed", provenance, ...common, ...extra };
-    if (runner.after) await runner.after(ctx);
     return obs;
   } finally {
+    try { if (runner.after) await runner.after(ctx); }
+    catch (e: any) { log(`case cleanup failed: ${String(e?.message ?? e).slice(0, 300)}`); }
     try { await drivers.cleanupTrial(ctx, args.keep); log(`cleanup: ${args.keep ? "kept" : "removed"} ${ctx.paths.root}`); }
     catch (e: any) { log(`cleanup failed: ${String(e?.message ?? e).slice(0, 300)}`); }
   }

@@ -343,6 +343,13 @@ let oursServer: { command: string; args: string[]; env: Record<string, string> }
   assert.equal(oursServer.env.LEDGER_AUTHOR, "agaaz");
   assert.equal(oursServer.env.LEDGER_EVAL, "1");
   assert.equal(oursServer.env.LEDGER_CONTINUITY_DB, DB);
+  const guide = path.join(configDir, "condition-guides", "ledger.md");
+  assert.equal(oursServer.env.LEDGER_EVAL_GUIDE_PATH, guide);
+  const provenance = JSON.parse(fs.readFileSync(path.join(rawDir, "ours-guide.json"), "utf8"));
+  assert.deepEqual(fs.readFileSync(guide), fs.readFileSync(provenance.source_path));
+  assert.deepEqual(fs.readFileSync(provenance.retained_path), fs.readFileSync(guide));
+  assert.ok(setup.preamble.includes(`Full format in \`${guide}\`.`));
+  assert.ok(!setup.preamble.includes("Full format in ~/.claude/ledger.md."));
   const cfgFile = JSON.parse(fs.readFileSync(path.join(configDir, "config.json"), "utf8"));
   assert.equal(cfgFile.author, "agaaz", "trial config author switched to the successor");
   assert.deepEqual(cfgFile.continuity.include, ["generated/**"], "author switch preserved the other keys");
@@ -350,7 +357,8 @@ let oursServer: { command: string; args: string[]; env: Record<string, string> }
   assert.equal(setup.env.LEDGER_EVAL, "1");
   assert.ok(setup.allowedTools.includes("mcp__ledger__*") && setup.allowedTools.includes("Read"));
   assert.equal(setup.cwd, successorRepo);
-  assert.equal(setup.preamble, "");
+  assert.equal(setup.preamble, fs.readFileSync(path.join(rawDir, "ours-startup-brief.txt"), "utf8").trim());
+  assert.ok(setup.preamble.includes(sessA.thread_id!), "explicit startup brief includes the trial origin thread");
   ok("ours.successorSetup: MCP config runs `node cli.js mcp` against the trial config dir as agaaz with LEDGER_EVAL=1; author switched with fs");
 }
 {
@@ -361,6 +369,15 @@ let oursServer: { command: string; args: string[]; env: Record<string, string> }
   assert.ok(probe.text.includes("rachit"), probe.text);
   assert.ok(sameSnap(snap(realLedgerConfig), realLedgerBefore), "real ~/.ledger/config.json byte-identical after the MCP server ran");
   ok(`ledger MCP server from mcp-ours.json answered in ${probe.ms} ms with ${probe.tools.length} tools and lists both origin threads from the eval database`);
+}
+{
+  const probe = await mcpProbe(oursServer.command, oursServer.args, oursServer.env, "ledger_brief", { days: 14 });
+  assert.ok(probe.text.includes(`Full format in \`${oursServer.env.LEDGER_EVAL_GUIDE_PATH}\`.`));
+  assert.ok(!probe.text.includes("Full format in ~/.claude/ledger.md."), "a later MCP brief must not restore the global guide pointer");
+  const { brief } = await import("../query.js");
+  const cfg = withConfigDir(configDir, () => trialConfig(ctx, { write: false }));
+  assert.ok(brief(cfg).includes("Full format in ~/.claude/ledger.md."), "ordinary production brief default is unchanged");
+  ok("explicit startup and actual later MCP brief point to the same packaged guide; production default unchanged");
 }
 
 // bootstrapWorktree

@@ -222,6 +222,10 @@ function installExitHook() {
   process.on("exit", () => {
     for (const c of live) killGroup(c.pid, "SIGKILL");
   });
+  // The outer controller timeout sends SIGTERM. Node does not emit 'exit' for
+  // an unhandled signal, so explicitly clean up only the child groups we own.
+  process.once("SIGTERM", () => process.exit(143));
+  process.once("SIGINT", () => process.exit(130));
 }
 
 /** Run a harness process with a watchdog: on timeout the whole process group gets SIGTERM, then SIGKILL 5 s later. */
@@ -503,10 +507,10 @@ export function countCompactions(events: NormEvent[], harness: Harness): number 
 }
 
 /** Poll findTranscript for a session id; the harness flushes its transcript before exit, so this is usually immediate. */
-export async function waitForTranscript(sessionId: string, timeoutMs = 10_000): Promise<{ path: string; agent: Harness } | null> {
+export async function waitForTranscript(sessionId: string, timeoutMs = 10_000, roots: Roots = transcriptRoots()): Promise<{ path: string; agent: Harness } | null> {
   const until = Date.now() + timeoutMs;
   for (;;) {
-    const f = findTranscript(sessionId, undefined, transcriptRoots());
+    const f = findTranscript(sessionId, undefined, roots);
     if (f) return f;
     if (Date.now() >= until) return null;
     await new Promise((r) => setTimeout(r, 250));

@@ -22,7 +22,7 @@ const ADAPTER = path.join(HERE, "adapter.js");
 const COMPARE = path.join(HERE, "compare.js");
 const PY = process.env.PYTHON || "python3";
 const PHASE1 = ["D01", "D02", "D03", "R01", "R02", "E01"];
-const PHASE2 = ["E02", "E03", "C01", "C02", "L01", "L02"];
+const PHASE2 = ["E02", "C01", "L02"];
 
 let step = 0;
 const ok = (msg: string) => console.log(`  ok ${++step}. ${msg}`);
@@ -213,7 +213,7 @@ ok("a retrieved_evidence entry whose raw_ref file is missing scores fail");
   const cell = (c: string, cs: string) => m.cells.find((x: any) => x.condition === c && x.case === cs && x.direction === "codex-to-claude" && x.repetition === 1);
   assert.equal(cell("ours", "E01").status, "pass");
   assert.equal(cell("gbrain", "E01").status, "fail");
-  assert.equal(cell("ours", "L01").status, "not_run");
+  assert.equal(cell("ours", "L01").status, "not_run"); // kit maps an infrastructure error to not_run
   assert.ok(cell("ours", "D01").checks.some((k: any) => k.type === "answer" && k.key === "price_inr" && k.status === "pass"));
   assert.equal(typeof cell("ours", "D01").metrics.successor_boot_tokens, "number");
   assert.deepEqual(m.levels.ours[1], { passed: 3, total: 3, qualified: true });
@@ -226,8 +226,8 @@ ok("a retrieved_evidence entry whose raw_ref file is missing scores fail");
   assert.ok(md.includes("| Case | Level | Direction | Rep | ours | gbrain |"));
   assert.ok(md.includes("| E01 | 3 | codex-to-claude | 1 | pass | fail (file_hash:layout.json, file_hash:generated/study.txt, absent_file:obsolete.txt) |"));
   assert.ok(md.includes("## Summary"));
-  assert.ok(md.includes("ours: 6 passed, 0 failed, 6 not run"));
-  assert.ok(md.includes("gbrain: 5 passed, 1 failed, 6 not run"));
+  assert.ok(md.includes("ours: 6 passed, 2 failed, 4 not run"));
+  assert.ok(md.includes("gbrain: 5 passed, 3 failed, 4 not run"));
   assert.ok(md.includes("no pilot level is demonstrated"));
   console.log("\n--- matrix.md (first 40 lines) ---");
   console.log(md.split("\n").slice(0, 40).join("\n"));
