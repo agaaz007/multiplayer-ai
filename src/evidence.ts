@@ -4,6 +4,7 @@ import { type Config, loadAll } from "./store.js";
 import type { LedgerObject } from "./schema.js";
 import { renderFull } from "./query.js";
 import { readReceipt, receiptText } from "./receipts.js";
+import { objectVersion } from "./authority.js";
 
 export const EVIDENCE_URI = "ui://ledger/evidence-v1.html";
 export const ReferenceSchema = z.object({
@@ -22,7 +23,10 @@ export interface EvidenceSource {
   status: LedgerObject["status"];
   superseded_by?: string;
   summary: string;
+  /** hash of the rendered record, including lifecycle state: attests what was displayed */
   snapshot: string;
+  /** the immutable content pin dependencies[].version requires; stable across status changes */
+  content_version: string;
 }
 
 export interface EvidenceCard {
@@ -53,6 +57,10 @@ export function evidenceResult(
       ...(o.superseded_by ? { superseded_by: o.superseded_by } : {}),
       summary: String(o.fields.result ?? o.fields.formula ?? o.fields.decision ?? o.fields.what ?? o.description),
       snapshot: createHash("sha256").update(fullRecords[o.id]).digest("hex"),
+      // Emitted beside `snapshot` because they are different hashes and only this one is
+      // accepted as dependencies[].version. Without it, an agent that saw a single 64-hex
+      // value here and passed it got "dependency version mismatch" with no way to recover.
+      content_version: objectVersion(o),
     })),
     references: options.references ?? [],
     missing_ids: options.missing_ids ?? [],
@@ -70,7 +78,16 @@ export function contributionResult(cfg: Config, references: Reference[]) {
   const all = new Map(loadAll(cfg).map(o => [o.id, o]));
   const ids = [...new Set(references.map(r => r.id))];
   const missing = ids.filter(id => !all.has(id));
-  if (missing.length) throw new Error(`Unknown ledger record(s): ${missing.join(", ")}. Fetch valid records before attributing an answer.`);
+  if (missing.length) {
+    // A near miss is almost always a real record cited from task inputs or a stale note with a
+    // different date suffix. Naming it turns a dead end into one more call.
+    const near = missing.flatMap(id => {
+      const stem = id.replace(/^([a-z]+-)\d{8}-/, "$1").replace(/-[a-z0-9]{4}$/, "");
+      const hit = [...all.keys()].find(k => k !== id && k.replace(/^([a-z]+-)\d{8}-/, "$1").replace(/-[a-z0-9]{4}$/, "") === stem);
+      return hit ? [`${id} → did you mean ${hit}?`] : [];
+    });
+    throw new Error(`Unknown ledger record(s): ${missing.join(", ")}. ${near.length ? near.join(" ") + " " : ""}Fetch valid records with ledger_search before attributing an answer; an id from task inputs is not necessarily in this ledger.`);
+  }
   const objects = ids.map(id => all.get(id)!);
   const lines = [
     `Referenced ${objects.length} ledger record(s). Usage below is reported by the agent; this is not independent verification.`,

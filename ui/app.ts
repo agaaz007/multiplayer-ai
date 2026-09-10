@@ -110,7 +110,7 @@ function renderSources() {
     }
     const record = document.createElement("details"); record.className = "record";
     record.append(element("summary", "Inspect the original record"));
-    record.append(element("p", `${source.id} · Snapshot ${source.snapshot.slice(0, 12)}`, "secondary"));
+    record.append(element("p", `${source.id} · Content version ${source.content_version.slice(0, 12)}`, "secondary"));
     record.append(element("pre", fullRecords[source.id] ?? "Full record unavailable in this host. Fetch this ID with ledger_get."));
     content.append(record);
     if (app.getHostCapabilities()?.serverTools) {

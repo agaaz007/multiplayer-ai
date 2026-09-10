@@ -1,0 +1,10 @@
+[
+  {
+    "role": "origin", "person": "rachit-fixture", "harness": "codex", "model": "SET_EXPLICIT_ORIGIN_MODEL",
+    "prompt": "This is a separately labelled replay of Rachit's Analysis-tab PRD handoff, not a claim that you are Rachit. Inspect the pinned source checkout and read the approved source PRD artifact available at this source stage. Preserve the PRD, rejected duplicate planning form, measurement-review boundary, generation confirmation/idempotency constraints, and unfinished implementation state through this arm's native capture workflow. Stop after the declared incomplete source-stage change; do not finish or deploy the feature."
+  },
+  {
+    "role": "correction", "person": "agaaz-fixture", "harness": "claude", "model": "SET_EXPLICIT_CORRECTION_MODEL",
+    "prompt": "Retrieve the prior Analysis-tab PRD work through native memory. Review the handoff and distinguish confirmed source bytes from missing artifacts, hypotheses and pending operations. Record the constraints needed by the next implementer, with source record/artifact references. Do not implement the remaining feature or claim production parity. Leave implementation to the fresh successor."
+  }
+]

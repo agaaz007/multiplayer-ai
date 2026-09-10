@@ -1,6 +1,7 @@
 import { type Config, loadAll } from "./store.js";
 import { TYPES, type LedgerObject, type LedgerType } from "./schema.js";
 import { captureStats } from "./hooks.js";
+import { projectAuthorityObjects, resolveAccepted, correctionImpact, matchesAnalysisScope, objectVersion, type ScopeQuery } from './authority.js';
 
 // ---------- text scoring (no embeddings; good enough for hundreds of objects) ----------
 
@@ -45,17 +46,55 @@ export interface SearchOpts {
   limit?: number;
   includeSuperseded?: boolean;
   tags?: string[];
+  scope?: ScopeQuery;
+  asOf?: string;
 }
 
-export function search(cfg: Config, query: string, opts: SearchOpts = {}): (LedgerObject & { score: number })[] {
-  const all = loadAll(cfg, opts.types ?? TYPES);
-  return all
-    .filter((o) => opts.includeSuperseded || o.status === "stable")
+export type AuthoritySearchHit = LedgerObject & {
+  score: number;
+  authority_status: ReturnType<typeof resolveAccepted>["status"];
+  authority_warnings: string[];
+  authority_current_ids: string[];
+  scope_status: "known" | "unknown";
+};
+
+/** Discover a definition family before resolving its time intervals; partial applicability must stay visible as a warning. */
+export function matchesDiscoveryScope(o: LedgerObject, scope?: ScopeQuery): boolean {
+  if(o.type==='definition' && scope?.window) {
+    const {window: _window,...identity}=scope;
+    return matchesAnalysisScope(o,identity);
+  }
+  return matchesAnalysisScope(o,scope);
+}
+
+export function search(cfg: Config, query: string, opts: SearchOpts = {}): AuthoritySearchHit[] {
+  const source = loadAll(cfg, TYPES);
+  const all = opts.includeSuperseded ? source : projectAuthorityObjects(source, { asOf: opts.asOf, scope: opts.scope });
+  const annotated = (o: LedgerObject): AuthoritySearchHit => {
+    const authority = resolveAccepted(source, o.id, { asOf: opts.asOf, scope: opts.scope });
+    return { ...o, score: score(query, o), authority_status: authority.status, authority_warnings: authority.warnings,
+      authority_current_ids: authority.current.map(c => c.id), scope_status: authority.scope_status };
+  };
+  const ranked = all
+    .filter(o => !opts.types || opts.types.includes(o.type))
+    .filter(o => matchesDiscoveryScope(o, opts.scope))
     .filter((o) => !opts.tags?.length || opts.tags.some((t) => o.tags.includes(t)))
-    .map((o) => ({ ...o, score: score(query, o) }))
+    .map(annotated)
+    .filter(o => opts.includeSuperseded || o.status==='stable' || (o.authority_status==='conflict' && o.authority_current_ids.includes(o.id)) ||
+      (o.type==='definition' && opts.scope?.window && o.authority_status==='unavailable' && o.status!=='draft' && o.previous_status!=='draft' && o.fields.capture_method!=='transcript_fallback'))
     .filter((o) => o.score > 0)
-    .sort((a, b) => b.score - a.score || (a.created < b.created ? 1 : -1))
-    .slice(0, opts.limit ?? 10);
+    .sort((a, b) => b.score - a.score || (a.created < b.created ? 1 : -1));
+  const selected = ranked.slice(0, opts.limit ?? 10);
+  const ids = new Set(selected.map(o => o.id));
+  // A result limit may trim relevance, never one side of an unresolved accepted conflict.
+  for (const hit of [...selected]) if (hit.authority_status === "conflict") {
+    for (const id of hit.authority_current_ids) {
+      if (ids.has(id)) continue;
+      const sibling = all.find(o => o.id === id);
+      if (sibling && matchesDiscoveryScope(sibling, opts.scope)) { selected.push(annotated(sibling)); ids.add(id); }
+    }
+  }
+  return selected;
 }
 
 /** Findings that answer a similar question. This is the rework-killer. */
@@ -140,6 +179,9 @@ export function renderFull(o: LedgerObject): string {
 export interface BriefOpts {
   days?: number;
   tags?: string[];
+  /** Optional packaged guide supplied by an embedding host; installed-guide default is unchanged. */
+  guidePath?: string;
+  scope?: ScopeQuery;
 }
 
 /**
@@ -149,7 +191,8 @@ export interface BriefOpts {
 export function brief(cfg: Config, opts: BriefOpts = {}): string {
   const days = opts.days ?? 14;
   const since = new Date(Date.now() - days * 86_400_000).toISOString();
-  const all = loadAll(cfg).filter((o) => o.status === "stable");
+  const source = loadAll(cfg);
+  const all = projectAuthorityObjects(source, { scope: opts.scope }).filter((o) => o.status === "stable" && matchesAnalysisScope(o, opts.scope));
   const byTag = (o: LedgerObject) => !opts.tags?.length || opts.tags.some((t) => o.tags.includes(t));
 
   const defs = all.filter((o) => o.type === "definition" && byTag(o));
@@ -158,14 +201,25 @@ export function brief(cfg: Config, opts: BriefOpts = {}): string {
   const decisions = all.filter((o) => o.type === "decision" && byTag(o)).slice(0, 15);
   const findings = recent("finding").slice(0, 20);
   const changes = recent("change").slice(0, 15);
+  const conflicts = new Map<string, ReturnType<typeof resolveAccepted>>();
+  const authorityWarnings = new Set<string>();
+  for (const o of source.filter(byTag).filter(o=>matchesDiscoveryScope(o,opts.scope))) {
+    const resolution = resolveAccepted(source, o.id, { scope: opts.scope });
+    if (resolution.status === "conflict") conflicts.set(resolution.current.map(c => c.id).sort().join("|"), resolution);
+    if((opts.scope?.window && resolution.status==='unavailable') || resolution.current.some(c=>c.id===o.id))
+      for(const warning of resolution.warnings) authorityWarnings.add(warning);
+  }
 
   const out: string[] = [];
   out.push(`# Ledger brief (${new Date().toISOString().slice(0, 10)}, last ${days} days)`);
   out.push(``);
-  out.push(`Rules: use these definitions verbatim when computing metrics. Before running an analysis, call ledger_search with the question — if a matching finding exists, reuse or explicitly refresh it. Before attributing a change in a metric, check changes below. After any analysis, decision, or ship, record it: a finding needs inputs, method, and assumptions (explicit and implicit); a decision needs context and the options that lost. Full format in ~/.claude/ledger.md.`);
+  out.push(`This brief is an activity summary, not exhaustive task context. Use ledger_investigation with the question and analytical scope before reusing a result; it resolves accepted corrections across full history.`);
+  for (const conflict of conflicts.values()) out.push(`UNRESOLVED ACCEPTED CONFLICT: ${conflict.current.map(c => `${c.id} (${c.title})`).join("; ")}. No single source is authoritative; inspect the evidence and explicitly resolve. The recent-list limit does not resolve this conflict.`);
+  for(const warning of authorityWarnings) out.push(`WARNING: ${warning}`);
+  out.push(`Rules: use these definitions verbatim when computing metrics. Before running an analysis, call ledger_search with the question — if a matching finding exists, reuse or explicitly refresh it. Before attributing a change in a metric, check changes below. After any analysis, decision, or ship, record it: a finding needs inputs, method, and assumptions (explicit and implicit); a decision needs context and the options that lost. Full format in ${opts.guidePath ? `\`${opts.guidePath}\`` : "~/.claude/ledger.md"}.`);
   out.push(``);
   out.push(`## Definitions (${defs.length})`);
-  out.push(defs.length ? defs.map(short).join("\n") : "_none yet — record one before computing any metric_");
+  out.push(defs.length ? defs.map(short).join("\n") : authorityWarnings.size || conflicts.size ? "_no single applicable accepted definition; review the authority warnings before computing a metric_" : "_none yet — record one before computing any metric_");
   out.push(``);
   out.push(`## Decisions in force (${decisions.length})`);
   out.push(decisions.length ? decisions.map(short).join("\n") : "_none_");
@@ -176,18 +230,23 @@ export function brief(cfg: Config, opts: BriefOpts = {}): string {
   out.push(`## Findings, last ${days}d (${findings.length})`);
   out.push(findings.length ? findings.map(short).join("\n") : "_none_");
 
-  // Drafts from the transcript fallback are not knowledge yet; they are a review queue.
-  // A human's own `status: draft` object is their work in progress, not a review item.
-  const drafts = loadAll(cfg, TYPES, false).filter((o) => o.status === "draft" && o.fields.capture_method === "transcript_fallback" && byTag(o));
+  // Every draft is visible and labeled by origin. None is in force. Previously only transcript-fallback
+  // drafts were listed, which hid hand-recorded `status: draft` objects from every brief.
+  const drafts = source.filter((o) => o.status === "draft" && byTag(o) && matchesAnalysisScope(o, opts.scope));
   if (drafts.length) {
-    out.push(``, `## Drafts awaiting review (${drafts.length})`);
-    out.push(
-      `These were extracted from transcripts after live capture failed. They are NOT in force. For each: ledger_get it, then either record a stable ${"object"} with supersedes set to the draft id (after checking the numbers and assumptions), or ledger_discard_draft with a reason.`
-    );
-    for (const d of drafts.slice(0, 5)) {
-      out.push(`- ${d.type} ${d.id}: **${d.title}** — ${d.fields.capture_reason ?? ""} (${d.author}, ${d.created.slice(0, 10)})`);
+    const fallback = drafts.filter((o) => o.fields.capture_method === "transcript_fallback");
+    const manual = drafts.filter((o) => o.fields.capture_method !== "transcript_fallback");
+    out.push(``, `## Drafts, not in force (${drafts.length})`);
+    if (fallback.length) {
+      out.push(`Extracted from transcripts after live capture failed. For each: ledger_get it, then record a stable object with supersedes set to the draft id, or ledger_discard_draft with a reason.`);
+      for (const d of fallback.slice(0, 5)) out.push(`- [fallback] ${d.type} ${d.id}: **${d.title}** — ${d.fields.capture_reason ?? ""} (${d.author}, ${d.created.slice(0, 10)})`);
+      if (fallback.length > 5) out.push(`- …and ${fallback.length - 5} more fallback drafts: \`ledger drafts\``);
     }
-    if (drafts.length > 5) out.push(`- …and ${drafts.length - 5} more: \`ledger drafts\``);
+    if (manual.length) {
+      out.push(`Recorded by a person or their agent with status: draft. Work in progress, not a decision or finding in force; the owner promotes by recording a stable object with supersedes.`);
+      for (const d of manual.slice(0, 5)) out.push(`- [draft] ${d.type} ${d.id}: **${d.title}** (${d.author}, ${d.created.slice(0, 10)})`);
+      if (manual.length > 5) out.push(`- …and ${manual.length - 5} more drafts`);
+    }
   }
   return out.join("\n");
 }

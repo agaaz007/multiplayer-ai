@@ -6,6 +6,7 @@ import matter from "gray-matter";
 import type { z } from "zod";
 import { DIRS, SCHEMAS, TYPES, type LedgerObject, type LedgerType } from "./schema.js";
 import { isGeneratedView, regenerateViews } from "./views.js";
+import { validateDependencies, validateEvidenceReferences, validateSupersession } from "./authority.js";
 
 // ---------- config ----------
 
@@ -17,6 +18,27 @@ export interface Config {
   data_tools?: string[];
   /** Which CLI runs the transcript fallback: "claude" | "codex" | "auto" (default) | "none". */
   extractor?: string;
+  /** Execution continuity: shared Postgres for threads/sessions/events/claims. Absent = feature off. */
+  continuity?: ContinuityConfig;
+}
+
+export interface ContinuityConfig {
+  /** postgres:// URL. Never committed; lives in ~/.ledger/config.json (mode 600) or LEDGER_CONTINUITY_DB. */
+  database_url: string;
+  /** Label for this machine in sessions and notifications. Defaults to os.hostname(). */
+  machine?: string;
+  /** Extra deny globs for shadow commits and uploads, on top of the defaults. */
+  deny?: string[];
+  /** Gitignored paths that must still be captured (e.g. generated assets a study needs). Repo-relative globs. */
+  include?: string[];
+  /** Only these repo remotes/paths are captured. Empty or absent = every git worktree a session runs in. */
+  repos?: string[];
+  /** Shadow commit cadence in seconds. Default 30. */
+  snapshot_interval_s?: number;
+  /** Run the span→work-record classifier after turn checkpoints. Default true. LEDGER_CLASSIFY=0 also disables. */
+  classify?: boolean;
+  /** Sessions whose repo root is under one of these path prefixes are ignored by this machine's helper (e.g. evaluation fixtures). */
+  exclude_paths?: string[];
 }
 
 /**
@@ -51,10 +73,24 @@ export function loadConfig(): Config {
       : cfg.git_sync ?? true,
     ...(cfg.data_tools ? { data_tools: cfg.data_tools } : {}),
     ...(cfg.extractor ? { extractor: cfg.extractor } : {}),
+    ...(continuityFrom(cfg) ? { continuity: continuityFrom(cfg)! } : {}),
   };
 }
 
+function continuityFrom(cfg: Partial<Config>): ContinuityConfig | undefined {
+  const url = process.env.LEDGER_CONTINUITY_DB || cfg.continuity?.database_url;
+  if (!url) return undefined;
+  return { ...(cfg.continuity ?? { database_url: url }), database_url: url, machine: cfg.continuity?.machine || os.hostname() };
+}
+
 export function saveConfig(cfg: Config) {
+  // Evaluation and test code must never write the real machine config. Any process that sets
+  // LEDGER_EVAL=1 (or LEDGER_SELFTEST=1) has to point LEDGER_CONFIG_DIR at a disposable dir first.
+  // On 2026-09-09 an eval test called initLedger() without it and repointed ~/.ledger/config.json
+  // at a temp ledger for hours; real records went there and the live helper ran as another author.
+  if ((process.env.LEDGER_EVAL === "1" || process.env.LEDGER_SELFTEST === "1") && !process.env.LEDGER_CONFIG_DIR) {
+    throw new Error("refusing to write the real ~/.ledger/config.json from an eval/test process: set LEDGER_CONFIG_DIR to a disposable directory");
+  }
   fs.mkdirSync(ledgerHome(), { recursive: true });
   fs.writeFileSync(configFile(), JSON.stringify(cfg, null, 2) + "\n");
 }
@@ -212,6 +248,13 @@ function rebaseOnRemote(cfg: Config, refreshViews: boolean): void {
 export function pull(cfg: Config, force = false): string | null {
   if (!cfg.git_sync) return null;
   const dir = cfg.ledger_dir;
+  const lock = knowledgeWriteLock(cfg);
+  if (fs.existsSync(lock)) {
+    try {
+      const owner = JSON.parse(fs.readFileSync(lock, "utf8"));
+      if (owner.host !== os.hostname() || owner.pid !== process.pid) return "pull deferred: another Ledger writer holds this checkout";
+    } catch { return "pull deferred: Ledger write lock is not yet readable"; }
+  }
   if (!force && Date.now() - (lastPull.get(dir) ?? 0) < PULL_INTERVAL_MS) return null;
   lastPull.set(dir, Date.now());
   if (!isGitRepo(dir) || !hasRemote(dir)) return null;
@@ -313,7 +356,7 @@ function parseFile(file: string): LedgerObject | null {
   const data = normalizeYaml(parsed.data);
   if (!data || !TYPES.includes(data.type)) return null;
   const {
-    id, type, title, description, tags, status, supersedes, superseded_by,
+    id, type, title, description, tags, status, supersedes, superseded_by, previous_status,
     generated, sources, stale_after,
     // legacy keys from pre-OKF files, tolerated on read
     created, author,
@@ -339,6 +382,7 @@ function parseFile(file: string): LedgerObject | null {
     status: status === "active" ? "stable" : status === "superseded" || status === "retracted" ? "deprecated" : status ?? "stable",
     supersedes: supersedes ? String(supersedes) : undefined,
     superseded_by: superseded_by ? String(superseded_by) : undefined,
+    previous_status: previous_status === 'stable' || previous_status === 'draft' ? previous_status : undefined,
     body: parsed.content.trim(),
     fields,
   };
@@ -394,7 +438,10 @@ function describe(type: LedgerType, f: Record<string, unknown>): string {
 }
 
 function prepare(cfg: Config, input: RecordInput): Record<string, any> {
-  const raw: Record<string, any> = { author: cfg.author, ...input.fields };
+  if (input.fields.author !== undefined && input.fields.author !== cfg.author) {
+    throw new Error("record author must match configured Ledger author; preserve another person's contribution through source references");
+  }
+  const raw: Record<string, any> = { ...input.fields, author: cfg.author };
   // a finding's headline `source` is its first input unless stated
   if (input.type === "finding" && !raw.source && Array.isArray(raw.inputs) && raw.inputs[0]?.source) {
     raw.source = raw.inputs[0].source;
@@ -425,12 +472,66 @@ function persist(
   data: Record<string, any>,
   opts: { extra?: Record<string, unknown>; commitPrefix?: string } = {}
 ): RecordResult {
+  return withKnowledgeWriteLock(cfg, () => persistLocked(cfg, type, data, opts));
+}
+
+function knowledgeWriteLock(cfg: Config): string {
+  const lockDir = isGitRepo(cfg.ledger_dir) ? path.resolve(cfg.ledger_dir, git(cfg.ledger_dir, ["rev-parse", "--git-dir"])) : cfg.ledger_dir;
+  return path.join(lockDir, ".ledger-write.lock");
+}
+
+function withKnowledgeWriteLock<T>(cfg: Config, work: () => T): T {
+  fs.mkdirSync(cfg.ledger_dir, { recursive: true });
+  const lock = knowledgeWriteLock(cfg);
+  let fd: number;
+  try { fd = fs.openSync(lock, "wx", 0o600); }
+  catch (e: any) {
+    if (e.code !== "EEXIST") throw e;
+    // A crashed writer must not block the store indefinitely. Only remove our own machine's dead process lock.
+    let stale = false;
+    try {
+      const owner = JSON.parse(fs.readFileSync(lock, "utf8"));
+      if (owner.host === os.hostname() && Number.isInteger(owner.pid) && owner.pid > 0) {
+        try { process.kill(owner.pid, 0); } catch (probe: any) { stale = probe.code === "ESRCH"; }
+      }
+    } catch { /* incomplete/foreign lock is not safe to remove */ }
+    if (!stale) throw new Error("another Ledger write is in progress; retry after it finishes");
+    fs.unlinkSync(lock);
+    fd = fs.openSync(lock, "wx", 0o600);
+  }
+  try {
+    fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, host: os.hostname(), at: new Date().toISOString() }));
+    return work();
+  } finally {
+    fs.closeSync(fd);
+    fs.unlinkSync(lock);
+  }
+}
+
+/** Source files appear atomically to concurrent readers; temporary files do not match the .md reader. */
+function writeKnowledgeFile(file: string, content: string): void {
+  const temp = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+  try { fs.writeFileSync(temp, content, { flag: "wx" }); fs.renameSync(temp, file); }
+  finally { if (fs.existsSync(temp)) fs.unlinkSync(temp); }
+}
+
+function persistLocked(
+  cfg: Config,
+  type: LedgerType,
+  data: Record<string, any>,
+  opts: { extra?: Record<string, unknown>; commitPrefix?: string } = {}
+): RecordResult {
   const { body, author, title, description, tags, status, supersedes, source, ...rest } = data;
 
   // Always start from the latest remote state: the generated views are a
   // function of the whole object set, so writing from a stale tree would
   // commit a dashboard that lacks whatever teammates just recorded.
   pull(cfg, true);
+  const objects = loadAll(cfg, TYPES, false);
+  if (data.acceptance && data.acceptance.actor !== cfg.author) throw new Error("acceptance.actor must match configured Ledger author");
+  validateDependencies(objects, data, type);
+  validateEvidenceReferences(objects, data);
+  const predecessor = validateSupersession(objects, type, data, cfg.author);
 
   const now = new Date();
   const id = makeId(type, String(title), now);
@@ -455,18 +556,21 @@ function persist(
   Object.assign(front, opts.extra ?? {});
   Object.assign(front, rest);
 
-  fs.writeFileSync(file, matter.stringify(body ? body + "\n" : "", front));
+  writeKnowledgeFile(file, matter.stringify(body ? body + "\n" : "", front));
 
   const touched = [file];
   let superseded: string | undefined;
-  if (supersedes) {
-    const old = loadAll(cfg, TYPES, false).find((o) => o.id === String(supersedes));
+  if (supersedes && (status ?? "stable") === "stable") {
+    const old = predecessor;
     if (old) {
       const raw = matter(fs.readFileSync(old.path, "utf8"));
       const d = normalizeYaml(raw.data);
-      d.status = "deprecated";
+      d.previous_status = old.previous_status ?? old.status;
+      // A future-effective definition must not retire today's accepted definition prematurely.
+      const effectiveFrom = data.correction?.effective_from;
+      if (old.status === "draft" || !effectiveFrom || effectiveFrom.slice(0, 10) <= now.toISOString().slice(0, 10)) d.status = "deprecated";
       d.superseded_by = id;
-      fs.writeFileSync(old.path, matter.stringify(raw.content, d));
+      writeKnowledgeFile(old.path, matter.stringify(raw.content, d));
       touched.push(old.path);
       superseded = old.id;
     }
@@ -540,6 +644,10 @@ export function recordDraft(cfg: Config, input: RecordInput & { capture: DraftCa
 
 /** Mark a draft as reviewed-and-rejected. It leaves the review list and stays in history. */
 export function discardDraft(cfg: Config, id: string, reason: string): { id: string; git: string | null } {
+  return withKnowledgeWriteLock(cfg, () => discardDraftLocked(cfg, id, reason));
+}
+
+function discardDraftLocked(cfg: Config, id: string, reason: string): { id: string; git: string | null } {
   pull(cfg, true);
   const o = loadAll(cfg, TYPES, false).find((x) => x.id === id);
   if (!o) throw new Error(`not found: ${id}`);
@@ -548,7 +656,7 @@ export function discardDraft(cfg: Config, id: string, reason: string): { id: str
   const d = normalizeYaml(raw.data);
   d.status = "deprecated";
   d.discarded = { by: `human:${cfg.author}`, at: new Date().toISOString(), reason };
-  fs.writeFileSync(o.path, matter.stringify(raw.content, d));
+  writeKnowledgeFile(o.path, matter.stringify(raw.content, d));
   const touched = [o.path, ...regenerateViews(cfg, loadAll(cfg, TYPES, false))];
   const git = commitAndPush(cfg, `discard ${o.type}: ${o.title.slice(0, 60)} (${cfg.author})`, touched.map((p) => path.relative(cfg.ledger_dir, p)));
   return { id, git };

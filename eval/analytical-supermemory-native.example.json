@@ -1,0 +1,16 @@
+{
+  "provider": "supermemory",
+  "mechanism": "official-capture-hooks",
+  "implementationRef": "SET_EXPLICIT_OFFICIAL_PLUGIN_COMMITS",
+  "claude": { "pluginDir": "/REPLACE_WITH_PINNED_BUILT_CLAUDE_PLUGIN" },
+  "codex": {
+    "homeTemplate": "/REPLACE_WITH_REVIEWED_CODEX_HOOK_TEMPLATE",
+    "configAppend": "",
+    "mcpServers": {
+      "supermemory": { "command": "node", "args": ["{{HOME}}/.codex/supermemory/mcp-proxy.js"] }
+    }
+  },
+  "readNamespaces": ["{{NAMESPACE}}"],
+  "humanCaptureInstructions": "Use the installed official Supermemory tools and capture hooks to preserve your working evidence and unfinished artifacts for the next agent. Preserve source references and accepted versus proposed corrections. Explicit capture effort is recorded.",
+  "provenanceNote": "Template only. Confirm official plugin hook paths and Codex hook trust before use. Normal plugin extraction/recall settings are preserved; only project/personal namespaces are set to the trial namespace. Controller mints an expiring scoped key; each harness receives only that key. Negative scope probes and positive source capture/recall checks must pass. Singular-tag inventory compatibility remains a live preflight requirement."
+}
