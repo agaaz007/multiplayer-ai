@@ -1,0 +1,10 @@
+{
+  "provider": "ledger",
+  "mechanism": "official-capture-hooks",
+  "implementationRef": "current-run-frozen-ledger-build",
+  "humanCaptureInstructions": "Use Ledger's native definition/finding/decision tools to record the investigation and correction with original evidence, assumptions, exact query and source IDs. Keep proposals separate from accepted knowledge. Capture every source-stage note before finishing.",
+  "claude": { "mcpServers": { "ledger": { "command": "node", "args": ["{{BUILD_DIR}}/cli.js", "mcp"], "env": { "LEDGER_CONFIG_DIR": "{{HOME}}/.ledger", "LEDGER_EVAL": "1" } } } },
+  "codex": { "mcpServers": { "ledger": { "command": "node", "args": ["{{BUILD_DIR}}/cli.js", "mcp"], "env": { "LEDGER_CONFIG_DIR": "{{HOME}}/.ledger", "LEDGER_EVAL": "1" } } } },
+  "readNamespaces": ["{{NAMESPACE}}"],
+  "provenanceNote": "The runner configures a fresh nonce-owned localhost continuity database, actual Ledger hooks and helper for each trial. It captures actual source transcripts, verifies and restores native WIP snapshots between stages, and exports exact evidence before owned database cleanup. Structured records are actual source-agent writes; classification/model extraction is disabled and recorded. Codex host hook trust must be independently checked. Local fixture tests do not establish a successful live harness or two-laptop trial."
+}

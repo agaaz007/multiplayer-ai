@@ -1,0 +1,16 @@
+{
+  "provider": "graphify",
+  "mechanism": "native-agent-save",
+  "implementationRef": "Graphify-Labs/graphify:graphifyy-0.9.50",
+  "graphify": {
+    "binary": "/Users/Agaaz/.local/bin/graphify",
+    "version": "0.9.50",
+    "backend": "claude",
+    "model": "MODEL_SELECTED_BY_USER"
+  },
+  "claude": {},
+  "codex": {},
+  "readNamespaces": ["{{NAMESPACE}}"],
+  "humanCaptureInstructions": "Use graphify_write_source to save your investigation notes, exact queries, original evidence and unfinished artifacts in the trial corpus. Preserve source references and accepted versus proposed corrections. Use graphify_save_result for useful/dead-end/corrected feedback. Run graphify_extract after finishing source changes, then graphify_reflect. Query, explain, affected and path use Graphify's own CLI. Explicit note preparation and extraction are part of measured capture effort.",
+  "provenanceNote": "Official Graphify CLI extraction/query/save-result/reflection behind a scoped transport bridge, not automatic conversation capture and not the Graphify skill's subagent extraction mode. Backend/model must be explicitly selected and included in the cost policy; the example is not a model recommendation. No controller imports in native mode. AST-only readiness does not qualify analytical trials."
+}
