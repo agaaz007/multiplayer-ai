@@ -75,6 +75,10 @@ const InputSchema = z.object({
     .optional()
     .describe("Row-level filters, as SQL/words or a map: { country: IN, platform: android }"),
   note: z.string().optional().describe("Anything about quality or coverage of this input."),
+  // Two identical-scope results over one window can differ only because the source moved under them
+  // (late-arriving events, a backfill). Without this the read path cannot tell a re-read from a dispute.
+  snapshot_at: isoDate.optional().describe("When this source was read, or the source's watermark. Two results over the same window with different snapshots may be a re-read, not a disagreement."),
+  snapshot_id: z.string().optional().describe("Exact immutable source version if the system has one: an export id, a table snapshot, a warehouse time-travel token."),
 });
 
 const scopeText = z.string().trim().min(1);
@@ -103,7 +107,7 @@ export type AnalysisScope = z.infer<typeof AnalysisScopeSchema>;
 export const EvidenceReferenceSchema = z.object({
   artifact_id: scopeText.optional(),
   sha256: z.string().regex(/^[a-f0-9]{64}$/, "SHA-256 in lowercase hexadecimal"),
-  role: z.enum(["query", "parameters", "result", "dataset", "correction", "review", "other"]),
+  role: z.enum(["query", "parameters", "result", "dataset", "correction", "review", "reproduction", "other"]),
   session_id: scopeText.optional(),
   seq: z.number().int().min(0).optional(),
 }).refine((v) => v.seq === undefined || v.session_id !== undefined, { message: "seq requires session_id" });
@@ -169,8 +173,29 @@ export const DefinitionSchema = z.object({
   grain: z.string().optional().describe("Unit of the numerator/denominator, e.g. per user, per session"),
 });
 
+/**
+ * What kind of assertion the finding makes. Different claims are falsified differently, so
+ * they carry different obligations (enforced in validateClaim, which names the missing field):
+ *   measurement — a quantity. Verified by re-running the recorded query under the recorded definition.
+ *   comparison  — A beats B. Verified by checking comparable groups, uncertainty, and design.
+ *   explanation — why A beats B. The outcome alone does not establish it; it needs a discriminating test.
+ * Absent on legacy records; an unclassified claim is reported as unclassified, never assumed measured.
+ */
+export const CLAIM_TYPES = ["measurement", "comparison", "explanation"] as const;
+export type ClaimType = (typeof CLAIM_TYPES)[number];
+
+/** A re-run of an existing finding at an exact version. Recorded as its own finding; the target is never edited. */
+export const ReproductionSchema = z.object({
+  id: scopeText.describe("id of the finding this re-runs"),
+  version: z.string().regex(/^[a-f0-9]{64}$/, "the target's 64-hex content_version, from ledger_get or the record result"),
+  outcome: z.enum(["matched", "differed", "could_not_run"]),
+  note: z.string().optional().describe("For differed/could_not_run: what differed, or what blocked the run."),
+});
+export type Reproduction = z.infer<typeof ReproductionSchema>;
+
 export const FindingSchema = z.object({
   ...base,
+  claim_type: z.enum(CLAIM_TYPES).optional().describe("measurement (a quantity), comparison (A beats B), or explanation (why). Each requires different supporting fields."),
   question: z.string().min(3).describe("The question that was actually answered"),
   result: z.string().min(1).describe("The claim: headline number(s) with units, or the comparison"),
   definitions_used: z.array(z.string()).default([]).describe("metric names from definitions/"),
@@ -208,6 +233,11 @@ export const FindingSchema = z.object({
     .optional()
     .describe("How another agent re-runs this. Omit if `query` plus `inputs` are enough."),
   caveats: z.array(z.string()).default([]).describe("Warnings about the number itself, e.g. disagrees with a prior finding"),
+  discriminating_test: z
+    .string()
+    .optional()
+    .describe("Required for claim_type: explanation. An observation that would come out one way if this explanation holds and another way if a rival does. Required because the outcome it explains is consistent with every rival explanation."),
+  reproduction_of: ReproductionSchema.optional().describe("This finding re-ran an existing one. Pin the same id/version in dependencies with relation derived-from."),
 });
 
 export const ChangeSchema = z.object({
