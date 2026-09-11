@@ -6,7 +6,7 @@ import { z } from "zod";
 import { loadConfig, loadAll, record, getById, discardDraft, type Config } from "./store.js";
 import { brief, search, similarFindings, renderFull, stats } from "./query.js";
 import { AnalyticalDateSchema, AnalysisScopeSchema, ChangeSchema, DecisionSchema, DefinitionSchema, FindingSchema, TYPES, type LedgerObject } from "./schema.js";
-import { correctionImpact, objectVersion, resolveAccepted } from './authority.js';
+import { correctionImpact, objectVersion, resolveAccepted, verification } from './authority.js';
 import { investigation } from './investigation.js';
 import { validateCaptureCoverage, acknowledgeCapture, type CaptureAck } from './hooks.js';
 import { verifyAcceptanceEvidence } from './acceptance-evidence.js';
@@ -102,7 +102,9 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
       const authority = resolveAccepted(loadAll(cfg, TYPES, false), id, {asOf: as_of});
       const current = authority.current.filter(c=>c.id !== o.id);
       const objects = [...new Map([o,...current,...authority.proposals].map(x=>[x.id,x])).values()];
+      const claim = o.type === 'finding' ? verification(loadAll(cfg, TYPES, false), o) : null;
       return evidenceResult([renderFull(o), `content_version: ${objectVersion(o)}`, `Accepted resolution: ${authority.status}`,
+        ...(claim ? [`Verification: ${claim.status}${claim.notes.length ? ` — ${claim.notes.join('; ')}` : ''}. Accepted is a review assertion; reproduced means someone re-ran the recorded recipe at this exact content_version.`] : []),
         ...authority.warnings.map(w=>`WARNING: ${w}`),
         ...current.map(c=>`Applicable accepted source:\n${renderFull(c)}\ncontent_version: ${objectVersion(c)}`),
         ...authority.proposals.map(p=>`PROPOSED, not accepted: ${p.id} — ${p.title}`)].join('\n\n'), objects);
@@ -122,7 +124,7 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
 
   registerAppTool(server, 'ledger_impact', {
     title: 'Review work affected by a correction',
-    description: 'Traverse exact definition and finding dependencies from an accepted correction. Returns direct/transitive review paths and incomplete legacy lineage. Needs review does not mean false.' + RECEIPT_GUIDANCE,
+    description: 'Traverse exact definition and finding dependencies from an accepted correction. Returns direct/transitive review paths, incomplete legacy lineage, and whether the correction changes what anyone does next (interrupt). Needs review does not mean false.' + RECEIPT_GUIDANCE,
     inputSchema: { correction_id: z.string() }, _meta: evidenceUi, annotations: readOnly,
   }, async ({correction_id}) => {
     const all = loadAll(cfg,TYPES);
@@ -205,7 +207,7 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
     "ledger_record_finding",
     "finding",
     FindingSchema,
-    "Record the result of an analysis as an argument, not a number: question, result, definitions used, data window, inputs (every table/event), method (how inputs became the result, in words), the exact query, and assumptions. At least one assumption must be kind: implicit (data completeness, definition match, nothing shipped in the window); the tool rejects the record otherwise and says what to add. Do this at the END of any analysis, even a small one, even at low confidence. Returns similar prior findings so duplicates are visible."
+    "Record the result of an analysis as an argument, not a number: question, result, definitions used, data window, inputs (every table/event), method (how inputs became the result, in words), the exact query, and assumptions. At least one assumption must be kind: implicit (data completeness, definition match, nothing shipped in the window); the tool rejects the record otherwise and says what to add. Set claim_type: a measurement needs the exact query so it can be re-run; a comparison needs baseline and confidence_basis; an explanation needs a discriminating_test, rival explanations, and a derived-from pin to the result it explains, because the outcome alone is consistent with every rival. Record inputs[].snapshot_at so a later re-read can be told apart from a disagreement. To re-run someone's finding, record your own with reproduction_of {id, version, outcome}. Do this at the END of any analysis, even a small one, even at low confidence. Returns similar prior findings so duplicates are visible."
   );
   recordTool(
     "ledger_record_change",
