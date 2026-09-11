@@ -3,6 +3,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import {createHash} from 'node:crypto';
+import {verifyAcceptanceEvidence} from './acceptance-evidence.js';
+import {validateRecordCoverage} from './capture-boundary.js';
 
 /**
  * Execution-continuity tests. Needs a Postgres: LEDGER_CONTINUITY_DB, default
@@ -294,6 +297,27 @@ ok("e2e 4: stale generation → fork created, late events routed there, history 
   assert.equal(r1.inserted, 1);
   assert.equal(r2.inserted, 0);
   ok("appendEvents is idempotent on (session, producer_event_id)");
+}
+
+// Exact artifact provenance survives deduplication across two source sessions.
+{
+  const a='acceptance-source-a', b='acceptance-source-b';
+  for(const id of [a,b]) await S.upsertSession(pool,{id,author:id===a?'rachit':'agaaz',harness:'codex'});
+  const bytes=Buffer.from('SELECT DISTINCT user_id FROM permitted_fixture -- exact source');
+  const hash=createHash('sha256').update(bytes).digest('hex');
+  const first=await S.putArtifact(pool,{sha256:hash,kind:'query',bytes,session_id:a});
+  const second=await S.putArtifact(pool,{sha256:hash,kind:'query',bytes,session_id:b});
+  assert.equal(first.id,second.id);
+  const saved=await S.appendEvents(pool,b,[{producer_event_id:'shared-request',kind:'tool.requested',payload:{input_artifact_id:first.id,evidence_ids:['q:shared-verified']}}],null,null);
+  const evidence={sha256:hash,role:'query',session_id:b,seq:saved.lastSeq};
+  const acceptance=(ref:unknown)=>({acceptance:{actor:'agaaz',accepted_at:'2026-09-10',evidence_refs:[ref]}});
+  await verifyAcceptanceEvidence(cfgA,acceptance(evidence));
+  await verifyAcceptanceEvidence(cfgA,acceptance({...evidence,artifact_id:first.id}));
+  await assert.rejects(verifyAcceptanceEvidence(cfgA,acceptance({...evidence,seq:saved.lastSeq+1})),/event does not reference/);
+  const coverage=[{session_id:b,evidence_ids:['q:shared-verified']}];
+  assert.deepEqual(await validateRecordCoverage(cfgA,{capture_coverage:coverage},path.join(tmp,'empty-successor-journals')),coverage);
+  await assert.rejects(validateRecordCoverage(cfgA,{capture_coverage:[{session_id:b,evidence_ids:['q:invented']}]},path.join(tmp,'empty-successor-journals')),/unknown evidence/);
+  ok('deduplicated artifact provenance and remote capture IDs require exact shared event evidence');
 }
 
 await closePools();

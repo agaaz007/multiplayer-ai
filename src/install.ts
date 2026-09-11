@@ -43,7 +43,10 @@ export function ledgerCommand(...args: string[]): string {
 /** One command hook per lifecycle event. PostToolUse is filtered further inside hooks.ts. */
 export const HOOK_EVENTS: Record<string, { matcher?: string; timeout: number }> = {
   SessionStart: { timeout: 30 },
-  PostToolUse: { matcher: "mcp__.*|Bash", timeout: 10 },
+  // Both hosts document omitted matcher as all supported tools. Filter data calls in hooks.ts;
+  // this also lets the local coverage index observe native and namespaced/wrapped tool paths.
+  // https://learn.chatgpt.com/docs/hooks#matcher-patterns ; https://code.claude.com/docs/en/hooks
+  PostToolUse: { timeout: 10 },
   Stop: { timeout: 10 },
   PreCompact: { timeout: 10 },
   SessionEnd: { timeout: 10 },

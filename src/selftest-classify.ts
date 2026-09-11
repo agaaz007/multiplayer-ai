@@ -7,8 +7,8 @@ import { execFileSync } from "node:child_process";
 
 /**
  * Classifier tests (spec v1.2 §13a, acceptance 27/30/33). Needs a Postgres:
- * LEDGER_CONTINUITY_DB, default postgresql://localhost:5432/ledger_selftest.
- * Drops and recreates every cont_* table there.
+ * Requires an explicit localhost LEDGER_TEST_DATABASE_URL. Drops and recreates
+ * every cont_* table in that disposable test database.
  *
  * The model is a fake: LEDGER_EXTRACTOR_CMD points at a node script that reads
  * the prompt on stdin, saves it for inspection, and prints canned JSON chosen
@@ -21,7 +21,10 @@ import { execFileSync } from "node:child_process";
  * the daemon integration at real turn checkpoints.
  */
 
-const DB = process.env.LEDGER_CONTINUITY_DB || "postgresql://localhost:5432/ledger_selftest";
+const DB = process.env.LEDGER_TEST_DATABASE_URL;
+if (!DB) throw new Error('set LEDGER_TEST_DATABASE_URL to an explicitly owned disposable localhost test database');
+const dbUrl = new URL(DB);
+if (!['localhost','127.0.0.1','[::1]'].includes(dbUrl.hostname) || !/selftest|_test(?:_|$)/.test(dbUrl.pathname) || dbUrl.search) throw new Error('classifier selftest requires a disposable localhost test database');
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ledger-cls-"));
 process.env.LEDGER_CONFIG_DIR = path.join(tmp, ".ledger");
 process.env.LEDGER_GIT_SYNC = "0";
@@ -219,7 +222,7 @@ let recLatency: import("./continuity/records.js").WorkRecord;
   assert.equal(ra.since_seq, 0);
   assert.equal(ra.through_seq, 13);
   assert.equal(ra.events_considered, 11, "content events only: tool results excluded");
-  assert.equal(ra.candidates, 3, "banner + search reindex (repo) + launch email (non-code)");
+  assert.equal(ra.candidates, 4, "banner + search reindex + older open investigation + launch email");
   assert.equal(ra.assignments_applied, 2);
   assert.equal(ra.records_created, 1);
   assert.equal(ra.updates_proposed, 3);
@@ -284,15 +287,16 @@ let recLatency: import("./continuity/records.js").WorkRecord;
   assert.equal(p.length, ra.prompt_chars);
   assert.ok(p.length < C.PROMPT_CHAR_CAP, `prompt under cap: ${p.length}`);
   assert.ok(p.includes("# What the ledger is") && p.includes("# Object format") && p.includes("# Classify operation"), "purpose, format, classify prompt sections present");
-  assert.ok(p.includes("# Candidate records (3)"));
+  assert.ok(p.includes("# Candidate records (4)"));
   assert.ok(p.includes(`] ${recBanner.id} · kind: implementation · title: Greeting banner · repo: ${REPO}`), "candidate line has id/kind/title/repo");
   assert.ok(p.includes(`] ${recSearch.id} · kind: implementation · title: Search reindex · repo: ${REPO}`), "open repo record with no links is a candidate");
   assert.ok(p.includes("goal: Add a greeting banner; price unchanged"));
-  assert.ok(p.includes("state: progress: Banner component scaffolded"), "candidate state summary from recordState");
+  assert.ok(p.includes("state: CONFIRMED (1 current, 0 omitted from summary): progress: Banner component scaffolded"), "candidate state summary from recordState preserves confirmed status");
   assert.ok(p.includes(`] ${recEmail.id} · kind: writing · title: Launch email · repo: none (non-code work)`));
   assert.ok(p.includes("state: no updates yet"));
-  assert.ok(/\[1\] .* · kind: /.test(p) && /\[3\] .* · kind: /.test(p) && !/\[4\] /.test(p), "candidates numbered 1..3");
-  for (const r of [recOther, recOld, recDone]) assert.ok(!p.includes(r.id), `${r.title} is not a candidate`);
+  assert.ok(/\[1\] .* · kind: /.test(p) && /\[4\] .* · kind: /.test(p) && !/\[5\] /.test(p), "candidates numbered 1..4");
+  for (const r of [recOther, recDone]) assert.ok(!p.includes(r.id), `${r.title} is not a candidate`);
+  assert.ok(p.includes(recOld.id), 'old open work is not excluded solely by age');
   assert.ok(p.includes(`Thread: "Add a greeting banner to the app"`), "thread context");
   assert.ok(p.includes(`# Events (session ${sidA}, seq 1..13, 11 shown)`));
   assert.ok(p.includes("1 · instruction.added · Add a greeting banner to the app; keep the price unchanged."));
@@ -328,7 +332,7 @@ let recLatency: import("./continuity/records.js").WorkRecord;
   const r2 = await C.classifySession(cfg, pool, sidA, { now: T(18), sinceSeq: 0 });
   assert.equal(r2.model_ok, true, r2.error ?? "");
   assert.ok(lastPrompt(), "forced re-run calls the model");
-  assert.equal(r2.candidates, 4, "the new record is now a candidate (linked to this session)");
+  assert.equal(r2.candidates, 5, "the new record is now a candidate (linked to this session)");
   assert.equal(r2.assignments_applied, 0);
   assert.equal(r2.assignments_skipped, 2, "both exact suggested links already exist");
   assert.equal(r2.records_created, 0, "new_record with an existing candidate's title resolves to it");
@@ -378,7 +382,7 @@ let recLatency: import("./continuity/records.js").WorkRecord;
   const rb = await C.classifySession(cfg, pool, sidB, { now: T(27) });
   assert.equal(rb.model_ok, true, rb.error ?? "");
   assert.equal(rb.events_considered, 5);
-  assert.equal(rb.candidates, 4, "banner, search, latency (repo) + launch email");
+  assert.equal(rb.candidates, 5, "banner, search, latency, older open work + launch email");
   assert.equal(rb.assignments_applied, 1);
   assert.equal(rb.records_created, 0);
   assert.equal(rb.updates_proposed, 1);
@@ -442,8 +446,8 @@ let recLatency: import("./continuity/records.js").WorkRecord;
   assert.equal(re.dry_run, true);
   assert.equal(re.events_considered, 10);
   assert.equal(re.since_seq, 0);
-  assert.equal(re.through_seq, 30);
-  assert.ok(re.notes.some((n) => /20 older event\(s\) after seq 0 dropped by the 10-event cap; the window starts at seq 21/.test(n)), re.notes.join(" | "));
+  assert.equal(re.through_seq, 10);
+  assert.ok(re.notes.some((n) => /20 newer event\(s\) deferred to the next page/.test(n)), re.notes.join(" | "));
   assert.equal(re.assignments_applied, 1, "dry run counts what would be linked");
   assert.equal(re.records_created, 1, "dry run counts what would be created");
   assert.deepEqual(re.unassigned, [], "the dynamic fixture covers every event shown");
@@ -451,9 +455,9 @@ let recLatency: import("./continuity/records.js").WorkRecord;
   assert.equal(await recordCount(), before, "dry run creates no records");
   assert.equal(C.readProgress(sidE), null, "dry run writes no progress");
   const p = lastPrompt()!;
-  assert.ok(p.includes("Note: 20 older event(s) after seq 0 dropped"), "gap note reaches the model");
-  assert.ok(p.includes("seq 21..30, 10 shown") && !/\n20 · /.test(p));
-  ok("dry run: nothing written, counts reported; 400-style event cap keeps the most recent N and names the gap in result and prompt");
+  assert.ok(p.includes("Note: 20 newer event(s) deferred"), "deferred work reaches the model");
+  assert.ok(p.includes("seq 1..10, 10 shown") && !/\n20 · /.test(p));
+  ok("dry run: nothing written; oldest unprocessed page retained and later work deferred without advancing past it");
 }
 
 // ---------- (e) daemon integration: classify at real turn checkpoints, rate limit, kill switch ----------
@@ -568,6 +572,36 @@ let recLatency: import("./continuity/records.js").WorkRecord;
   assert.equal(p6.classified, 1);
   assert.ok(logs.some((l) => /^classify 0199cccc: classifier failed/.test(l)), logs.join("\n"));
   ok("(e) daemon: a failing model is logged and the checkpoint still lands; capture never waits on the classifier");
+}
+
+// ---------- relevance and confirmed state survive recency, closed status and proposal floods ----------
+{
+  const repo = 'fixture/hiastro-classifier-scope'; const sessionId = 'cls-scope-flood';
+  await S.upsertSession(pool,{id:sessionId,author:'agaaz',harness:'codex',repo});
+  await S.appendEvents(pool,sessionId,[{producer_event_id:'scope-1',kind:'instruction.added',payload:{text:'Revisit the HiAstro conversion denominator correction and eligible population.'}}],null,null);
+  const older = await R.createRecord(pool,{kind:'investigation',title:'HiAstro conversion denominator',goal:'Correct eligible population',repo,created_by:'rachit'});
+  const closed = await R.createRecord(pool,{kind:'investigation',title:'Archived baseline audit',repo,created_by:'rachit'});
+  await R.addStateUpdate(pool,{record_id:closed.id,kind:'decision',text:'Accepted HiAstro denominator correction counts every eligible person.',status:'confirmed',created_by:'rachit'});
+  for(let i=0;i<45;i++) await R.addStateUpdate(pool,{record_id:closed.id,kind:i%2?'progress':'decision',text:`Recent proposed unrelated alternative ${i}`,status:'proposed',created_by:'classifier'});
+  await R.updateRecordMeta(pool,closed.id,{status:'done'});
+  await pool.query("update cont_records set updated_at=now()-interval '100 days' where id=any($1::uuid[])",[[older.id,closed.id]]);
+  const foreign = await R.createRecord(pool,{kind:'investigation',title:'HiAstro conversion denominator',goal:'Correct eligible population',repo:'fixture/forbidden-scope',created_by:'other'});
+  for(let i=0;i<80;i++) {
+    const item=await R.createRecord(pool,{kind:'other',title:`Unrelated recent update ${i}`,repo,created_by:'third-agent'});
+    if(i<45) await R.linkSpan(pool,{record_id:item.id,session_id:sessionId,from_seq:1,to_seq:1,source:'explicit',created_by:'agaaz'});
+  }
+  const before=await recordCount(); let prompt='';
+  const result=await C.classifySession(cfg,pool,sessionId,{dryRun:true,extract:async value=>{prompt=value;return JSON.stringify({assignments:[],state_updates:[],unassigned:[]});}});
+  assert.equal(result.model_ok,true,result.error ?? 'classifier should succeed');
+  assert.equal(result.candidates,30); assert.ok(result.candidate_pool_size>=82 && result.candidates_omitted>=52);
+  assert.ok(prompt.includes(older.id),'old relevant unlinked record survives 80 recent additions and 45 linked candidates');
+  assert.ok(prompt.includes(closed.id),'closed record is relevant through accepted state even with a generic title');
+  assert.ok(!prompt.includes(foreign.id),'unlinked record from another repository cannot enter lexical results');
+  assert.match(prompt,/CONFIRMED \(1 current, 0 omitted from summary\): decision: Accepted HiAstro denominator correction counts every eligible person/);
+  assert.match(prompt,/PROPOSED \(45 current, \d+ omitted from summary\)/);
+  assert.match(prompt,/\d+ omitted by the 30-record prompt cap/);
+  assert.equal(await recordCount(),before,'retrieval test uses fake output and does not manufacture classifier records');
+  ok('full-scope lexical candidates retain old/closed relevant work; confirmed state survives proposal floods; omitted counts and foreign scope remain explicit');
 }
 
 await closePools();

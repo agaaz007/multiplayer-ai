@@ -228,7 +228,7 @@ const claudeFile = (name: string) => path.join(tmp, `${name}.jsonl`);
     cl({ timestamp: "2026-09-08T02:00:01Z", type: "response_item", payload: { type: "message", role: "developer", content: [{ type: "input_text", text: "# AGENTS.md instructions for /x" }] } }),
     cl({ timestamp: "2026-09-08T02:00:02Z", type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "Add a banner" }] } }),
     cl({ timestamp: "2026-09-08T02:00:02Z", type: "event_msg", payload: { type: "user_message", message: "Add a banner" } }), // legacy duplicate of the same prompt
-    cl({ timestamp: "2026-09-08T02:00:03Z", type: "response_item", payload: { type: "custom_tool_call", name: "exec", call_id: "c1", input: 'await tools.exec_command({cmd:"psql -c \\"select 1\\""})' } }),
+    cl({ timestamp: "2026-09-08T02:00:03Z", type: "response_item", payload: { type: "custom_tool_call", name: "exec", call_id: "c1", input: `await tools.exec_command(${JSON.stringify({cmd: 'psql -c "select 1"'})})` } }),
     cl({ timestamp: "2026-09-08T02:00:04Z", type: "response_item", payload: { type: "custom_tool_call_output", call_id: "c1", output: [{ type: "input_text", text: long }] } }),
     cl({ timestamp: "2026-09-08T02:00:05Z", type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Done." }] } }),
     cl({ timestamp: "2026-09-08T02:00:06Z", type: "event_msg", payload: { type: "turn_aborted", reason: "interrupted" } }),

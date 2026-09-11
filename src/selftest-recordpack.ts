@@ -34,6 +34,7 @@ const R = await import("./continuity/records.js");
 const { buildRecordPack, listRecordSummaries, recordLine, unassignedLine, stateLine, EVIDENCE_HEAD, EVIDENCE_TAIL } = await import("./continuity/recordpack.js");
 const { openWorkText, openThreadsText } = await import("./continuity/brief.js");
 const { initLedger, record, getById } = await import("./store.js");
+const { objectVersion } = await import('./authority.js');
 const { createMcpServer } = await import("./mcp.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
@@ -127,7 +128,10 @@ const decision = (title: string, decision: string, supersedes?: string) => recor
     options_considered: [{ option: decision, chosen: true, rationale: "chosen for the test readout" }, { option: "Do nothing", rationale: "the readout would carry two numbers" }],
     rationale: "One number per metric.",
     assumptions: [{ statement: "ClickHouse ingestion was complete for the window", kind: "implicit", if_wrong: "changes_conclusion" }],
-    valid_from: "2026-09-08", owner: "agaaz", ...(supersedes ? { supersedes } : {}),
+    valid_from: "2026-09-08", owner: "agaaz", ...(supersedes ? { supersedes, acceptance: {
+      actor:'agaaz', accepted_at:'2026-09-10', expected_predecessor:{id:supersedes,version:objectVersion(getById(cfg,supersedes)!)},
+      evidence_refs:[{artifact_id:supersedes,sha256:objectVersion(getById(cfg,supersedes)!),role:'review'}],
+    } } : {}),
   },
 });
 const dec1 = decision("ClickHouse is the source of truth for the September paywall test", "Use ClickHouse paywall_resolved for the September test readout");
@@ -223,7 +227,7 @@ if (process.argv.includes("--show")) console.log(pack.text.split("\n").map((l) =
 {
   assert.deepEqual(pack.pending_operations, [{ call_id: "r-c2", tool: "Bash", input: "psql analytics -c 'select count(*) from events where distinct_id is null and ts > now() - interval 7 day'", seq: 7, session_id: sidR }], "r-c2 (seq 7, inside 1..7) listed; r-c3 (seq 10, outside) not");
   const t = pack.text;
-  assert.ok(t.includes(`## Pending / unknown operations (1) — most recent contributing session ${R8} (rachit, Codex), inside its linked spans\n- seq 7 Bash: psql analytics -c 'select count(*) from events where distinct_id is null and ts > now() - interval 7 day'  ← outcome unknown; do not blindly rerun if it mutates anything`));
+  assert.ok(t.includes(`## Pending / unknown operations (1) — all contributing sessions, inside linked spans\n- session ${R8} seq 7 Bash: psql analytics -c 'select count(*) from events where distinct_id is null and ts > now() - interval 7 day'  ← outcome unknown; do not blindly rerun if it mutates anything`));
   assert.ok(!t.includes("npm run build"), "the pending call outside the spans is not listed");
   assert.deepEqual({ session_id: pack.last_error!.session_id, seq: pack.last_error!.seq }, { session_id: sidA, seq: 7 }, "last error inside any span: agaaz's failed psql");
   assert.ok(t.includes(`## Last error inside the spans\nsession ${A8} seq 7 `) && t.includes('psql: FATAL: database \\"events\\" does not exist'), "last error rendered with its stderr");
@@ -347,7 +351,7 @@ if (process.argv.includes("--show")) console.log(pack.text.split("\n").map((l) =
   const rej = await R.addStateUpdate(pool, { record_id: recCopy.id, kind: "note", text: "wrong record", evidence: [{ session_id: sidR, seq: 9 }], created_by: "rachit" });
   await R.rejectStateUpdate(pool, rej.id, "agaaz", "belongs elsewhere");
   const copy2 = (await listRecordSummaries(pool, { repo: null })).find((r) => r.id === recCopy.id)!;
-  assert.deepEqual({ proposed: copy2.proposed, confirmed: copy2.confirmed, np: copy2.newest_proposed?.id }, { proposed: 1, confirmed: 0, np: sup2.id }, "counts follow the projection: superseded and rejected excluded");
+  assert.deepEqual({ proposed: copy2.proposed, confirmed: copy2.confirmed, np: copy2.newest_proposed?.id }, { proposed: 2, confirmed: 0, np: sup2.id }, "unaccepted replacements preserve both proposals; rejected updates excluded");
   ok("listRecordSummaries: distinct sessions, proposed/confirmed in the current projection (superseded and rejected excluded), newest proposed update; recordLine format; repo/null/kind/q/author filters");
 }
 
@@ -515,6 +519,28 @@ const call = async (name: string, args: Record<string, unknown>) => {
   assert.equal((await R.recordsForSession(pool, sidZ)).length, 0);
   assert.ok(!briefText.includes("Open work (records)") || !briefText.slice(0, briefText.indexOf("## Unassigned work")).includes(sidZ.slice(0, 8)), "the session appears only under Unassigned work");
   ok("[acceptance 33] a session with no assignable content appears under Unassigned work in the brief with its exact preview; nothing invented");
+}
+
+// A long mixed-topic record retains its actual tail, old pending work, and accepted constraints.
+{
+  const sidLong = 'reuse-long-history';
+  const sidFresh = 'reuse-fresh-contributor';
+  for (const sid of [sidLong,sidFresh]) await S.upsertSession(pool,{id:sid,author:'agaaz',harness:'codex',machine:'test',repo:null,started_at:T(0),last_seen_at:sid===sidFresh?T(5000):T(4500)});
+  const events = Array.from({length:2105},(_,i)=>ev(`long-${i}`,i===0?'instruction.added':i===1?'tool.requested':'assistant.message',i,{...(i===1?{tool:'export',input:'export denominator evidence'}:{text:i===0?'ORIGINAL QUESTION':i===2104?'ACTUAL LATEST EVIDENCE':`unrelated chatter ${i}`})},i===1?'old-pending-export':undefined));
+  await S.appendEvents(pool,sidLong,events,null,null);
+  await S.appendEvents(pool,sidFresh,[ev('fresh','assistant.message',5000,{text:'new contributor note'})],null,null);
+  const rec = await R.createRecord(pool,{kind:'investigation',title:'Long correction investigation',created_by:'agaaz'});
+  await R.linkSpan(pool,{record_id:rec.id,session_id:sidLong,from_seq:1,to_seq:2105,source:'explicit',created_by:'agaaz'});
+  await R.linkSpan(pool,{record_id:rec.id,session_id:sidFresh,from_seq:1,to_seq:1,source:'explicit',created_by:'agaaz'});
+  await R.addStateUpdate(pool,{record_id:rec.id,kind:'decision',text:'ACCEPTED DENOMINATOR CONSTRAINT',created_by:'agaaz',status:'confirmed',evidence:[{session_id:sidLong,seq:1}]});
+  for(let i=0;i<12;i++) await R.addStateUpdate(pool,{record_id:rec.id,kind:'decision',text:`newer unsupported proposal ${i}`,created_by:'rachit'});
+  const longPack = await buildRecordPack(cfg,pool,rec.id,{mode:'inspect',author:'agaaz',budgetTokens:20000});
+  assert.equal(longPack.evidence_summary.total,2106);
+  assert.ok(longPack.evidence_summary.shown.some(e=>e.seq===2105 && e.session_id===sidLong),'true tail after oldest 2000');
+  assert.ok(longPack.pending_operations.some(p=>p.session_id===sidLong && p.call_id==='old-pending-export'),'older contributor pending work retained');
+  assert.ok(longPack.text.includes('ACCEPTED DENOMINATOR CONSTRAINT'),'proposals cannot crowd out accepted constraints');
+  assert.equal(longPack.evidence_summary.omitted!.count,2106-longPack.evidence_summary.shown.length);
+  ok('full-history count and true tail, earlier pending operation, accepted constraint under proposal flood');
 }
 
 await client.close();

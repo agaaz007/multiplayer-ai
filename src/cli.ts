@@ -8,7 +8,12 @@ import { TYPES, type LedgerType, type LedgerObject } from "./schema.js";
 import { readReceipt, savedReceipt, renderReceiptBox, type LedgerReceipt } from "./receipts.js";
 import { installClaude, installCodex, installGuides, agentRulesText } from "./install.js";
 import { startMcp } from "./mcp.js";
-import { handleHook } from "./hooks.js";
+import { handleHook, validateCaptureCoverage, acknowledgeCapture } from "./hooks.js";
+import { verifyAcceptanceEvidence } from './acceptance-evidence.js';
+import { validateRecordCoverage, acknowledgeLocalCapture, reconcileSharedCapture } from './capture-boundary.js';
+import { investigation } from './investigation.js';
+import { correctionImpact, objectVersion, resolveAccepted } from './authority.js';
+import { AnalysisScopeSchema, AnalyticalDateSchema } from './schema.js';
 import { DEFAULT_QUIET_MS, pendingDrafts, reconcile } from "./extract.js";
 import { continuityConfigured, getPool, migrate, tableList, closePools } from "./continuity/db.js";
 import { listThreads, getThread, updateThread } from "./continuity/store.js";
@@ -31,6 +36,9 @@ const USAGE = `ledger — shared definitions, findings, changes, decisions for y
   ledger brief [--days N] [--tags a,b]   what an agent sees at session start
   ledger search <query> [--type T]       free-text search
   ledger get <id>                        show one object
+  ledger investigate <question> [--scope scope.json] [--definitions id,id] [--as-of DATE]
+                                         accepted corrections, exact evidence and affected findings across all history
+  ledger impact <correction-id>           direct/transitive review paths and unresolved lineage
   ledger record <type> < fields.json     record from JSON on stdin
   ledger drafts                          drafts awaiting review (from the transcript fallback)
   ledger discard <id> --reason "..."     reject a draft
@@ -157,6 +165,7 @@ async function main() {
         return; // keeps running
       case "brief": {
         const cfg = loadConfig();
+        for(const warning of reconcileSharedCapture(cfg).warnings) console.error(warning);
         const days = Number(flag(args, "--days") ?? 14);
         const tags = flag(args, "--tags")?.split(",").filter(Boolean);
         // --hook: legacy SessionStart entry; stdout becomes context.
@@ -181,6 +190,11 @@ async function main() {
         } catch {
           cfg = null;
         }
+        const captureWarnings:string[]=[];
+        if(event==='SessionStart' && cfg) {
+          try {captureWarnings.push(...reconcileSharedCapture(cfg).warnings);}
+          catch(error) {captureWarnings.push(`Shared capture acknowledgment unavailable; local obligations retained: ${String(error)}`);}
+        }
         const res = handleHook(event, input, { dataTools: cfg?.data_tools });
         if (event === "SessionStart") {
           const parts: string[] = [];
@@ -197,6 +211,7 @@ async function main() {
             } catch { /* never block a session start */ }
           }
           if (res.stdout) parts.push(res.stdout);
+          parts.push(...captureWarnings);
           if (parts.length) process.stdout.write(parts.join("\n\n") + "\n");
           await closePools().catch(() => {});
           process.exit(0);
@@ -216,18 +231,46 @@ async function main() {
       }
       case "search": {
         const cfg = loadConfig();
-        const q = args.filter((a) => !a.startsWith("--") && a !== flag(args, "--type")).join(" ");
+        const q = positionals(args).join(" ");
         const t = flag(args, "--type") as LedgerType | undefined;
-        const hits = search(cfg, q, { types: t ? [t] : undefined, limit: 20 });
+        const scopePath = flag(args, '--scope');
+        const scope = scopePath ? AnalysisScopeSchema.partial().parse(JSON.parse(fs.readFileSync(scopePath,'utf8'))) : undefined;
+        const hits = search(cfg, q, { types: t ? [t] : undefined, limit: 20, scope, asOf:AnalyticalDateSchema.optional().parse(flag(args,'--as-of')) });
         if (showReceipt) printReceipt(readReceipt("found", hits, q));
         if (!hits.length) return console.log("no matches");
-        for (const h of hits) console.log(`[${h.score.toFixed(2)}] ${h.type} ${h.id} — ${h.title}`);
+        for (const h of hits) {
+          console.log(`[${h.score.toFixed(2)}] ${h.type} ${h.id} — ${h.title} [${h.authority_status}]`);
+          for (const warning of h.authority_warnings) console.log(`  WARNING: ${warning}`);
+        }
         return;
       }
       case "get": {
-        const o = getById(loadConfig(), args[0]);
+        const cfg = loadConfig();
+        const o = getById(cfg, args[0]);
         if (showReceipt) printReceipt(readReceipt("opened", o ? [o] : []));
         console.log(o ? renderFull(o) : `not found: ${args[0]}`);
+        if (o) {
+          const authority = resolveAccepted(loadAll(cfg,TYPES,false),o.id,{asOf:AnalyticalDateSchema.optional().parse(flag(args,'--as-of'))});
+          console.log(`content_version: ${objectVersion(o)}\nAccepted resolution: ${authority.status}`);
+          for (const warning of authority.warnings) console.log(`WARNING: ${warning}`);
+          for (const current of authority.current.filter(c=>c.id!==o.id)) console.log(`Applicable accepted source:\n${renderFull(current)}\ncontent_version: ${objectVersion(current)}`);
+          for (const proposal of authority.proposals) console.log(`PROPOSED: ${proposal.id} — ${proposal.title}`);
+        }
+        return;
+      }
+      case 'investigate': {
+        const scopePath = flag(args,'--scope');
+        const scope = scopePath ? AnalysisScopeSchema.partial().parse(JSON.parse(fs.readFileSync(scopePath,'utf8'))) : undefined;
+        const question = positionals(args).join(' ');
+        if (!question) throw new Error('usage: ledger investigate <question> [--scope scope.json]');
+        const pack = investigation(loadConfig(),{question,scope,definition_ids:flag(args,'--definitions')?.split(','),as_of:AnalyticalDateSchema.optional().parse(flag(args,'--as-of'))});
+        if (showReceipt) printReceipt(readReceipt('found',pack.objects,question));
+        console.log(pack.text);
+        return;
+      }
+      case 'impact': {
+        if (!args[0]) throw new Error('usage: ledger impact <correction-id>');
+        console.log(JSON.stringify(correctionImpact(loadAll(loadConfig()),args[0]),null,2));
         return;
       }
       case "record": {
@@ -237,7 +280,16 @@ async function main() {
         if (!TYPES.includes(type)) { await workRecordCommand(args); return; }
         const fields = JSON.parse(readStdin() || "{}");
         const cfg = loadConfig();
+        const coverage = await validateRecordCoverage(cfg,fields);
+        await verifyAcceptanceEvidence(cfg,fields);
         const res = record(cfg, { type, fields });
+        if (coverage.length) {
+          try {
+            const applied=acknowledgeLocalCapture({schema:'ledger-capture/v1',action:'record',status:fields.status === 'draft' ? 'pending_review' : 'recorded',coverage,record_id:res.id});
+            if(applied.remote_pending) console.error(`${applied.remote_pending} remote evidence acknowledgment(s) saved; source-machine journal update awaits its next pull and reconciliation.`);
+          }
+          catch (error) { console.error(`Saved ${res.id}, but capture acknowledgment failed; do not duplicate the object: ${String(error)}`); }
+        }
         if (showReceipt) {
           let objects: LedgerObject[] | null = null;
           try { objects = loadAll(cfg, TYPES, false); } catch { /* preserve a successful save if metadata is unavailable */ }

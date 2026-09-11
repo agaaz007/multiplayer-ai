@@ -1,0 +1,10 @@
+[
+  {
+    "role": "origin", "person": "agaaz-fixture", "harness": "codex", "model": "SET_EXPLICIT_ORIGIN_MODEL",
+    "prompt": "Synthetic HiAstro-fixture only: investigate Android IN trial conversion by marriage/general cohort for paywall impressions during days 1–7. Existing logical definition d1 divides trial-start users by impression user-days. Execute that query through query_data and preserve SQL, results and caveats. Logical finding f1 is the marriage result, f2 the general result, and decision q1 provisionally relies on comparing f1 and f2. f3 is an unrelated iOS install count. Stop before validating the denominator or launching anything. Save these logical IDs and exact inputs with native memory tools."
+  },
+  {
+    "role": "correction", "person": "rachit-fixture", "harness": "claude", "model": "SET_EXPLICIT_CORRECTION_MODEL",
+    "prompt": "Review the prior HiAstro-fixture analysis. A verified historical correction, logical definition d2, replaces d1 for Android IN: unique users with a paywall impression during days 1–7 are eligible; the numerator is eligible users starting a trial from first impression through first+7 days exclusive. Preserve cohort per user. Read corrected-query with read_artifact to inspect the approved executable template. Record the owner-approved correction and original mistake with native memory, retaining exact SQL. The comparison has NOT been rerun under d2; leave that unfinished. f1/f2 and their downstream q1 need review; f3 is unrelated. A later unreviewed proposal d3 says to divide by all visitors; keep it proposed. Save the remaining question as logical source unfinished. Do not complete the cohort rerun; another PM will continue."
+  }
+]

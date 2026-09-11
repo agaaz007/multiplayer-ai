@@ -1,0 +1,10 @@
+{
+  "provider": "gbrain",
+  "mechanism": "native-agent-save",
+  "implementationRef": "gbrain-cli-0.18.2",
+  "humanCaptureInstructions": "Use GBrain's native MCP tools to save the investigation evidence, exact query and unresolved work before finishing. Preserve accepted versus proposed status and source references in the page. This explicit capture instruction is part of measured product setup.",
+  "claude": { "mcpServers": { "gbrain": { "command": "gbrain", "args": ["serve"], "env": { "HOME": "{{GBRAIN_HOME}}", "LEDGER_EVAL": "1" } } } },
+  "codex": { "mcpServers": { "gbrain": { "command": "gbrain", "args": ["serve"], "env": { "HOME": "{{GBRAIN_HOME}}", "LEDGER_EVAL": "1" } } } },
+  "readNamespaces": ["{{NAMESPACE}}"],
+  "provenanceNote": "Native GBrain MCP and agent-authored pages. This is not a claim that GBrain automatically captures coding-session transcripts. The controller creates only an empty isolated PGLite store; it never imports task evidence in native mode. Embedding coverage must be complete before successor launch."
+}

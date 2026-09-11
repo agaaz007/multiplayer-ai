@@ -77,6 +77,67 @@ const InputSchema = z.object({
   note: z.string().optional().describe("Anything about quality or coverage of this input."),
 });
 
+const scopeText = z.string().trim().min(1);
+export const AnalyticalDateSchema = isoDate.refine((v) => {
+  const [year, month, day] = v.slice(0, 10).split("-").map(Number);
+  const actual = new Date(Date.UTC(year, month - 1, day));
+  return actual.getUTCFullYear() === year && actual.getUTCMonth() === month - 1 && actual.getUTCDate() === day && Number.isFinite(Date.parse(v));
+}, "valid ISO calendar date required");
+const orderedWindow = z.object({ from: AnalyticalDateSchema, to: AnalyticalDateSchema }).refine(
+  (v) => v.from <= v.to, { message: "from must not be after to", path: ["to"] }
+);
+
+/** Applicability, not an access-control grant. Missing legacy scope stays unknown. */
+export const AnalysisScopeSchema = z.object({
+  product: scopeText,
+  dataset: scopeText,
+  environment: scopeText,
+  metric: scopeText,
+  population: scopeText,
+  grain: scopeText,
+  attribution_rule: scopeText,
+  window: orderedWindow.optional(),
+});
+export type AnalysisScope = z.infer<typeof AnalysisScopeSchema>;
+
+export const EvidenceReferenceSchema = z.object({
+  artifact_id: scopeText.optional(),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/, "SHA-256 in lowercase hexadecimal"),
+  role: z.enum(["query", "parameters", "result", "dataset", "correction", "review", "other"]),
+  session_id: scopeText.optional(),
+  seq: z.number().int().min(0).optional(),
+}).refine((v) => v.seq === undefined || v.session_id !== undefined, { message: "seq requires session_id" });
+export type EvidenceReference = z.infer<typeof EvidenceReferenceSchema>;
+
+export const DependencySchema = z.object({
+  relation: z.enum(["uses-definition", "derived-from", "based-on"]),
+  id: scopeText,
+  // Named content_version everywhere it is printed (ledger_get, ledger_investigation, record packs).
+  // It is NOT the `snapshot` field of ledger_search results, which hashes the rendered text instead.
+  version: z.string().regex(/^[a-f0-9]{64}$/, "must be the target's 64-hex content_version, printed by ledger_get and ledger_investigation (not the `snapshot` field of ledger_search)"),
+});
+export type Dependency = z.infer<typeof DependencySchema>;
+
+export const CorrectionSchema = z.object({
+  effect: z.enum(["historical", "future_only"]),
+  reason: z.string().trim().min(3),
+  effective_from: AnalyticalDateSchema.optional(),
+  effective_to: AnalyticalDateSchema.optional(),
+}).refine((v) => v.effect !== "future_only" || v.effective_from !== undefined,
+  { message: "future_only correction requires effective_from", path: ["effective_from"] })
+  .refine((v) => !v.effective_from || !v.effective_to || v.effective_from <= v.effective_to,
+    { message: "effective_from must not be after effective_to", path: ["effective_to"] });
+export type Correction = z.infer<typeof CorrectionSchema>;
+
+/** Review assertion only. The host must authorize the actor before calling record. */
+export const AcceptanceSchema = z.object({
+  actor: scopeText,
+  accepted_at: AnalyticalDateSchema,
+  evidence_refs: z.array(EvidenceReferenceSchema).min(1),
+  expected_predecessor: z.object({ id: scopeText, version: z.string().regex(/^[a-f0-9]{64}$/) }).optional(),
+});
+export type Acceptance = z.infer<typeof AcceptanceSchema>;
+
 const base = {
   title: z.string().min(3).max(140),
   author: z.string().min(1).describe("Who recorded this (person name, not agent name)"),
@@ -88,6 +149,13 @@ const base = {
     .optional()
     .describe("id of the object this replaces; that object is marked superseded"),
   body: z.string().default("").describe("Free markdown. Keep it short; put facts in fields."),
+  analysis_scope: AnalysisScopeSchema.optional(),
+  aliases: z.array(scopeText).optional().describe("Known metric or question aliases; not a scope grant."),
+  dependencies: z.array(DependencySchema).optional().describe("Exact immutable versions used by this result; legacy names alone are unresolved lineage."),
+  evidence_refs: z.array(EvidenceReferenceSchema).optional(),
+  correction: CorrectionSchema.optional(),
+  acceptance: AcceptanceSchema.optional().describe("Explicit review assertion; caller must separately authorize the actor."),
+  capture_coverage: z.array(z.object({ session_id: scopeText, evidence_ids: z.array(scopeText).min(1) })).optional(),
 };
 
 export const DefinitionSchema = z.object({
@@ -218,6 +286,7 @@ export interface LedgerObject {
   status: "stable" | "deprecated" | "draft";
   supersedes?: string;
   superseded_by?: string;
+  previous_status?: "stable" | "draft";
   description: string;
   body: string;
   fields: Record<string, unknown>; // type-specific frontmatter

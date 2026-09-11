@@ -41,6 +41,8 @@ export interface ClassifyResult {
   session_id: string;
   events_considered: number;
   candidates: number;
+  candidate_pool_size: number;
+  candidates_omitted: number;
   assignments_applied: number;
   /** assignments whose exact suggested link already existed (idempotent re-run) */
   assignments_skipped: number;
@@ -67,10 +69,8 @@ export const CLASSIFY_MIN_INTERVAL_MS = 120_000;
 export const DEFAULT_MAX_EVENTS = 400;
 export const PROMPT_CHAR_CAP = 60_000;
 const CANDIDATE_CAP = 30;
-const CANDIDATE_WINDOW_HOURS = 14 * 24;
 const EVENT_PREVIEW = 300;
 const COMPACTION_PREVIEW = 600;
-const STATE_SUMMARY = 300;
 const TITLE_MAX = 140;
 const CREATED_BY = "classifier";
 
@@ -144,18 +144,25 @@ interface Candidate { record: WorkRecord; state_summary: string; linked_here: bo
 
 function summarizeState(st: R.RecordState | null): { summary: string; updates: StateUpdate[] } {
   if (!st) return { summary: "", updates: [] };
-  const buckets: [string, StateUpdate[]][] = [["progress", st.progress], ["decision", st.decisions], ["hypothesis", st.hypotheses], ["blocker", st.blockers], ["next", st.next], ["contradiction", st.contradictions], ["note", st.notes]];
-  const parts: string[] = [];
-  const all: StateUpdate[] = [];
-  for (const [kind, ups] of buckets) {
-    all.push(...ups);
-    for (const u of ups.slice(-2)) parts.push(`${kind}${u.status === "proposed" ? " (proposed)" : ""}: ${oneLine(u.text, 120)}`);
-  }
-  return { summary: parts.length ? oneLine(parts.join("; "), STATE_SUMMARY) : "", updates: all };
+  const buckets: [string, StateUpdate[]][] = [["decision", st.decisions], ["blocker", st.blockers], ["contradiction", st.contradictions], ["next", st.next], ["progress", st.progress], ["hypothesis", st.hypotheses], ["note", st.notes]];
+  const all = buckets.flatMap(([,updates]) => updates);
+  const pack = (status: 'confirmed' | 'proposed', budget: number) => {
+    const parts: string[] = []; let shown = 0, size = 0;
+    const count = all.filter(u => u.status === status).length;
+    if (!count) return '';
+    // Each status has its own reserved budget. New proposals cannot evict confirmed state.
+    for (const [kind, ups] of buckets) for (const u of ups.filter(u => u.status === status).slice(-2).reverse()) {
+      const line = `${kind}: ${oneLine(u.text, 120)}`;
+      if (size + line.length + 2 > budget) continue;
+      parts.push(line); shown++; size += line.length + 2;
+    }
+    return `${status.toUpperCase()} (${count} current, ${count-shown} omitted from summary): ${parts.join('; ')}`;
+  };
+  return { summary: [pack('confirmed', 900), pack('proposed', 300)].filter(Boolean).join(' | '), updates: all };
 }
 
 function candidateLines(cands: Candidate[]): string {
-  if (!cands.length) return "(none: no open records for this repo in the last 14 days)";
+  if (!cands.length) return "(none: no linked, relevant or open records in this scope)";
   return cands.map((c, i) => {
     const r = c.record;
     const bits = [`[${i + 1}] ${r.id}`, `kind: ${r.kind}`, `title: ${r.title}`, `repo: ${r.repo ?? "none (non-code work)"}`, `status: ${r.status}`];
@@ -164,6 +171,42 @@ function candidateLines(cands: Candidate[]): string {
     bits.push(`state: ${c.state_summary || "no updates yet"}`);
     return bits.join(" · ");
   }).join("\n");
+}
+
+const QUERY_STOP_WORDS = new Set('the and this that with from into for was were are have has will then only also what when why how not but its keep use using now'.split(' '));
+
+/** Rank against the full allowed record scope before applying the prompt cap. No recency/closed filter on relevant records. */
+export async function selectClassifyCandidates(pool: pg.Pool, session: S.SessionRow, events: S.EventRow[], linked: WorkRecord[]) {
+  // Balance terms across this event page, with human instructions first, so one verbose
+  // recent tool invocation cannot monopolize the query. This is lexical retrieval, not authority.
+  const rows = [...events.filter(e => e.kind === 'instruction.added'), ...events.filter(e => e.kind !== 'instruction.added')]
+    .map(e => [...new Set(eventLine(e).toLowerCase().match(/[\p{L}\p{N}_]{3,}/gu) ?? [])].filter(t => !QUERY_STOP_WORDS.has(t)));
+  const allTerms = new Set(rows.flat()); const terms: string[] = [], seenTerms = new Set<string>();
+  for (let i = 0; terms.length < 128 && rows.some(row => row.length > i); i++) for (const row of rows) {
+    const term = row[i]; if (term && !seenTerms.has(term) && terms.length < 128) { terms.push(term); seenTerms.add(term); }
+  }
+  const query = terms.length ? terms.join(' | ') : '';
+  const result = await pool.query<WorkRecord & { relevance: number; pool_size: number }>(`
+    with scoped as (
+      select r.*, ts_rank_cd(
+        setweight(to_tsvector('simple',r.title),'A') || setweight(to_tsvector('simple',coalesce(r.goal,'')),'B') ||
+        setweight(to_tsvector('simple',coalesce((select string_agg(u.text,' ') from cont_state_updates u
+          where u.record_id=r.id and u.status='confirmed' and not exists
+            (select 1 from cont_state_updates v where v.record_id=u.record_id and v.supersedes=u.id and v.status='confirmed')),'')),'C'),
+        to_tsquery('simple',$3)) as relevance
+      from cont_records r where r.repo=$1 or r.repo is null or r.id=any($2::uuid[])
+    ), eligible as (select * from scoped where status='open' or relevance>0 or id=any($2::uuid[]))
+    select *, count(*) over()::int as pool_size from eligible order by relevance desc,updated_at desc,id limit $4`,
+    [session.repo, linked.map(r => r.id), query, CANDIDATE_CAP]);
+  const seen = new Set<string>(), picked: {record:WorkRecord;linked_here:boolean}[] = [];
+  const linkedIds = new Set(linked.map(r => r.id));
+  const take = (records: WorkRecord[]) => { for (const record of records) if (!seen.has(record.id) && picked.length < CANDIDATE_CAP) {
+    seen.add(record.id); picked.push({record,linked_here:linkedIds.has(record.id)});
+  } };
+  // Reserve at least half the budget for page relevance even during a linked-record flood.
+  take(linked.slice(0, Math.floor(CANDIDATE_CAP/2))); take(result.rows); take(linked);
+  const poolSize = result.rows[0]?.pool_size ?? 0;
+  return { picked, poolSize, omitted: Math.max(0,poolSize-picked.length), queryTerms: terms.length, queryTermsOmitted: Math.max(0,allTerms.size-terms.length) };
 }
 
 export function composeClassifyPrompt(ctx: { session: S.SessionRow; thread: S.ThreadRow | null; candidates: Candidate[]; events: S.EventRow[]; sinceSeq: number; notes: string[]; today: string }): string {
@@ -228,7 +271,7 @@ export async function classifySession(cfg: Config, pool: pg.Pool, sessionId: str
   const dryRun = Boolean(opts.dryRun);
   const maxEvents = Math.max(1, opts.maxEvents ?? DEFAULT_MAX_EVENTS);
   const res: ClassifyResult = {
-    session_id: sessionId, events_considered: 0, candidates: 0, assignments_applied: 0, assignments_skipped: 0, records_created: 0, updates_proposed: 0, updates_skipped: 0,
+    session_id: sessionId, events_considered: 0, candidates: 0, candidate_pool_size: 0, candidates_omitted: 0, assignments_applied: 0, assignments_skipped: 0, records_created: 0, updates_proposed: 0, updates_skipped: 0,
     unassigned: [], rejected: [], prompt_chars: 0, model_ok: false, notes: [], since_seq: 0, through_seq: 0, dry_run: dryRun,
   };
   const fail = (msg: string): ClassifyResult => { res.error = msg; return res; };
@@ -241,23 +284,23 @@ export async function classifySession(cfg: Config, pool: pg.Pool, sessionId: str
   const covering = links.filter((l) => l.source === "explicit" || l.source === "suggested");
   const maxCovered = covering.reduce((m, l) => Math.max(m, l.to_seq), 0);
   const progress = readProgress(sessionId);
-  const sinceSeq = opts.sinceSeq ?? Math.max(progress?.last_seq ?? 0, maxCovered);
+  // Explicitly linking later work does not acknowledge older unprocessed events.
+  const sinceSeq = opts.sinceSeq ?? progress?.last_seq ?? 0;
   res.since_seq = sinceSeq;
 
   const total = (await pool.query<{ n: number }>(`select count(*)::int as n from cont_events where session_id = $1 and kind = any($2) and seq > $3`, [sessionId, CONTENT_KINDS, sinceSeq])).rows[0].n;
-  let events = await S.sessionEvents(pool, sessionId, { kinds: CONTENT_KINDS, afterSeq: sinceSeq, limit: maxEvents });
-  if (total > events.length) res.notes.push(`${total - events.length} older event(s) after seq ${sinceSeq} dropped by the ${maxEvents}-event cap; the window starts at seq ${events[0]?.seq}`);
+  let events = await S.sessionEvents(pool, sessionId, { kinds: CONTENT_KINDS, afterSeq: sinceSeq, limit: maxEvents, order: 'asc' });
+  if (total > events.length) res.notes.push(`${total - events.length} newer event(s) deferred to the next page by the ${maxEvents}-event cap; this page starts at seq ${events[0]?.seq}`);
   res.through_seq = events.length ? events[events.length - 1].seq : sinceSeq;
   if (!events.length) { res.model_ok = true; return res; }
 
-  // 2. candidates: records linked to this session, then open records on the repo, then non-code records; 14-day window; cap 30
+  // 2. Full-scope relevance first, then bounded prompt packing; old/closed work can still matter.
   const linkedHere = await R.recordsForSession(pool, sessionId);
-  const seen = new Set<string>();
-  const picked: { record: WorkRecord; linked_here: boolean }[] = [];
-  const take = (rs: WorkRecord[], linked: boolean) => { for (const r of rs) { if (seen.has(r.id) || picked.length >= CANDIDATE_CAP) continue; seen.add(r.id); picked.push({ record: r, linked_here: linked }); } };
-  take(linkedHere, true);
-  if (session.repo) take(await R.listRecords(pool, { repo: session.repo, status: "open", sinceHours: CANDIDATE_WINDOW_HOURS, limit: CANDIDATE_CAP }), false);
-  take(await R.listRecords(pool, { repo: null, status: "open", sinceHours: CANDIDATE_WINDOW_HOURS, limit: CANDIDATE_CAP }), false);
+  const selection = await selectClassifyCandidates(pool, session, events, linkedHere);
+  const {picked} = selection;
+  res.candidate_pool_size = selection.poolSize; res.candidates_omitted = selection.omitted;
+  res.notes.push(`Candidate retrieval searched all ages and statuses in this repo/non-code scope plus explicitly linked work; ${selection.poolSize} eligible, ${picked.length} shown, ${selection.omitted} omitted by the ${CANDIDATE_CAP}-record prompt cap. Lexical relevance is not acceptance.`);
+  if (selection.queryTermsOmitted) res.notes.push(`${selection.queryTermsOmitted} query term(s) omitted by the 128-term retrieval budget; terms are balanced across the current event page.`);
   const candidates: Candidate[] = [];
   for (const p of picked) {
     const st = summarizeState(await R.recordState(pool, p.record.id));
@@ -267,19 +310,21 @@ export async function classifySession(cfg: Config, pool: pg.Pool, sessionId: str
   const byId = new Map(candidates.map((c) => [c.record.id, c]));
   const byTitle = new Map(candidates.map((c) => [c.record.title.trim().toLowerCase(), c]));
 
-  // 3. prompt, trimmed from the oldest end to the size cap
+  // 3. Keep the earliest unprocessed page. Defer its tail instead of skipping old evidence.
   const today = now.toISOString().slice(0, 10);
   let prompt = composeClassifyPrompt({ session, thread, candidates, events, sinceSeq, notes: res.notes, today });
   if (prompt.length > PROMPT_CHAR_CAP) {
     let dropped = 0;
     while (prompt.length > PROMPT_CHAR_CAP && events.length > 1) {
-      events = events.slice(1);
+      events = events.slice(0, -1);
       dropped++;
-      const notes = [...res.notes, `${dropped} oldest event(s) dropped to fit the prompt cap; the window starts at seq ${events[0].seq}`];
+      const notes = [...res.notes, `${dropped} newest event(s) deferred to fit the prompt cap; this page ends at seq ${events[events.length - 1].seq}`];
       prompt = composeClassifyPrompt({ session, thread, candidates, events, sinceSeq, notes, today });
     }
-    res.notes.push(`${dropped} oldest event(s) dropped to fit the prompt cap; the window starts at seq ${events[0].seq}`);
+    res.notes.push(`${dropped} newest event(s) deferred to fit the prompt cap; this page ends at seq ${events[events.length - 1].seq}`);
   }
+  if (prompt.length > PROMPT_CHAR_CAP) return fail('one event and its candidate context exceed the prompt cap; progress has not advanced');
+  res.through_seq = events[events.length - 1].seq;
   res.prompt_chars = prompt.length;
   res.events_considered = events.length;
   const seqs = new Set(events.map((e) => e.seq));

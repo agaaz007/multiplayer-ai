@@ -14,6 +14,7 @@ import { agentRulesText, installGuides, upsertHooks, HOOK_EVENTS, isLedgerHookCo
 import { handleHook, loadJournal, saveJournal, captureStats, debt } from "./hooks.js";
 import { EVIDENCE_URI } from "./evidence.js";
 import { readReceipt, savedReceipt, syncReceipt, renderReceiptBox } from "./receipts.js";
+import { objectVersion } from "./authority.js";
 
 const sh = (cwd: string, args: string[]) =>
   execFileSync("git", args, { cwd, stdio: ["ignore", "pipe", "pipe"] }).toString().trim();
@@ -195,6 +196,10 @@ const dec2 = record(cfg2, {
     valid_from: "2026-09-02",
     owner: "agaaz",
     supersedes: dec1.id,
+    acceptance: {
+      actor: cfg2.author, accepted_at: "2026-09-02", expected_predecessor: { id: dec1.id, version: objectVersion(getById(cfg2, dec1.id)!) },
+      evidence_refs: [{ artifact_id: dec1.id, sha256: objectVersion(getById(cfg2, dec1.id)!), role: "review" }],
+    },
   },
 });
 assert.equal(dec2.superseded, dec1.id);
@@ -337,7 +342,7 @@ assert.ok(!section("Deprecated").includes("Draft finding"), "draft not listed as
 
 // ---- the checkpoint loop (hooks) ----
 // Deterministic: a data query with no record blocks Stop exactly once with the
-// evidence listed; a record or an explicit skip clears it; PreCompact injects
+// evidence listed; an explicitly scoped successful record/skip clears only its evidence; PreCompact injects
 // the same list; SessionStart after a compaction re-injects it.
 const jdir = path.join(tmp, "sessions");
 const sid = "sess-1";
@@ -400,21 +405,23 @@ hook(
   T(11)
 );
 assert.equal(debt(loadJournal(sid, jdir)).length, 3, "rejected record does not clear debt");
+const capturedEvidence = [{ session_id: sid, evidence_ids: debt(loadJournal(sid, jdir)).map(e => e.evidence_id!) }];
 hook(
   "PostToolUse",
   {
     tool_name: "mcp__ledger__ledger_record_finding",
-    tool_input: { title: "Funnel by intent" },
-    tool_response: { content: [{ type: "text", text: "Recorded finding fnd-20260903-funnel-by-intent-ab12 — committed and pushed" }] },
+    tool_input: { title: "Funnel by intent", capture_coverage: capturedEvidence },
+    tool_response: { content: [{ type: "text", text: "Recorded finding fnd-20260903-funnel-by-intent-ab12 — committed and pushed" }], structuredContent: { capture_ack: { schema: "ledger-capture/v1", action: "record", status: "recorded", record_id: "fnd-20260903-funnel-by-intent-ab12", coverage: capturedEvidence } } },
   },
   T(12)
 );
-assert.equal(debt(loadJournal(sid, jdir)).length, 0, "record clears debt");
+assert.equal(debt(loadJournal(sid, jdir)).length, 0, "successful record clears its explicitly covered evidence");
 assert.equal(hook("Stop", {}, T(13)).exit, 0);
 
 // an explicit skip with a reason also clears it, and is counted separately
 hook("PostToolUse", { tool_name: "mcp__hiastro-clickhouse__run_query", tool_input: { query: "select 1" } }, T(14));
-hook("PostToolUse", { tool_name: "mcp__ledger__ledger_skip_record", tool_input: { reason: "sanity check, no conclusion" } }, T(15));
+const skippedEvidence = [{ session_id: sid, evidence_ids: debt(loadJournal(sid, jdir)).map(e => e.evidence_id!) }];
+hook("PostToolUse", { tool_name: "mcp__ledger__ledger_skip_record", tool_input: { reason: "sanity check, no conclusion", capture_coverage: skippedEvidence }, tool_response: { structuredContent: { capture_ack: { schema: "ledger-capture/v1", action: "skip", status: "dismissed", reason: "sanity check, no conclusion", coverage: skippedEvidence } } } }, T(15));
 assert.equal(hook("Stop", {}, T(16)).exit, 0, "skip clears debt");
 hook("SessionEnd", { reason: "other" }, T(17));
 
@@ -436,7 +443,7 @@ for (const ev of Object.keys(HOOK_EVENTS)) {
 }
 assert.ok(settings.hooks.Stop.some((e: any) => e.hooks[0].command === "someone-else"), "foreign hook kept");
 assert.ok(!settings.hooks.SessionStart.some((e: any) => e.hooks[0].command.startsWith("ledger brief")), "legacy brief hook replaced");
-assert.equal(settings.hooks.PostToolUse[0].matcher, "mcp__.*|Bash");
+assert.equal(settings.hooks.PostToolUse[0].matcher, undefined, "omitted matcher observes every host-supported native/wrapped tool path; hook code filters data work");
 assert.ok(isLedgerHookCommand("ledger brief --hook") && isLedgerHookCommand('"/opt/node" "/x/dist/cli.js" hook Stop') && !isLedgerHookCommand("someone-else"));
 
 // ---- transcript fallback: reconciliation to drafts ----
@@ -496,7 +503,7 @@ assert.ok(evB.conclusions[0].includes("41,200"), "legacy event_msg agent_message
 //   response_item `message` with role user|assistant|developer instead of event_msg user_message/agent_message.
 const sidB2 = "01a07aed-4a46-74a2-986b-3fc96be8e6f6";
 const codexT2 = path.join(codexDay, `rollout-2026-09-03T10-00-00-${sidB2}.jsonl`);
-const execSrc = 'const r = await tools.exec_command({cmd:"psql -c \\"select count(*) from trials\\"", timeout: 5});\nreturn r;';
+const execSrc = `const r = await tools.exec_command(${JSON.stringify({cmd: 'psql -c "select count(*) from trials"', timeout: 5})});\nreturn r;`;
 fs.writeFileSync(
   codexT2,
   [
@@ -518,8 +525,9 @@ assert.equal(evB2.session_id, sidB2);
 assert.deepEqual(evB2.prompts, ["How many trials so far?"], "new-format prompt read once; developer role and legacy duplicate excluded");
 assert.deepEqual(evB2.conclusions, ["7,712 trials so far."], "new-format assistant message read once");
 assert.equal(evB2.queries.length, 1, "custom exec with psql is a data query; apply_patch is not");
-assert.equal(evB2.queries[0].tool, "exec");
-assert.equal(evB2.queries[0].input, 'psql -c "select count(*) from trials"', "shell extracted from the JS wrapper");
+assert.equal(evB2.queries[0].tool, "exec_command");
+assert.equal(evB2.queries[0].input, 'psql -c "select count(*) from trials"', "literal shell input extracted without evaluating the JS wrapper");
+assert.equal(evB2.queries[0].output_binding, "wrapper_aggregate", "wrapper result is not falsely claimed as a directly bound query result");
 assert.ok(evB2.queries[0].output.includes("7712"), "array-of-parts output joined and paired");
 
 // the evidence keeps whole queries (the nudge's 200-char cap must not apply here)
@@ -534,10 +542,10 @@ const rdir = path.join(tmp, "sessions-r");
 const rh = (event: string, sid: string, input: any, at: string) =>
   handleHook(event, { session_id: sid, cwd: "/Users/x/proj", ...input }, { dir: rdir, now: new Date(at) });
 rh("SessionStart", sidA, { source: "startup", transcript_path: claudeT }, T(20));
-rh("PostToolUse", sidA, { tool_name: "mcp__hiastro-clickhouse__run_query", tool_input: { query: "select ..." } }, T(21));
+rh("PostToolUse", sidA, { tool_use_id: "toolu_1", tool_name: "mcp__hiastro-clickhouse__run_query", tool_input: { query: "select ..." } }, T(21));
 assert.equal(rh("SessionEnd", sidA, { reason: "other" }, T(22)).reconcile, true, "SessionEnd with debt asks for reconciliation");
 assert.equal(rh("SessionEnd", "no-debt", { reason: "other" }, T(22)).reconcile, undefined);
-rh("PostToolUse", sidB, { tool_name: "mcp__amplitude__query_amplitude_data", tool_input: { sql: "select ..." } }, T(23));
+rh("PostToolUse", sidB, { tool_use_id: "call_1", tool_name: "mcp__amplitude__query_amplitude_data", tool_input: { sql: "select ..." } }, T(23));
 const sidC = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const liveTranscript = path.join(roots.claude, cwdHash, `${sidC}.jsonl`);
 fs.writeFileSync(liveTranscript, cl({ type: "user", sessionId: sidC, message: { role: "user", content: "hi" } }) + "\n");
@@ -567,7 +575,7 @@ fs.writeFileSync(
 let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
   fs.writeFileSync(${JSON.stringify(promptFile)}, s);
   if (s.includes("paywall_impression")) { console.log(JSON.stringify({ drafts: [], reason: "a count, not a finding" })); return; }
-  console.log("\`\`\`json\\n" + JSON.stringify({ drafts: [{ type: "finding", fields: {
+  console.log("\`\`\`json\\n" + JSON.stringify({ drafts: [{ type: "finding", evidence_ids: ["q:toolu_1"], fields: {
     title: "Android trial CVR August", question: "What was trial CVR for Android in August?", result: "9.3%",
     data_window: { from: "2026-08-01", to: "2026-08-31" }, inputs: [{ source: "clickhouse", filters: "platform='android'" }],
     method: "paid over trials", query: "select countIf(paid)/count() from trials where platform='android'", confidence: "low",
@@ -602,20 +610,23 @@ assert.equal(draft.fields.result, "9.3%");
 const draftRaw = fs.readFileSync(draft.path, "utf8");
 assert.ok(draftRaw.includes("status: draft") && draftRaw.includes("capture_method: transcript_fallback") && draftRaw.includes(`source_session: ${sidA}`));
 
-// once per session
+// once per successful evidence batch; new queries in the same session remain eligible
 assert.equal(loadJournal(sidA, rdir).extracted?.result, "drafts");
 assert.equal(loadJournal(sidB, rdir).extracted?.result, "none");
-assert.equal(reconcile(cfg2, { dir: rdir, roots, quietMs: 20 * 60_000 }).length, 0, "already reconciled sessions are never re-run");
+assert.equal(reconcile(cfg2, { dir: rdir, roots, quietMs: 20 * 60_000 }).length, 0, "already processed evidence batches are not automatically re-run");
 
 // an extractor error is not a decision about the session: retried, but not forever
 const jB = loadJournal(sidB, rdir);
-jB.extracted = { at: T(30), result: "error", reason: "claude: Not logged in", draft_ids: [], attempts: 1 };
+jB.extracted = { at: T(30), result: "error", reason: "claude: Not logged in", draft_ids: [], attempts: 1, evidence_ids: ["q:call_1"] };
+jB.extractions = [jB.extracted];
 saveJournal(jB, rdir);
 assert.equal(findCandidates({ dir: rdir, roots, quietMs: 20 * 60_000 }).length, 1, "errored session is a candidate again");
 jB.extracted.attempts = 3;
+jB.extractions = [1, 2, 3].map(attempts => ({ ...jB.extracted!, attempts }));
 saveJournal(jB, rdir);
 assert.equal(findCandidates({ dir: rdir, roots, quietMs: 20 * 60_000 }).length, 0, "gives up after three attempts");
 jB.extracted = { at: T(30), result: "none", reason: "nothing", draft_ids: [], attempts: 1 };
+jB.extractions = [jB.extracted];
 saveJournal(jB, rdir);
 
 // drafts are a review queue, not knowledge
@@ -765,6 +776,8 @@ assert.deepEqual(names, [
   "ledger_brief",
   "ledger_discard_draft",
   "ledger_get",
+  "ledger_impact",
+  "ledger_investigation",
   "ledger_record_change",
   "ledger_record_decision",
   "ledger_record_definition",
@@ -833,6 +846,10 @@ const r2 = await client.callTool({
   name: "ledger_record_finding",
   arguments: {
     ...bare,
+    acceptance: {
+      actor: cfg2.author, accepted_at: "2026-09-02", expected_predecessor: { id: f1.id, version: objectVersion(getById(cfg2, f1.id)!) },
+      evidence_refs: [{ artifact_id: f1.id, sha256: objectVersion(getById(cfg2, f1.id)!), role: "review" }],
+    },
     inputs: [{ source: "postgres.subscriptions", filters: { platform: "ios" } }],
     method: "Same cohort method as the August finding, re-run after the late-arriving refunds landed.",
     assumptions: [{ statement: "refund backfill is now complete", kind: "implicit", if_wrong: "changes_conclusion" }],
@@ -842,6 +859,12 @@ const r2 = await client.callTool({
 const txt = JSON.stringify(r2);
 assert.ok(txt.includes("Recorded finding"), txt);
 assert.ok(txt.includes("superseded " + f1.id), "supersede via MCP");
+// The write hands back the pin the caller needs next, so nothing has to re-read a freshly
+// written object just to learn its content_version.
+const writtenVersion = (r2.structuredContent as any).content_version;
+assert.match(String(writtenVersion), /^[a-f0-9]{64}$/, "the record result carries content_version");
+assert.ok(txt.includes(`content_version: ${writtenVersion}`), "and states it in the text body");
+assert.ok(txt.includes("do not re-read this object"), "and says the re-read is unnecessary");
 const saved = (r2.structuredContent as any).receipt;
 assert.equal(saved.action, "saved");
 assert.equal(saved.records[0].id, saved.record_id);

@@ -1,0 +1,10 @@
+{
+  "model": "gpt-5.6-sol",
+  "simulatedUsers": true,
+  "maximumApprovedUsd": 20,
+  "stageTimeoutMs": 600000,
+  "providerWaitMs": 120000,
+  "maximumRetries": 0,
+  "maxStageOutputTokens": 16000,
+  "authorization": "User approval on 2026-09-10: simulated A/B/C/D users on this laptop, approximately $20 total for the whole pilot, real frozen HiAstro data in both tasks, C/D benchmark additions frozen; GPT-5.6 Sol for every task-agent role in every arm and the control; Codex ChatGPT subscription for inference; the OpenAI key in gbrain.env for GBrain embeddings and Graphify extraction only; the Supermemory key supplied in the onboarding prompt for scoped per-sequence keys. One sequence per product per task plus one fresh-agent control per task; no retries; failed or timed-out stages are retained as outcomes."
+}

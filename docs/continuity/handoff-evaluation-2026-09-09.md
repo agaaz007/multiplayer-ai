@@ -1,4 +1,4 @@
-The controlled tests confirm a saved-file benefit, but do not establish that structured records improve continuation accuracy over GBrain. Rachit's actual change was not restored: his captured sessions provide no verified snapshot of the nested checkout. The two-laptop test remains outstanding.
+The controlled tests confirm a saved-file benefit, but do not establish that structured records improve continuation accuracy over GBrain. A [subsequent real handoff on September 10 IST](real-rachit-handoff-2026-09-10.md) recovered Rachit's new Analysis design-readiness task from a verified snapshot and completed it with both Claude conditions. The older adaptive-learning checkout described below remains unrecovered. Source-laptop offline status remains unconfirmed.
 
 The isolated run is [hard-isolated-20260909](../../eval/runs/hard-isolated-20260909/manifest.json), with both harness directions and one repetition per condition. Eight trials completed; four long-history trials stopped at the Codex usage limit. The unchanged [Ledger report](../../eval/runs/hard-isolated-20260909/ours/report.json), [GBrain report](../../eval/runs/hard-isolated-20260909/gbrain/report.json), and [artifact re-audit](../../.context/hard-handoff/evaluation-summary-isolated.json) retain those distinctions.
 
@@ -9,7 +9,7 @@ The isolated run is [hard-isolated-20260909](../../eval/runs/hard-isolated-20260
 | E03 separate public numeric requirements | 2/2 | 0/2 | Ledger successors preserved price/CTA height and satisfied minimum clearance |
 | C02 active third agent | 2/2 | 2/2 | Both conditions coexisted with independent work in another worktree |
 | L01 long-history recall | Unmeasured, 2 errors | Unmeasured, 2 errors | Quota prevented a scored successor answer |
-| Rachit's actual change / different laptops | Not run | Not run | Actual source checkpoint unavailable |
+| Rachit's actual change / different laptops | Not run in this controlled batch | Not run in this controlled batch | A later, distinct real task is covered in the linked report |
 
 These counts are observations from one trial per direction, not reliability estimates. No continuity level is demonstrated. Ledger finding: `fnd-20260909-isolated-handoff-tests-saved-files-help-completi-lb9j`.
 
@@ -67,4 +67,4 @@ python3 eval/run-hard-handoff.py \
   --repetitions 1 --workers 4
 ```
 
-This uses the private Codex 0.153.4 installation; the machine-wide CLI was not upgraded. Auditing retained results needs no model calls: run `node .context/hard-handoff/audit-clean-results.mjs`. The report and code are in the workspace; detailed run artifacts under `eval/runs/` and `.context/` are local evidence, not a published evidence archive. Equivalent starting files, repeated trials, a verified actual task, and the second laptop are still needed before claiming improved continuation accuracy.
+This uses the private Codex 0.153.4 installation; the machine-wide CLI was not upgraded. Auditing retained results needs no model calls: run `node .context/hard-handoff/audit-clean-results.mjs`. The report and code are in the workspace; detailed run artifacts under `eval/runs/` and `.context/` are local evidence, not a published evidence archive. The subsequent real-task comparison supplies equivalent saved-code access and a verified source task from Rachit's laptop. Repeated trials, offline-source confirmation, structured records, and completed long-history recall tests are still needed before broader accuracy claims.

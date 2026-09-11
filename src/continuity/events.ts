@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import { isDataTool, summarize, DEFAULT_DATA_TOOLS } from "../hooks.js";
 import { codexExecCommands, codexOutputText, type Agent } from "../transcript.js";
 import { redactText } from "./redact.js";
+import { dataToolCalls, evidenceId, inputText } from "../capture-tools.js";
 
 /**
  * Streaming emitters: read a harness transcript from a byte offset and yield
@@ -152,13 +153,34 @@ function isHarnessInjected(raw: string): boolean {
 }
 
 function toolRequested(id: string, tool: string, input: unknown, at: string | undefined, dataTools: string[]): NormEvent {
-  const summary = summarize(input, INPUT_MAX);
+  const calls = dataToolCalls(tool, input, id, dataTools);
+  const summary = summarize(calls.length === 1 && calls[0].wrapper && calls[0].input_complete ? calls[0].input : input, INPUT_MAX);
+  const full = inputText(input), sourceBytes = Buffer.byteLength(full, "utf8");
+  // Do not run expensive full-text redaction on material we cannot store anyway.
+  const redacted = sourceBytes > ARTIFACT_MAX ? { text: "", hits: 0 } : redactText(full);
+  const bytes = sourceBytes > ARTIFACT_MAX ? sourceBytes : Buffer.byteLength(redacted.text, "utf8");
+  const payload: Record<string, unknown> = {
+    tool, input: clean(summary, INPUT_MAX), input_hash: crypto.createHash("sha256").update(full).digest("hex"),
+    is_data_tool: calls.length > 0, input_preview_truncated: full.length > INPUT_MAX || summary !== full,
+  };
+  if (calls.length) {
+    payload.evidence_ids = calls.map(call => evidenceId(call.call_id, call.tool, at, call.input));
+    if (sourceBytes <= ARTIFACT_MAX) payload.input_sha256 = crypto.createHash("sha256").update(redacted.text).digest("hex");
+    payload.input_format = typeof input === "string" ? "text" : "json";
+    payload.input_byte_size = bytes;
+    payload.input_redactions = redacted.hits;
+    payload.input_complete = redacted.hits === 0 && calls.every(call => call.input_complete) && bytes <= ARTIFACT_MAX;
+    payload.input_availability = bytes > ARTIFACT_MAX ? "oversized" : "pending_artifact";
+    if (bytes <= ARTIFACT_MAX) payload._full_input = redacted.text;
+    else payload.input_gap = { kind: "input_oversized", byte_size: bytes, note: "Full query input exceeds ARTIFACT_MAX; only a labelled preview is available." };
+    if (calls.some(call => !call.input_complete)) payload.input_gap = { kind: "wrapper_arguments_unresolved", note: "Wrapper source retained, but runtime query arguments are unknown; never execute it as a reconstructed query." };
+  }
   return {
     producer_event_id: `${id}:requested`,
     kind: "tool.requested",
     call_id: id,
     occurred_at: at,
-    payload: { tool, input: clean(summary, INPUT_MAX), input_hash: hash(summary), is_data_tool: isDataTool(tool, input, dataTools) },
+    payload,
   };
 }
 
@@ -479,7 +501,7 @@ function streamCodex(file: string, fromOffset: number, dataTools: string[]): Str
       const name = String(p.name ?? "");
       const callId = String(p.call_id);
       let input: any;
-      if (p.type === "custom_tool_call") input = name === "exec" ? codexExecCommands(String(p.input ?? "")) : String(p.input ?? "");
+      if (p.type === "custom_tool_call") input = String(p.input ?? "");
       else { try { input = typeof p.arguments === "string" ? JSON.parse(p.arguments) : p.arguments ?? {}; } catch { input = { raw: String(p.arguments ?? "") }; } }
       res.events.push(toolRequested(callId, name, input, ts, dataTools));
       inflight.set(callId, name);

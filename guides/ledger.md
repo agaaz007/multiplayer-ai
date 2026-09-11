@@ -1,6 +1,6 @@
-# Ledger — shared team memory, read first, written last
+# Ledger — shared team memory, read before the work, recorded after the answer
 
-This machine has a `ledger` MCP server. It holds the team's canonical metric **definitions**, past **findings**, shipped **changes**, and **decisions** in force, as markdown files in a git repo that every teammate's agents read and write. You are the primary reader and the primary writer. A checkpoint runs when you try to finish a turn: if data queries ran and nothing was recorded, you will be asked to record or to say why not. Nothing reconstructs your work from the transcript afterwards.
+This machine has a `ledger` MCP server. It holds the team's canonical metric **definitions**, past **findings**, shipped **changes**, and **decisions** in force, as markdown files in a git repo that every teammate's agents read and write. You are the primary reader and the primary writer. A checkpoint names query evidence that still needs a scoped record or an explicit dismissal. Live recording is the primary path; transcript fallback can propose drafts, never accepted findings.
 
 ---
 
@@ -17,9 +17,24 @@ Four object types. Each has one moment you read it and one moment you write it.
 
 Analysis is not a fifth type. Analysis is the process; a finding is its durable output and carries its own inputs, method, assumptions, and how to reproduce it.
 
-Objects are never edited. A refresh or reversal is a new object with `supersedes`; the old one becomes `deprecated` and drops out of the brief. Record under the human's name. Agents are ephemeral; people own claims.
+Original evidence and claims are preserved. A draft or proposed replacement cannot hide accepted knowledge. A stable replacement uses `supersedes` and explicit `acceptance` with the configured human's name, validation evidence and the exact predecessor version returned by `ledger_get`. Either person's agent may accept after validating that evidence; a separate human review is not required. Conflicting accepted replacements remain unresolved instead of being selected by timestamp. New records are attributed to the configured human; another author cannot be supplied implicitly.
 
-The brief you got at session start (definitions, decisions in force, last 14 days of findings and changes) is the whole ledger at a glance. Everything else is one tool call away.
+The brief is a bounded activity summary. It is not exhaustive task context. `ledger_investigation` retrieves applicable accepted definitions, correction history, exact dependencies and affected work across full history.
+
+---
+
+## Deliver first, then record
+
+The answer is the deliverable. The record is derived from it. Produce the answer for the person
+who asked, then record. Never spend the end of a bounded turn on bookkeeping while the answer is
+still unwritten: **a saved record with no delivered answer is a failed turn**, and it is the one
+failure the ledger cannot repair, because nothing in it reconstructs an answer you never gave.
+
+Recording early buys insurance you already hold: the Stop checkpoint, the SessionEnd transcript
+fallback and the 30-minute reconciler all run whether or not you remember them (see *What runs
+automatically*). It is paid for with the only budget that cannot be recovered. Short on time or
+context? Answer, then record compactly with `confidence: low` — a rough record with its
+assumptions written down beats a perfect one that arrived after the turn was killed.
 
 ---
 
@@ -27,10 +42,16 @@ The brief you got at session start (definitions, decisions in force, last 14 day
 
 Do these before the work, not after.
 
-- **Before writing a query:** use the ledger definition verbatim. If the metric has no definition, record one with `ledger_record_definition` before reporting a number. A number without a definition is not a finding.
-- **Before an analysis:** `ledger_search` with the question. If a finding exists, reuse it, or refresh it with `supersedes`. Never silently recompute.
+- **Before writing a query:** resolve the accepted definition for the task's product, dataset/environment, metric, population, grain, attribution rule and window. Check that its formula and evidence support the task; accepted is not synonymous with proven correct. If the metric has no definition, record one before reporting a number.
+- **Before an analysis:** use `ledger_investigation` with the question and `analysis_scope`, adding exact `definition_ids` when known. `ledger_search` remains discovery. Missing scope, conflicting accepted versions, missing artifacts and unresolved lineage must remain explicit. Do not present a result marked needs-review as safe to reuse.
 - **Before attributing a metric move:** `ledger_search` with type `change` over the window. Something probably shipped.
 - **Before proposing direction:** `ledger_search` with type `decision`. It may already be decided, or decided against.
+
+Pin analytical findings with `dependencies: [{relation: "uses-definition", id, version}]`, where `version` is the `content_version` returned by the `ledger_record_*` call that saved the object, or by `ledger_get` for one you did not write. Use `derived-from` and `based-on` for exact prior-result dependencies. Keep `definitions_used` friendly names for compatibility; names alone do not establish lineage. New stable findings cannot use a corrected definition that is no longer applicable to their reporting window. Preserve old claims as historical evidence or drafts, rather than reviving them as current results.
+
+A correction states its reason and whether it is `historical` or `future_only`, with effective dates. To replace accepted knowledge, include `acceptance: {actor, accepted_at, expected_predecessor: {id, version}, evidence_refs: [...]}`. Evidence references carry an `artifact_id` (a retained artifact or a Ledger object ID), SHA-256 and role. Fetch the original evidence and verify the query before accepting. Tool-boundary checks verify referenced content availability and hashes; they do not establish that the analytical reasoning is correct.
+
+After an accepted correction, call `ledger_impact(correction_id)`. It returns direct and transitive review paths, including older definition generations and incomplete legacy dependencies. Affected does not mean false. Recompute or explicitly revalidate results, preserving originals and naming the correction in the new evidence. A future-only definition does not retrospectively invalidate a previously applicable calculation.
 
 ---
 
@@ -55,6 +76,12 @@ Compatible MCP Apps hosts can show expandable evidence cards. The chat receipt r
 "iOS users seem to convert better" is useless to a teammate two days later. What they need is: what exactly was concluded, from what inputs, by what method, under what assumptions, and how to reproduce it.
 
 `ledger_record_finding` rejects a record that lacks inputs, method, or assumptions. It also rejects an assumptions list with no implicit assumption, and tells you what to add. This is deliberate. The parts of an analysis people leave out are the parts that make two PMs get two different numbers.
+
+A successful write is its own confirmation. It returns the new id, the `content_version` to pin
+dependencies to, any supersession, the git sync status, similar prior findings, and the capture
+acknowledgment. **Do not re-read an object you just wrote** — `ledger_get` on it returns nothing
+the write did not already give you, and at a full context window that round trip is one of the
+most expensive calls you can make.
 
 Before recording, run the **key assumptions check**, three questions:
 
@@ -137,7 +164,7 @@ Changes and definitions are short. A change is what, when, where, to whom, and h
 
 **"Was that an analysis?"** If you ran a query against real data and reported a number, yes. Record it, even with `confidence: low`. A rough number with its assumptions written down beats no record. The bar is "would someone recompute this next week": if yes, record.
 
-**"The checkpoint asked, but nothing here is a finding."** Call `ledger_skip_record` with the reason: exploration, a sanity check that confirmed nothing, a dead end. It clears the checkpoint and is counted, so be honest. Do not use it to get past the reminder when there is a number someone will want.
+**"The checkpoint asked, but nothing here is a finding."** Call `ledger_skip_record` with a reason and the exact `capture_coverage` IDs for the queries you inspected: exploration, a sanity check that confirmed nothing, a dead end. Only those IDs are dismissed. An unrelated save, an unscoped skip, or a failed call cannot clear the other queries. Do not dismiss evidence for a number someone will want.
 
 **"A similar finding already exists."** Read it with `ledger_get`. Same question, older data: record yours with `supersedes`. Same question, same window, different number: record yours with `prior.relation: contradicts` and say why in `caveats`. Different question that happens to share words: record as new.
 
@@ -151,7 +178,7 @@ Changes and definitions are short. A change is what, when, where, to whom, and h
 
 **"The tool rejected my record."** Read the message. It names the field and, for assumptions, lists the common implicit ones. Add what is missing and call again. Do not drop fields to get past validation.
 
-**"The brief says drafts are awaiting review."** These came from the transcript fallback: a session ran queries, nothing was recorded live, and an extractor read the transcript afterwards. They are not in force and not to be trusted. For each one: `ledger_get` it, check the number against the query and the window, then either record a stable object with `supersedes` set to the draft id (the full format applies, so add the assumptions the extractor could not know), or `ledger_discard_draft` with the reason. Do not leave them sitting; the queue is the signal that live capture failed.
+**"The brief says drafts are awaiting review."** A fallback draft can cover specific query IDs, but that is pending review, not an accepted finding. Read it with `ledger_get`, check the query, result and window, and carry its verified `capture_coverage` into a complete reviewed replacement. Discard an incorrect draft with a reason. Discarding a draft does not prove that its underlying investigation produced nothing durable: record the corrected result, or explicitly dismiss only the evidence that was a dead end. Keep unresolved review visible.
 
 ---
 
@@ -167,7 +194,7 @@ Changes and definitions are short. A change is what, when, where, to whom, and h
 | `ledger_record_finding` | an analysis finished. Returns similar prior findings |
 | `ledger_record_change` | something went live |
 | `ledger_record_decision` | a direction was chosen, dropped, or reversed |
-| `ledger_skip_record` | the checkpoint asked and nothing was durable; give the reason |
+| `ledger_skip_record` | dismiss exact `capture_coverage` IDs with a reason; unmatched evidence remains owed |
 | `ledger_discard_draft` | a draft in the review queue is not durable knowledge; give the reason. To promote instead, record a stable object with `supersedes` |
 | `ledger_stats` | pilot health: who records, what the checkpoint caught, findings missing definitions or assumptions, duplicates across authors |
 
@@ -177,7 +204,7 @@ Every record commits and pushes. Every read pulls. Teammates see each other's ob
 
 ## Execution continuity: continuing a teammate's unfinished work
 
-The four object types carry conclusions. Unfinished work is carried by **threads**: a goal pursued over time in one repo across any number of sessions and harnesses. A local helper captures every session automatically (prompts, assistant text, tool calls, file changes) and snapshots the worktree to a hidden git ref every 30 seconds. Nothing depends on an agent remembering to save.
+The four object types carry conclusions. Unfinished work is carried by **threads**: a goal pursued over time in one repo across any number of sessions and harnesses. The configured local helper captures supported session events and snapshots the session's repository to a hidden git ref on its configured cadence. Inspect capture gaps and remote verification. A different or nested checkout is not automatically included in that repository snapshot.
 
 At session start the brief lists teammates' **Open threads** for the last 48 hours, this repo first, and any **Ledger notices** (for example, that someone continued your thread).
 
@@ -212,13 +239,23 @@ At session start the brief lists teammates' **Open threads** for the last 48 hou
 
 In Claude Code and in Codex (CLI and desktop app), five hooks make the loop deterministic. None of them decide what counts as knowledge; they only decide when to ask.
 
-- **SessionStart:** the brief is injected. After a compaction or resume, any uncaptured queries from earlier in the session are listed again, so nothing is lost when context is compressed.
-- **PostToolUse:** every data-tool call (MCP analytics servers, `psql`/`clickhouse`/`bq`/`duckdb` in Bash) is noted in a local session journal: tool, query text, time. This is evidence, not knowledge. It never leaves the machine.
-- **Stop:** when you try to finish a turn with queries since the last record, the stop is blocked once and the queries are quoted back. You record, or you call `ledger_skip_record`. The same batch is never asked about twice.
-- **PreCompact:** if uncaptured queries exist when context is about to be compacted, they are injected into context with a request to record now, while method and assumptions are still in your head.
-- **SessionEnd:** if queries ran and nothing was recorded, live capture has failed for this session, and the transcript fallback starts in the background: an extractor reads the transcript and writes **drafts**, never stable objects. A reconciler also runs every 30 minutes for sessions that died without a SessionEnd, once their transcript has been quiet for 20 minutes. Drafts show up in the next brief under "Drafts awaiting review".
+- **SessionStart:** the brief is injected. Unresolved query IDs and draft-covered evidence awaiting review are shown separately after resume or compaction.
+- **PostToolUse:** supported native and wrapped analytics calls create stable evidence IDs in a local journal. Static wrapper inspection never evaluates code; dynamic arguments and aggregate results remain labelled unresolved. The continuity helper retains permitted full query/parameter inputs as artifacts with hashes, independently of short display previews. Redacted, oversize, missing or undelivered inputs do not count as complete executable evidence.
+- **Stop:** unresolved evidence IDs trigger one reminder per unchanged batch. Save or dismiss only the IDs actually covered. A successful save without coverage remains a valid object but clears no query obligation.
+- **PreCompact:** unresolved query IDs are shown again while method and assumptions are still in context. The next session start also names pending review.
+- **SessionEnd:** unresolved evidence can start fallback extraction. Reconciliation processes explicit evidence batches, including new queries after a session resumes. A fallback draft only covers the IDs it names and remains pending review. Unmatched evidence remains owed; an unrelated draft does not advance past it. Quiet sessions are also eligible after the configured reconciliation delay.
 
-Codex runs the same five hooks from `~/.codex/hooks.json`, but skips any hook that has not been trusted. If the checkpoint never fires in Codex, the user has not run `/hooks` and trusted the ledger entries yet; tell them. Until then, call `ledger_brief` yourself at the start of a relevant session and record before you finish.
+The checkpoint prints the actual session and query IDs. Add only those you verified to a record or skip call:
+
+```json
+{"capture_coverage":[{"session_id":"the-session-printed-by-the-checkpoint","evidence_ids":["q:the-actual-call-id"]}]}
+```
+
+Do not invent these IDs. A local successful save acknowledges relevant recording separately from Git publication; only an acknowledged push means the object is shared remotely. `pending_review` means a draft exists and still needs checking, not that its conclusion is accepted.
+
+When accepting a teammate's draft, carry its verified `capture_coverage` into the replacement with `supersedes`. Remote IDs must exist in the replaced record or retained shared query events. The save reports source-machine acknowledgment as pending; it cannot change that machine's local journal. On its next SessionStart or brief, the source client pulls accepted records and acknowledges only matching local query IDs. Unrelated obligations remain outstanding. Explicit skips remain local.
+
+Codex skips hooks that have not been trusted. If a checkpoint is absent, check the installed hook configuration, trust state and emitted tool shape; absence alone does not identify the cause. A matcher-free PostToolUse group observes all supported tool paths, and Ledger filters relevant work locally. Installing a new hook definition may require trust review. Until capture is verified, read the brief and record relevant work explicitly; do not claim automatic coverage.
 
 ---
 

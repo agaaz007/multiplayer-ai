@@ -1,5 +1,7 @@
 import type pg from "pg";
 import type { NormEvent } from "./events.js";
+// evidence.ts imports only types from this module, so this is not a runtime cycle.
+import { resolveThreadId } from "./evidence.js";
 
 /**
  * Continuity store: the six tables in db.ts, plus notifications. Every rule
@@ -112,13 +114,15 @@ export async function appendEvents(pool: pg.Pool, sessionId: string, events: Nor
   }
 }
 
-export async function sessionEvents(q: Q, sessionId: string, opts: { kinds?: string[]; limit?: number; afterSeq?: number } = {}): Promise<EventRow[]> {
+export async function sessionEvents(q: Q, sessionId: string, opts: { kinds?: string[]; limit?: number; afterSeq?: number; order?: 'asc' | 'desc' } = {}): Promise<EventRow[]> {
   const params: unknown[] = [sessionId];
   let where = `session_id = $1`;
   if (opts.kinds?.length) { params.push(opts.kinds); where += ` and kind = any($${params.length})`; }
   if (opts.afterSeq != null) { params.push(opts.afterSeq); where += ` and seq > $${params.length}`; }
-  const r = await q.query<EventRow>(`select * from cont_events where ${where} order by seq ${opts.limit ? `desc limit ${Number(opts.limit)}` : "asc"}`, params);
-  return opts.limit ? r.rows.reverse() : r.rows;
+  const descending = opts.order === 'desc' || (opts.order == null && Boolean(opts.limit));
+  const limit = opts.limit == null ? '' : ` limit ${Math.max(1, Math.floor(Number(opts.limit) || 1))}`;
+  const r = await q.query<EventRow>(`select * from cont_events where ${where} order by seq ${descending ? 'desc' : 'asc'}${limit}`, params);
+  return descending ? r.rows.reverse() : r.rows;
 }
 
 export async function threadEvents(q: Q, threadId: string, opts: { kinds?: string[]; limit?: number } = {}): Promise<EventRow[]> {
@@ -153,7 +157,11 @@ export async function createThread(q: Q, t: { repo: string; branch?: string | nu
 }
 
 export async function getThread(q: Q, id: string): Promise<ThreadRow | null> {
-  const r = await q.query<ThreadRow>(`select * from cont_threads where id = $1`, [id]);
+  // Accept the 8-character form record packs render; without this the `::uuid` cast
+  // fails with an opaque database error instead of returning the thread or null.
+  const resolved = await resolveThreadId(q, id);
+  if (!resolved) return null;
+  const r = await q.query<ThreadRow>(`select * from cont_threads where id = $1`, [resolved]);
   return r.rows[0] ?? null;
 }
 
