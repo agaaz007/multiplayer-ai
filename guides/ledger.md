@@ -91,17 +91,30 @@ Before recording, run the **key assumptions check**, three questions:
 
 Anything you relied on without anyone saying it is `kind: implicit`. Anything the asker stated is `kind: explicit`. Mark `if_wrong` as `minor`, `weakens_conclusion`, or `changes_conclusion`.
 
+**Say what kind of claim it is.** `claim_type` decides what else the record must carry, because the three kinds are falsified by different evidence:
+
+| `claim_type` | example | also required |
+|---|---|---|
+| `measurement` | "trial CVR was 12.4%" | `query` (or `reproduce.query_or_artifact`) — a measurement is verified by re-running it, and nobody can re-run what was not recorded |
+| `comparison` | "A converts better than B" | `baseline`, and `confidence_basis` giving sample sizes and how comparable the groups are |
+| `explanation` | "A wins because its copy creates urgency" | `discriminating_test`, rival explanations in `alternatives_considered`, and a `derived-from` pin to the result being explained |
+
+The explanation rule is the load-bearing one. The outcome you are explaining is equally consistent with every rival explanation, so it cannot establish yours: name the observation that would come out one way if yours holds and another way if a rival does. Filing the story as a `measurement` to avoid this gives a hunch the standing of a number.
+
+**Record `inputs[].snapshot_at`** — when you read the source, or the source's watermark. Two results over the same window can differ only because late-arriving events or a backfill moved the data underneath them. Without a snapshot the read path cannot tell that re-read apart from a disagreement, and reports it as a conflict for a person to adjudicate.
+
 A complete finding:
 
 ```json
 {
   "title": "Marriage vs general intent, trial-start CVR, Android IN",
+  "claim_type": "comparison",
   "question": "Does intent=marriage convert to trial start better than intent=general?",
   "result": "Marriage users had 18.2% higher trial-start CVR (12.4% vs 10.5%, n=41,200 vs 118,900)",
   "definitions_used": ["trial_start_cvr", "paywall_impression"],
   "data_window": { "from": "2026-08-20", "to": "2026-08-31" },
   "inputs": [
-    { "source": "mixpanel", "dataset": "hiastro-production", "population": "users shown subscription_paywall", "filters": { "country": "IN", "platform": "android" } }
+    { "source": "mixpanel", "dataset": "hiastro-production", "population": "users shown subscription_paywall", "filters": { "country": "IN", "platform": "android" }, "snapshot_at": "2026-09-01" }
   ],
   "method": "Per-user trial-start conversion compared between the marriage and general intent cohorts, cohort by first paywall impression in the window.",
   "grain": "user",
@@ -160,13 +173,25 @@ Changes and definitions are short. A change is what, when, where, to whom, and h
 
 ---
 
+## Accepted is not verified
+
+Three different things, and the read surfaces keep them apart:
+
+- **recorded** — someone wrote it down.
+- **accepted** — a person asserted a review against pinned evidence (`acceptance`, compare-and-swapped against the predecessor's `content_version`). It is not a claim that the analysis is true.
+- **reproduced** — someone re-ran the recorded recipe at an exact `content_version` and got the same answer.
+
+To reproduce a finding, record your own with `reproduction_of: {id, version, outcome}` — outcome is `matched`, `differed` or `could_not_run` — and pin the same id and version in `dependencies` with relation `derived-from`. `ledger_get` and `ledger_investigation` then report the target as `reproduced`, `contested` or `unreproduced`. A re-run by the person who recorded it counts and is labelled as not independent; an attempt against an earlier `content_version` never carries over to the current one.
+
+**Do not settle a disagreement by writing over it.** Two claims can both be correct for different populations, or differ only because they read different snapshots. When they genuinely disagree both stand: `ledger_investigation` marks the pair unresolved, refuses to rank them, and also flags same-scope claims that nobody linked. Resolve by superseding one with evidence, or by recording why both stand — never by recency. `ledger_impact(correction_id).interrupt` says whether the ambiguity changes what anyone does next; when nothing downstream pins either side, the question can stay open instead of interrupting a person.
+
 ## Decisions you'll face
 
 **"Was that an analysis?"** If you ran a query against real data and reported a number, yes. Record it, even with `confidence: low`. A rough number with its assumptions written down beats no record. The bar is "would someone recompute this next week": if yes, record.
 
 **"The checkpoint asked, but nothing here is a finding."** Call `ledger_skip_record` with a reason and the exact `capture_coverage` IDs for the queries you inspected: exploration, a sanity check that confirmed nothing, a dead end. Only those IDs are dismissed. An unrelated save, an unscoped skip, or a failed call cannot clear the other queries. Do not dismiss evidence for a number someone will want.
 
-**"A similar finding already exists."** Read it with `ledger_get`. Same question, older data: record yours with `supersedes`. Same question, same window, different number: record yours with `prior.relation: contradicts` and say why in `caveats`. Different question that happens to share words: record as new.
+**"A similar finding already exists."** Read it with `ledger_get`. Same question, older data: record yours with `supersedes`. Same question, same window, different number: compare `inputs[].snapshot_at` and the populations before calling it a disagreement — different snapshots or populations mean you are not disagreeing. If you still disagree, record yours with `prior.relation: contradicts` and say why in `caveats`; supersede only if you are correcting it, not merely differing from it. Different question that happens to share words: record as new.
 
 **"There is no definition for this metric."** Record one first. Say what you computed, exactly, with exclusions. If the asker disagrees later, the definition gets superseded, and the finding still says which definition it used.
 

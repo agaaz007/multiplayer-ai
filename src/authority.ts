@@ -417,6 +417,8 @@ export interface ImpactResult {
   excluded: { id: string; reason: string }[];
   incomplete: { id: string; reason: string }[];
   complete: boolean;
+  /** Whether this correction changes what anyone does next. Nothing downstream means nobody needs interrupting. */
+  interrupt: { required: boolean; reason: string };
 }
 
 /** Reverse traversal over exact versions; it identifies review obligations, never rewrites past claims. */
@@ -424,12 +426,21 @@ export function correctionImpact(objects: LedgerObject[], correctionId: string):
   const byId = new Map(objects.map((o) => [o.id, o]));
   const c = byId.get(correctionId);
   const effect = (c?.fields.correction as Correction | undefined)?.effect ?? "unspecified";
-  const result: ImpactResult = { correction_id: correctionId, accepted: Boolean(c && wasAccepted(c)), effect, affected: [], excluded: [], incomplete: [], complete: false };
-  if (!c || !c.supersedes || !byId.has(c.supersedes)) { result.incomplete.push({ id: correctionId, reason: "correction or original predecessor is unavailable" }); return result; }
-  if (!result.accepted) { result.incomplete.push({ id: correctionId, reason: "correction is not accepted; no automatic review impact asserted" }); return result; }
+  const result: ImpactResult = { correction_id: correctionId, accepted: Boolean(c && wasAccepted(c)), effect, affected: [], excluded: [], incomplete: [], complete: false,
+    interrupt: { required: false, reason: "not yet computed" } };
+  const settle = (r: ImpactResult): ImpactResult => {
+    r.interrupt = r.affected.length
+      ? { required: true, reason: `${r.affected.length} recorded result(s) depend on the corrected record and need review before reuse: ${r.affected.slice(0, 5).map((a) => a.id).join(", ")}${r.affected.length > 5 ? ", …" : ""}` }
+      : r.incomplete.length
+        ? { required: true, reason: `no downstream result is confirmed affected, but lineage is unresolved, so the blast radius is unknown: ${r.incomplete.slice(0, 3).map((x) => x.reason).join("; ")}` }
+        : { required: false, reason: "no recorded work depends on the corrected record; nothing downstream changes, so this needs no one's attention yet" };
+    return r;
+  };
+  if (!c || !c.supersedes || !byId.has(c.supersedes)) { result.incomplete.push({ id: correctionId, reason: "correction or original predecessor is unavailable" }); return settle(result); }
+  if (!result.accepted) { result.incomplete.push({ id: correctionId, reason: "correction is not accepted; no automatic review impact asserted" }); return settle(result); }
   if(effect==='unspecified') result.incomplete.push({id:correctionId,reason:'replacement has no declared historical/future effect; downstream dependencies require review and applicability is unresolved'});
   const family = resolveAccepted(objects, c.id);
-  if (family.status === "conflict") { result.incomplete.push({ id: correctionId, reason: "competing accepted corrections require resolution" }); return result; }
+  if (family.status === "conflict") { result.incomplete.push({ id: correctionId, reason: "competing accepted corrections require resolution" }); return settle(result); }
   const reverse = new Map<string, { child: LedgerObject; ref: Dependency }[]>();
   const unresolved: { child: LedgerObject; target?: string; reason: string }[] = [];
   for (const o of objects) {
@@ -498,5 +509,5 @@ export function correctionImpact(objects: LedgerObject[], correctionId: string):
   }
   result.incomplete = [...new Map(result.incomplete.map((x) => [`${x.id}:${x.reason}`, x])).values()];
   result.complete = result.incomplete.length === 0;
-  return result;
+  return settle(result);
 }

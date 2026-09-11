@@ -1,0 +1,22 @@
+# Independent grading
+
+Engineering automated grade is the fraction of applicable black-box behavior checks passed, with the full per-check vector and cumulative stage regressions. Authentication, cross-owner data exposure and duplicate external effects are critical failures. Startup/build failures are failures, not an empty denominator. Unavailable grader infrastructure is not-evaluated. Tests call the actual HTTP server, restart it against the same database, and inspect the controlled provider's actual side effects. Agent-written tests are evidence, not the acceptance oracle. Baseline must fail and a retained controller-only reference implementation must pass; mutation tests must catch known bad implementations.
+
+PM automated grade is a vector of verified factual/constraint checks, never the total quality score. Numeric tolerances are stated; equivalent phrasing is handled by structured factual fields rather than exact prose matching. Missing facts fail completeness checks; unavailable independent judgment stays not-evaluated. Source IDs are checked against the stage-visible archive, but a valid citation is not automatically supporting evidence.
+
+Two independent reviewers receive anonymized answers and raw evidence, without product names, memory tool names, costs, timing, or another review. Keep the reversible blinding map controller-private; label residual self-identification if an answer exposes its arm. Reviewers first judge quality, then a separate trace reviewer evaluates reuse. Review disagreements are retained and adjudicated by a human or a third independent reviewer under the frozen rubric. Report inter-reviewer agreement; do not call model review human judgment.
+
+Score each PM dimension 0–4 (0 absent/contradictory; 1 weak; 2 adequate; 3 strong; 4 unusually complete and precise), with source/answer passages:
+
+1. Problem framing and population: actual user problem, decision owner, applicable market/window and objective.
+2. Evidence synthesis: combines research and measurements; handles the tracking correction; does not infer causality from nonrandom comparisons.
+3. Alternatives and opportunity cost: compares feasible choices, including deferral, with capacity and downside.
+4. Uncertainty and information value: names decision-changing assumptions and proposes a discriminating next observation rather than generic more research.
+5. Executable decision: bounded scope, owner, resources, success/stop thresholds and revisit time.
+6. Updating and consequences: applies later evidence, identifies affected earlier plans, preserves still-valid history and avoids treating proposals as approval.
+
+Require a separate critical-error list: fabricated customer fact; invalid denominator/causal assertion driving the recommendation; exceeded hard budget; unauthorized proposal treated as accepted; continuing above a mandatory stop threshold without acknowledging/handling it; stale result applied to the wrong population. A critical error prevents a decision-quality pass regardless of polished prose. A reviewer cannot assign a critical error solely because it prefers another feasible product choice.
+
+Engineering human/model review adds maintainability, operational clarity, migration/recovery reasoning and honest limitations, but cannot override a failed behavior test. Both tracks report verified A+B→C and C→D reuse, reconstruction effort, recovery after interruption, stale-decision regressions, delivery latency and handoff durability separately.
+
+No overall score is emitted until all required independent reviews are present. Missing review is `not_evaluated`, not zero and not pass. The local pack contains a blank review form and evidence packet; self-authored reference answers validate mechanics only and never establish product performance.
