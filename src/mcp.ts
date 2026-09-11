@@ -99,10 +99,13 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
     async ({ id, as_of }) => {
       const o = getById(cfg, id);
       if (!o) return evidenceResult(`Not found: ${id}`, [], { missing_ids: [id] });
-      const authority = resolveAccepted(loadAll(cfg, TYPES, false), id, {asOf: as_of});
+      // One load: the object set feeds both resolution and verification, and a second read of the
+      // whole ledger per ledger_get is exactly the amplification this surface is supposed to avoid.
+      const all = loadAll(cfg, TYPES, false);
+      const authority = resolveAccepted(all, id, {asOf: as_of});
       const current = authority.current.filter(c=>c.id !== o.id);
       const objects = [...new Map([o,...current,...authority.proposals].map(x=>[x.id,x])).values()];
-      const claim = o.type === 'finding' ? verification(loadAll(cfg, TYPES, false), o) : null;
+      const claim = o.type === 'finding' ? verification(all, o) : null;
       return evidenceResult([renderFull(o), `content_version: ${objectVersion(o)}`, `Accepted resolution: ${authority.status}`,
         ...(claim ? [`Verification: ${claim.status}${claim.notes.length ? ` — ${claim.notes.join('; ')}` : ''}. Accepted is a review assertion; reproduced means someone re-ran the recorded recipe at this exact content_version.`] : []),
         ...authority.warnings.map(w=>`WARNING: ${w}`),
