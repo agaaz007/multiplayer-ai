@@ -1,7 +1,7 @@
 import { loadAll, type Config } from './store.js';
 import { TYPES, type LedgerObject } from './schema.js';
 import { score, renderFull, matchesDiscoveryScope } from './query.js';
-import { matchesAnalysisScope, objectVersion, resolveAccepted, correctionImpact, type ScopeQuery } from './authority.js';
+import { matchesAnalysisScope, objectVersion, resolveAccepted, correctionImpact, dependents, sameAnalyticalScope, snapshotIdentity, snapshotsDiffer, verification, type ScopeQuery } from './authority.js';
 
 export interface InvestigationOptions {
   question: string;
@@ -67,24 +67,84 @@ export function analyticalContext(objects: LedgerObject[], opts: InvestigationOp
   }
   const unresolved_scope = opts.scope ? objects.filter(o=>!o.fields.analysis_scope && score(opts.question,o)>0).map(o=>o.id) : [];
   if (unresolved_scope.length) warnings.push(`${unresolved_scope.length} legacy matching records lack analytical scope; they are not silently used as current task authority.`);
-  const renderObject = (o: LedgerObject) => `${renderFull(o)}\n**content_version**: ${objectVersion(o)}`;
+
+  // Competition is computed through the supersession DAG, so two same-scope claims nobody linked are two
+  // separate lineages and neither side is flagged. This is the same comparison the write path nudges
+  // about (similarFindings), run where honouring the nudge is no longer the second author's option.
+  const lineage = new Map<string,string>();
+  for (const [family, r] of contexts) for (const o of r.history) lineage.set(o.id, family);
+  const sameWindow = (a: LedgerObject, b: LedgerObject) => {
+    const [x,y] = [a.fields.data_window as {from:string;to:string}|undefined, b.fields.data_window as {from:string;to:string}|undefined];
+    return Boolean(x && y && x.from.slice(0,10)===y.from.slice(0,10) && x.to.slice(0,10)===y.to.slice(0,10));
+  };
+  const claims = current.filter(o=>o.type==='finding');
+  const unlinked: {ids:[string,string]; reason:string}[] = [];
+  for (let i=0;i<claims.length;i++) for (let j=i+1;j<claims.length;j++) {
+    const [a,b] = [claims[i],claims[j]];
+    if (lineage.get(a.id) && lineage.get(a.id)===lineage.get(b.id)) continue;
+    if (!sameAnalyticalScope(a,b) || !sameWindow(a,b)) continue;
+    if (Math.min(score(String(a.fields.question ?? ''),b), score(String(b.fields.question ?? ''),a)) < 0.5) continue;
+    unlinked.push({ids:[a.id,b.id], reason: snapshotsDiffer(a,b)
+      ? `different data snapshots (${snapshotIdentity(a)} vs ${snapshotIdentity(b)}): likely a re-read of changed source data, not a disagreement`
+      : `identical analytical scope, window and question, and no supersession relation between them`});
+  }
+  for (const u of unlinked) warnings.push(`possibly competing, unlinked: ${u.ids.join(' and ')} — ${u.reason}. Neither supersedes the other, so neither is deprecated; compare them and either link one with supersedes or record why both stand.`);
+
+  const verified = new Map<string, ReturnType<typeof verification>>();
+  for (const o of current) if (o.type==='finding') verified.set(o.id, verification(objects,o));
+  const renderObject = (o: LedgerObject) => {
+    const v = verified.get(o.id);
+    const line = v ? `\n**verification**: ${v.status}${v.notes.length ? ` — ${v.notes.join('; ')}` : ''}` : '';
+    return `${renderFull(o)}\n**content_version**: ${objectVersion(o)}${line}`;
+  };
+  // Three states the old shape collapsed into one list: reproduced at this exact version, accepted but
+  // never re-run, and accepted-but-flagged. Accepted is a review assertion; reproduced is a re-run.
+  const applicable = current.filter(o=>!affected.has(o.id));
+  const reproduced = applicable.filter(o=>verified.get(o.id)?.status==='reproduced');
+  const contested = applicable.filter(o=>verified.get(o.id)?.status==='contested');
+  const unproven = applicable.filter(o=>!reproduced.includes(o) && !contested.includes(o));
+
+  // Only interrupt a person when the ambiguity changes what happens next: an unresolved disagreement
+  // that nothing pins is a question that can stay open, and this says which kind each one is.
+  const blastRadius = (ids: string[]) => {
+    const pinned = [...new Set(ids.flatMap(id=>dependents(objects,id)))];
+    return pinned.length
+      ? `${pinned.length} recorded result(s) pin one of these (${pinned.slice(0,5).join(', ')}${pinned.length>5 ? ', …' : ''}); resolve before reusing them.`
+      : `No recorded work pins either; this can stay open until someone needs it.`;
+  };
+  const next: string[] = [
+    ...resolutions.filter(r=>r.status==='conflict').map(r=>`Resolve the competing accepted claims ${r.current.map(o=>o.id).join(' and ')}: compare analytical scope, data snapshot and evidence, then supersede one or record why both stand. Do not choose by recency. ${blastRadius(r.current.map(o=>o.id))}`),
+    ...unlinked.map(u=>`Compare ${u.ids.join(' and ')} — ${u.reason}. ${blastRadius(u.ids)}`),
+    ...[...affected.values()].map(a=>`Revalidate or recompute ${a.id}: ${a.reason}.`),
+    ...contested.map(o=>`Settle the failed reproduction of ${o.id}: ${verified.get(o.id)!.notes.join('; ')}.`),
+    ...unproven.filter(o=>o.type==='finding' && (o.fields.query || (o.fields.reproduce as {query_or_artifact?:string}|undefined)?.query_or_artifact))
+      .map(o=>`Reproduce ${o.id} by re-running its recorded query, then record the outcome as a finding with reproduction_of {id, version: ${objectVersion(o)}}.`),
+    ...current.filter(o=>o.type==='decision' && o.fields.confirmation).map(o=>{
+      const c = o.fields.confirmation as {metric?:string;success_condition?:string;evaluate_after?:string} | string;
+      return `Evaluate decision ${o.id}: ${typeof c==='string' ? c : `${c.metric} ${c.success_condition}${c.evaluate_after ? `, after ${c.evaluate_after}` : ''}`}.`;
+    }),
+  ];
+
   const text = [
     `# Analytical continuation: ${opts.question}`,
     `Scope: ${JSON.stringify(opts.scope ?? null)}. Scope describes applicability, not access control.`,
-    `Accepted does not mean independently proven true. Validate the query and supporting evidence before accepting a correction.`,
+    `Accepted does not mean independently proven true; it means a person asserted a review against pinned evidence. Reproduced means someone re-ran the recorded recipe and got the same answer. Validate the query and supporting evidence before accepting a correction.`,
     ...warnings.map(w=>`WARNING: ${w}`),
     ...resolutions.filter(r=>r.status==='conflict').map(r=>`UNRESOLVED ACCEPTED CONFLICT: ${r.current.map(o=>o.id).join(', ')}. Do not choose by recency.`),
-    `## Applicable accepted sources without a known correction review flag`, ...current.filter(o=>!affected.has(o.id)).map(renderObject),
-    `## Accepted results requiring review before reuse`, ...current.filter(o=>affected.has(o.id)).map(o=>`NEEDS REVIEW: ${o.id}\n${renderObject(o)}`),
+    ...(reproduced.length ? [`## Verified: reproduced at this exact content_version`, ...reproduced.map(renderObject)] : []),
+    `## Accepted, not independently reproduced`, ...unproven.map(renderObject),
+    ...(contested.length ? [`## Contested: a reproduction at this version did not match`, ...contested.map(o=>`CONTESTED: ${o.id}\n${renderObject(o)}`)] : []),
+    `## Uncertain: accepted results requiring review before reuse`, ...current.filter(o=>affected.has(o.id)).map(o=>`NEEDS REVIEW: ${o.id}\n${renderObject(o)}`),
     `## Original evidence and correction history`, ...[...selected.values()].filter(o=>!current.some(c=>c.id===o.id)).map(renderObject),
     `## Proposals, not accepted`, ...[...new Map(resolutions.flatMap(r=>r.proposals).map(o=>[o.id,o])).values()].map(renderObject),
     `## Results requiring review`, ...[...affected.values()].map(a=>`${a.id}: ${a.status}; ${a.reason}; path ${a.path.join(' -> ')}; downstream scope: ${JSON.stringify(byId.get(a.id)?.fields.analysis_scope ?? 'unknown')}`),
     ...impacts.flatMap(i=>i.incomplete.map(x=>`INCOMPLETE IMPACT: ${x.id}: ${x.reason}`)),
+    `## Next check`, ...(next.length ? next.map(n=>`- ${n}`) : ['- No outstanding check is derivable from the retrieved lineage.']),
     `A review flag does not prove a result false. Recompute or explicitly revalidate it with evidence.`,
     `Artifact references are references only: fetch and hash-check them before claiming restoration or executing a saved query.`,
     `Preserve unresolved capture, missing lineage and pending operations. Save the new result against exact definition and query versions.`,
   ].join('\n\n');
-  return {question:opts.question, scope:opts.scope ?? null, resolutions, current, impacts, affected:[...affected.values()], unresolved_scope, warnings:[...new Set(warnings)], objects:[...selected.values()], text};
+  return {question:opts.question, scope:opts.scope ?? null, resolutions, current, impacts, affected:[...affected.values()], unlinked, verification:Object.fromEntries(verified), next_checks:next, unresolved_scope, warnings:[...new Set(warnings)], objects:[...selected.values()], text};
 }
 
 export function investigation(cfg: Config, opts: InvestigationOptions) { return analyticalContext(loadAll(cfg,TYPES), opts); }
