@@ -78,17 +78,30 @@ export function analyticalContext(objects: LedgerObject[], opts: InvestigationOp
     return Boolean(x && y && x.from.slice(0,10)===y.from.slice(0,10) && x.to.slice(0,10)===y.to.slice(0,10));
   };
   const claims = current.filter(o=>o.type==='finding');
-  const unlinked: {ids:[string,string]; reason:string}[] = [];
+  // Grouped, not pairwise: five mutually competing claims are one question for a person to settle,
+  // and emitting ten pair warnings would spend the successor's context saying it ten times.
+  const parent = new Map<string,string>();
+  const find = (id: string): string => { const p = parent.get(id); return !p || p===id ? id : (parent.set(id,find(p)), parent.get(id)!); };
+  for (const o of claims) parent.set(o.id,o.id);
+  const rereads = new Set<string>();
   for (let i=0;i<claims.length;i++) for (let j=i+1;j<claims.length;j++) {
     const [a,b] = [claims[i],claims[j]];
     if (lineage.get(a.id) && lineage.get(a.id)===lineage.get(b.id)) continue;
     if (!sameAnalyticalScope(a,b) || !sameWindow(a,b)) continue;
     if (Math.min(score(String(a.fields.question ?? ''),b), score(String(b.fields.question ?? ''),a)) < 0.5) continue;
-    unlinked.push({ids:[a.id,b.id], reason: snapshotsDiffer(a,b)
-      ? `different data snapshots (${snapshotIdentity(a)} vs ${snapshotIdentity(b)}): likely a re-read of changed source data, not a disagreement`
-      : `identical analytical scope, window and question, and no supersession relation between them`});
+    if (snapshotsDiffer(a,b)) { rereads.add(a.id); rereads.add(b.id); }
+    parent.set(find(a.id), find(b.id));
   }
-  for (const u of unlinked) warnings.push(`possibly competing, unlinked: ${u.ids.join(' and ')} — ${u.reason}. Neither supersedes the other, so neither is deprecated; compare them and either link one with supersedes or record why both stand.`);
+  const groups = new Map<string,LedgerObject[]>();
+  for (const o of claims) { const root = find(o.id); if (!groups.has(root)) groups.set(root,[]); groups.get(root)!.push(o); }
+  const unlinked = [...groups.values()].filter(g=>g.length>1).map(g=>{
+    const window = g[0].fields.data_window as {from:string;to:string};
+    const reread = g.filter(o=>rereads.has(o.id));
+    return { ids: g.map(o=>o.id),
+      reason: `identical analytical scope, window ${window.from.slice(0,10)}→${window.to.slice(0,10)} and question, with no supersession relation between them`
+        + (reread.length ? `; ${reread.map(o=>`${o.id} read snapshot ${snapshotIdentity(o)}`).join(', ')}, so some of this may be a re-read of changed source data rather than a disagreement` : '') };
+  });
+  for (const u of unlinked) warnings.push(`possibly competing, unlinked: ${u.ids.join(', ')} — ${u.reason}. None of them deprecates another, so all are returned; compare them and either link one with supersedes or record why each stands.`);
 
   const verified = new Map<string, ReturnType<typeof verification>>();
   for (const o of current) if (o.type==='finding') verified.set(o.id, verification(objects,o));
@@ -106,15 +119,16 @@ export function analyticalContext(objects: LedgerObject[], opts: InvestigationOp
 
   // Only interrupt a person when the ambiguity changes what happens next: an unresolved disagreement
   // that nothing pins is a question that can stay open, and this says which kind each one is.
+  const list = (ids: string[]) => ids.length > 1 ? `${ids.slice(0,-1).join(', ')} and ${ids.at(-1)}` : ids.join('');
   const blastRadius = (ids: string[]) => {
     const pinned = [...new Set(ids.flatMap(id=>dependents(objects,id)))];
     return pinned.length
       ? `${pinned.length} recorded result(s) pin one of these (${pinned.slice(0,5).join(', ')}${pinned.length>5 ? ', …' : ''}); resolve before reusing them.`
-      : `No recorded work pins either; this can stay open until someone needs it.`;
+      : `No recorded work pins any of them; this can stay open until someone needs it.`;
   };
   const next: string[] = [
-    ...resolutions.filter(r=>r.status==='conflict').map(r=>`Resolve the competing accepted claims ${r.current.map(o=>o.id).join(' and ')}: compare analytical scope, data snapshot and evidence, then supersede one or record why both stand. Do not choose by recency. ${blastRadius(r.current.map(o=>o.id))}`),
-    ...unlinked.map(u=>`Compare ${u.ids.join(' and ')} — ${u.reason}. ${blastRadius(u.ids)}`),
+    ...resolutions.filter(r=>r.status==='conflict').map(r=>`Resolve the competing accepted claims ${list(r.current.map(o=>o.id))}: compare analytical scope, data snapshot and evidence, then supersede one or record why both stand. Do not choose by recency. ${blastRadius(r.current.map(o=>o.id))}`),
+    ...unlinked.map(u=>`Compare ${list(u.ids)} — ${u.reason}. ${blastRadius(u.ids)}`),
     ...[...affected.values()].map(a=>`Revalidate or recompute ${a.id}: ${a.reason}.`),
     ...contested.map(o=>`Settle the failed reproduction of ${o.id}: ${verified.get(o.id)!.notes.join('; ')}.`),
     ...unproven.filter(o=>o.type==='finding' && (o.fields.query || (o.fields.reproduce as {query_or_artifact?:string}|undefined)?.query_or_artifact))
@@ -125,19 +139,21 @@ export function analyticalContext(objects: LedgerObject[], opts: InvestigationOp
     }),
   ];
 
+  // An empty heading is a line the successor pays for and learns nothing from.
+  const section = (heading: string, lines: string[]) => lines.length ? [heading, ...lines] : [];
   const text = [
     `# Analytical continuation: ${opts.question}`,
     `Scope: ${JSON.stringify(opts.scope ?? null)}. Scope describes applicability, not access control.`,
     `Accepted does not mean independently proven true; it means a person asserted a review against pinned evidence. Reproduced means someone re-ran the recorded recipe and got the same answer. Validate the query and supporting evidence before accepting a correction.`,
     ...warnings.map(w=>`WARNING: ${w}`),
     ...resolutions.filter(r=>r.status==='conflict').map(r=>`UNRESOLVED ACCEPTED CONFLICT: ${r.current.map(o=>o.id).join(', ')}. Do not choose by recency.`),
-    ...(reproduced.length ? [`## Verified: reproduced at this exact content_version`, ...reproduced.map(renderObject)] : []),
-    `## Accepted, not independently reproduced`, ...unproven.map(renderObject),
-    ...(contested.length ? [`## Contested: a reproduction at this version did not match`, ...contested.map(o=>`CONTESTED: ${o.id}\n${renderObject(o)}`)] : []),
-    `## Uncertain: accepted results requiring review before reuse`, ...current.filter(o=>affected.has(o.id)).map(o=>`NEEDS REVIEW: ${o.id}\n${renderObject(o)}`),
-    `## Original evidence and correction history`, ...[...selected.values()].filter(o=>!current.some(c=>c.id===o.id)).map(renderObject),
-    `## Proposals, not accepted`, ...[...new Map(resolutions.flatMap(r=>r.proposals).map(o=>[o.id,o])).values()].map(renderObject),
-    `## Results requiring review`, ...[...affected.values()].map(a=>`${a.id}: ${a.status}; ${a.reason}; path ${a.path.join(' -> ')}; downstream scope: ${JSON.stringify(byId.get(a.id)?.fields.analysis_scope ?? 'unknown')}`),
+    ...section(`## Verified: reproduced at this exact content_version`, reproduced.map(renderObject)),
+    `## Accepted, not independently reproduced`, ...(unproven.length ? unproven.map(renderObject) : ['_none_']),
+    ...section(`## Contested: a reproduction at this version did not match`, contested.map(o=>`CONTESTED: ${o.id}\n${renderObject(o)}`)),
+    ...section(`## Uncertain: accepted results requiring review before reuse`, current.filter(o=>affected.has(o.id)).map(o=>`NEEDS REVIEW: ${o.id}\n${renderObject(o)}`)),
+    ...section(`## Original evidence and correction history`, [...selected.values()].filter(o=>!current.some(c=>c.id===o.id)).map(renderObject)),
+    ...section(`## Proposals, not accepted`, [...new Map(resolutions.flatMap(r=>r.proposals).map(o=>[o.id,o])).values()].map(renderObject)),
+    ...section(`## Results requiring review`, [...affected.values()].map(a=>`${a.id}: ${a.status}; ${a.reason}; path ${a.path.join(' -> ')}; downstream scope: ${JSON.stringify(byId.get(a.id)?.fields.analysis_scope ?? 'unknown')}`)),
     ...impacts.flatMap(i=>i.incomplete.map(x=>`INCOMPLETE IMPACT: ${x.id}: ${x.reason}`)),
     `## Next check`, ...(next.length ? next.map(n=>`- ${n}`) : ['- No outstanding check is derivable from the retrieved lineage.']),
     `A review flag does not prove a result false. Recompute or explicitly revalidate it with evidence.`,
