@@ -1,0 +1,15 @@
+{
+  "schema": "teamwork-launch/v2",
+  "execution_authorized": false,
+  "authorization": null,
+  "maximum_approved_usd": null,
+  "paid_paths_gated": false,
+  "runtime": "/absolute/path/to/frozen/dist",
+  "model": "gpt-5.6-sol",
+  "reasoning_effort": "medium",
+  "stage_deadline_ms": null,
+  "capture_timeout_ms": null,
+  "stage_profiles": {"A": "/private/native-A.json", "B": "/private/native-B.json", "C": "/private/native-C.json", "D": "/private/native-D.json"},
+  "capture_argv": {},
+  "note": "Native provisioning must bind profiles to this sequence's fresh workspaces/identities before dispatch. All paid paths need actual controller gates. Capture argv, when supplied, receives {request} substitution without a shell. No live authorization is inferred from this example."
+}
