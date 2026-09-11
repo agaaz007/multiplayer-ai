@@ -6,7 +6,7 @@ import matter from "gray-matter";
 import type { z } from "zod";
 import { DIRS, SCHEMAS, TYPES, type LedgerObject, type LedgerType } from "./schema.js";
 import { isGeneratedView, regenerateViews } from "./views.js";
-import { validateDependencies, validateEvidenceReferences, validateSupersession } from "./authority.js";
+import { validateClaim, validateDependencies, validateEvidenceReferences, validateSupersession } from "./authority.js";
 
 // ---------- config ----------
 
@@ -530,6 +530,7 @@ function persistLocked(
   const objects = loadAll(cfg, TYPES, false);
   if (data.acceptance && data.acceptance.actor !== cfg.author) throw new Error("acceptance.actor must match configured Ledger author");
   validateDependencies(objects, data, type);
+  validateClaim(objects, type, data);
   validateEvidenceReferences(objects, data);
   const predecessor = validateSupersession(objects, type, data, cfg.author);
 
