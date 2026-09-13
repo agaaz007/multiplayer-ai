@@ -12,6 +12,8 @@ import { spoolAppend, spoolPending, spoolAck } from "./spool.js";
 import { readBinding, takeSignal, readIndex, appendLocalNotifications } from "./signals.js";
 import { redactText } from "../continuity/redact.js";
 import { classifySession, classifyAllowed } from "../continuity/classify.js";
+import { autoBindEligible, forbiddenSnapshotRoot, threadTitleFor, transcriptRoots } from "../continuity/safety.js";
+import { writeHeartbeat, withDeadline, type HelperHeartbeat } from "./heartbeat.js";
 const putArtifact = S.putArtifact;
 
 /**
@@ -28,6 +30,10 @@ const putArtifact = S.putArtifact;
  *
  * Nothing here depends on the agent cooperating. If the harness dies, the next
  * pass still tails what it wrote and snapshots what it changed.
+ *
+ * Liveness (2026-09-13): the loop runs each pass under a deadline and exits past it so
+ * launchd restarts the process, writes ~/.ledger/helper-heartbeat.json around every pass,
+ * and heartbeats live claims on its own timer so a slow pass cannot let leases lapse.
  */
 
 export interface SessState {
@@ -53,6 +59,8 @@ export interface SessState {
   unknown: Record<string, number>;
   ended?: boolean;
   firstInstruction?: string;
+  /** when the session started: earliest event time on first read, else the transcript's birth time. Auto-bind only adopts threads older than this. */
+  startedAtMs?: number;
   /** last time the classifier ran for this session (rate limit: one run per 120 s) */
   lastClassifyAt?: number;
   /** a classification is running detached for this session; never start a second one */
@@ -74,6 +82,18 @@ export interface HelperOpts {
   classifyWaitMs?: number;
 }
 
+export interface HelperLoopOpts extends HelperOpts {
+  intervalMs?: number;
+  /** a pass running longer than this exits the process (launchd restarts it). Default continuity.pass_deadline_s or 900 s. */
+  passDeadlineMs?: number;
+  /** cadence of the independent claim heartbeat. Default 30 s. */
+  claimHeartbeatMs?: number;
+  /** stop after this many passes (tests) */
+  maxPasses?: number;
+  /** called instead of process.exit when a pass exceeds its deadline (tests) */
+  exit?: (code: number) => void;
+}
+
 /** Detached classifications by session id; a pass never blocks on them, and a session never runs two. */
 const classifyInFlight = new Map<string, Promise<void>>();
 
@@ -92,6 +112,8 @@ export interface PassSummary {
 
 const stateFile = () => path.join(ledgerHome(), "helper-state.json");
 const safe = (id: string) => id.replace(/[^A-Za-z0-9_-]/g, "_");
+/** Mid-pass state saves: the claim heartbeat timer and a restarted helper both read the saved file. */
+const STATE_SAVE_EVERY_MS = 30_000;
 
 export function loadState(): Record<string, SessState> {
   try { return JSON.parse(fs.readFileSync(stateFile(), "utf8")); } catch { return {}; }
@@ -112,10 +134,6 @@ function walk(dir: string, depth: number): string[] {
     else if (e.name.endsWith(".jsonl")) out.push(p);
   }
   return out;
-}
-
-function defaultRoots() {
-  return { claude: path.join(os.homedir(), ".claude", "projects"), codex: path.join(os.homedir(), ".codex", "sessions") };
 }
 
 /**
@@ -143,6 +161,38 @@ function repoAllowed(cfg: Config, repo: string, root: string | null): boolean {
   const allow = cfg.continuity?.repos ?? [];
   if (!allow.length) return true;
   return allow.some((a) => repo === a || repo.endsWith(a) || (root && (root === a || root.endsWith(a))));
+}
+
+/** Earliest event time when the transcript was read from its start, else its birth time (sessions tracked before startedAtMs existed). */
+function startedAtFor(file: string, eventsFromStart: NormEvent[]): number | undefined {
+  let min = Infinity;
+  for (const e of eventsFromStart) {
+    const t = e.occurred_at ? Date.parse(String(e.occurred_at)) : NaN;
+    if (Number.isFinite(t) && t < min) min = t;
+  }
+  if (Number.isFinite(min)) return min;
+  try { const st = fs.statSync(file); return st.birthtimeMs > 0 ? st.birthtimeMs : st.ctimeMs; } catch { return undefined; }
+}
+
+/**
+ * Another session tracked by this helper that holds, or last held with the lease lapsed, this thread's
+ * claim while its transcript is still being written. Taking the claim from it would fork a live session:
+ * exactly what happened when stale sessions were bound after a helper restart.
+ */
+async function liveLocalHolder(pool: pg.Pool, st: Record<string, SessState>, threadId: string, sid: string, nowMs: number, quietMs: number): Promise<string | null> {
+  const row = await S.getClaimAny(pool, threadId);
+  if (!row || row.released_at || row.holder_session_id === sid) return null;
+  const h = st[row.holder_session_id];
+  if (!h || h.ended) return null;
+  try { return nowMs - fs.statSync(h.file).mtimeMs <= quietMs ? row.holder_session_id : null; } catch { return null; }
+}
+
+/** Claim a thread for a live session unless a live local session holds it. Returns a short note for the log. */
+async function claimUnlessLiveHolder(pool: pg.Pool, st: Record<string, SessState>, threadId: string, sid: string, author: string, nowMs: number, quietMs: number): Promise<string> {
+  const other = await liveLocalHolder(pool, st, threadId, sid, nowMs, quietMs);
+  if (other) return `claim left with live session ${other.slice(0, 8)}`;
+  const c = await S.claimThread(pool, threadId, sid, author);
+  return c.ok ? `gen ${c.generation}` : `claim held by ${c.holder.holder_author}`;
 }
 
 async function structuredState(pool: pg.Pool, sessionId: string, threadId: string, files: { status: string; path: string }[]): Promise<Record<string, unknown>> {
@@ -254,8 +304,9 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
   const activeMs = (opts.activeWindowMin ?? 10) * 60_000;
   const quietMs = (opts.quietEndMin ?? 30) * 60_000;
   const snapEvery = (opts.snapshotIntervalS ?? cfg.continuity.snapshot_interval_s ?? 30) * 1000;
-  const roots = { ...defaultRoots(), ...(opts.roots ?? {}) };
+  const roots = { ...transcriptRoots(), ...(opts.roots ?? {}) };
   const st = loadState();
+  let lastSave = Date.now();
 
   // ---- discover ----
   const files = [...walk(roots.claude, 3), ...walk(roots.codex, 5)];
@@ -279,9 +330,11 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
       let s = sid ? st[sid] : undefined;
 
       // ---- tail ----
+      const readFromStart = !s || !s.offset;
       const r = streamTranscript(file, s?.offset ?? 0, harness, cfg.data_tools);
       if (!sid) { sid = sessionIdFor(file, harness, r.session_id); s = st[sid] ?? { file, harness, offset: 0, lastSeenMtime: 0, seenCallIds: [], reconciled: [], unknown: {} }; st[sid] = s; byFile.set(file, sid); }
       s = s!;
+      if (s.startedAtMs == null) s.startedAtMs = startedAtFor(file, readFromStart ? r.events : []);
       s.offset = r.offset;
       s.lastSeenMtime = mtime;
       if (r.cwd) s.cwd = r.cwd;
@@ -290,8 +343,17 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
       s.sidechain = s.file.includes(`${path.sep}subagents${path.sep}`) || path.basename(s.file).startsWith("agent-") || Boolean(r.sidechain);
       for (const [k, v] of Object.entries(r.unknown)) s.unknown[k] = (s.unknown[k] ?? 0) + v;
       if (s.cwd && s.root === undefined) {
-        s.root = repoRoot(s.cwd);
-        if (s.root) { s.repo = repoIdentity(s.root); s.branch = s.branch ?? currentBranch(s.root); s.baseCommit = headCommit(s.root); s.wipRef = `refs/wip/${safe(author)}/${safe(sid)}`; }
+        const root = repoRoot(s.cwd);
+        const forbidden = root ? forbiddenSnapshotRoot(root) : null;
+        if (forbidden) {
+          // a session started in ~ must never snapshot the home directory; capture its events only
+          s.root = null;
+          s.unbound_reason = `not captured as a repo: ${forbidden}`;
+          log(`session ${sid.slice(0, 8)}: ${forbidden}; events only, no thread or snapshot`);
+        } else {
+          s.root = root;
+          if (s.root) { s.repo = repoIdentity(s.root); s.branch = s.branch ?? currentBranch(s.root); s.baseCommit = headCommit(s.root); s.wipRef = `refs/wip/${safe(author)}/${safe(sid)}`; }
+        }
       }
       if (s.root && s.repo && !repoAllowed(cfg, s.repo, s.root)) { s.ended = true; continue; }
       if (!s.firstInstruction) {
@@ -300,6 +362,7 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
       }
       for (const e of r.events) if (e.call_id && e.kind === "tool.requested") s.seenCallIds.push(e.call_id);
       if (s.seenCallIds.length > 5000) s.seenCallIds = s.seenCallIds.slice(-5000);
+      const quiet = now.getTime() - mtime > quietMs;
       if (r.events.length) {
         spoolAppend(sid, { offset: r.offset, events: r.events, at: now.toISOString() });
         sum.events_spooled += r.events.length;
@@ -309,8 +372,8 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
           // the quiet-end released our claim; take it back if nobody else has, so checkpoints advance the head again
           if (s.threadId) {
             try {
-              const c = await S.claimThread(pool, s.threadId, sid, author);
-              log(c.ok ? `session ${sid.slice(0, 8)} re-claimed thread ${s.threadId.slice(0, 8)} (gen ${c.generation})` : `thread ${s.threadId.slice(0, 8)} now held by ${c.holder.holder_author}; this session's uploads will route to a fork`);
+              const note = await claimUnlessLiveHolder(pool, st, s.threadId, sid, author, now.getTime(), quietMs);
+              log(`session ${sid.slice(0, 8)} re-claim on thread ${s.threadId.slice(0, 8)}: ${note}`);
             } catch (e: any) { log(`re-claim failed for ${sid.slice(0, 8)}: ${String(e?.message ?? e).slice(0, 120)}`); }
           }
         }
@@ -318,28 +381,40 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
       sum.sessions++;
 
       // ---- session row ----
-      await S.upsertSession(pool, { id: sid, author, harness, machine, cwd: s.cwd, repo: s.repo, branch: s.branch, transcript_path: file, started_at: s.offset === r.offset && !sid ? now : undefined, last_seen_at: new Date(mtime) });
+      await S.upsertSession(pool, { id: sid, author, harness, machine, cwd: s.cwd, repo: s.repo, branch: s.branch, transcript_path: file, started_at: s.startedAtMs != null ? new Date(s.startedAtMs) : undefined, last_seen_at: new Date(mtime) });
 
       // ---- bind ----
       if (!s.threadId && !s.sidechain && s.repo) {
         const b = readBinding(sid);
+        const explicit = Boolean(b?.thread_id || b?.new);
         let thread: S.ThreadRow | null = null;
         if (b?.thread_id) thread = await S.getThread(pool, b.thread_id);
-        else if (b?.new) thread = await S.createThread(pool, { repo: s.repo, branch: s.branch, title: b.title || s.firstInstruction || `${path.basename(s.repo)} work`, goal: s.firstInstruction, created_by: author });
+        else if (b?.new) thread = await S.createThread(pool, { repo: s.repo, branch: s.branch, title: b.title || threadTitleFor(s.firstInstruction, s.repo, sid), goal: s.firstInstruction, created_by: author, created_at: now });
         else {
           const own = await S.findOwnOpenThreads(pool, s.repo, s.branch ?? null, author);
-          if (own.length === 1) thread = own[0];
-          else if (own.length === 0 && s.firstInstruction) thread = await S.createThread(pool, { repo: s.repo, branch: s.branch, title: s.firstInstruction, goal: s.firstInstruction, created_by: author });
-          else if (own.length > 1) s.unbound_reason = `ambiguous: ${own.length} own open threads on ${path.basename(s.repo)}${s.branch ? `@${s.branch}` : ""}: ${own.map((t) => t.id.slice(0, 8)).join(", ")}`;
+          // Only threads that already existed when this session started, and that no teammate is continuing,
+          // can be this session's work. A stale session found on a helper restart must not adopt newer threads.
+          const eligible: S.ThreadRow[] = [];
+          for (const t of own) {
+            if (!autoBindEligible(s.startedAtMs, t.created_at)) continue;
+            const c = await S.getClaim(pool, t.id);
+            if (c && c.holder_author !== author) continue;
+            eligible.push(t);
+          }
+          const where = `${path.basename(s.repo)}${s.branch ? `@${s.branch}` : ""}`;
+          if (eligible.length === 1) thread = eligible[0];
+          else if (eligible.length > 1) s.unbound_reason = `ambiguous: ${eligible.length} own open threads on ${where}: ${eligible.map((t) => t.id.slice(0, 8)).join(", ")}`;
+          else if (quiet) s.unbound_reason = own.length ? `quiet session older than own open thread(s) ${own.map((t) => t.id.slice(0, 8)).join(", ")} on ${where}: not auto-bound` : "quiet session: no thread created";
+          else if (s.firstInstruction) thread = await S.createThread(pool, { repo: s.repo, branch: s.branch, title: threadTitleFor(s.firstInstruction, s.repo, sid), goal: s.firstInstruction, created_by: author, created_at: now });
           else s.unbound_reason = "no human instruction yet";
         }
         if (thread) {
-          const c = await S.claimThread(pool, thread.id, sid, author);
           s.threadId = thread.id;
           s.unbound_reason = undefined;
           await S.updateSession(pool, sid, { thread_id: thread.id, base_commit: s.baseCommit ?? null, wip_ref: s.wipRef ?? null });
           sum.bound++;
-          log(`bound ${sid.slice(0, 8)} → thread ${thread.id.slice(0, 8)} "${thread.title}" ${c.ok ? `gen ${c.generation}` : `claim held by ${c.holder.holder_author}`}`);
+          const note = quiet && !explicit ? "quiet: bound without a claim" : await claimUnlessLiveHolder(pool, st, thread.id, sid, author, now.getTime(), quietMs);
+          log(`bound ${sid.slice(0, 8)} → thread ${thread.id.slice(0, 8)} "${thread.title}" ${note}`);
         }
       }
       await S.updateSession(pool, sid, { transcript_offset: s.offset, coverage: { unknown_shapes: s.unknown, sidechain: Boolean(s.sidechain), unbound_reason: s.unbound_reason ?? null, hooks_index_entries: readIndex(sid).length } });
@@ -377,7 +452,6 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
       // ---- signals & snapshot ----
       const endSignal = takeSignal(sid, "end");
       const cpSignal = takeSignal(sid, "checkpoint") || endSignal;
-      const quiet = now.getTime() - mtime > quietMs;
       const due = !s.lastShadowAt || now.getTime() - s.lastShadowAt >= snapEvery;
       // subagent transcripts share the parent's worktree; the parent session snapshots it
       if (s.root && s.wipRef && (due || cpSignal) && !s.ended && !s.sidechain) {
@@ -421,11 +495,12 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
           log(`session ${sid.slice(0, 8)} ${endSignal ? "ended" : "went quiet"}; claim released`);
         } else if (!s.lastHeartbeatAt || now.getTime() - s.lastHeartbeatAt > 30_000) {
           // hold the claim while live: if the heartbeat finds none (released by a quiet-end, an expiry, or a restart), take it back
+          // unless another live session on this machine holds it
           const held = await S.heartbeatClaim(pool, s.threadId, sid);
           if (!held) {
             try {
-              const c = await S.claimThread(pool, s.threadId, sid, author);
-              log(c.ok ? `session ${sid.slice(0, 8)} claimed thread ${s.threadId.slice(0, 8)} (gen ${c.generation})` : `thread ${s.threadId.slice(0, 8)} held by ${c.holder.holder_author} (${c.holder.holder_session_id.slice(0, 8)}); this session routes to a fork`);
+              const note = await claimUnlessLiveHolder(pool, st, s.threadId, sid, author, now.getTime(), quietMs);
+              log(`session ${sid.slice(0, 8)} claim on thread ${s.threadId.slice(0, 8)}: ${note}`);
             } catch (e: any) { log(`claim failed for ${sid.slice(0, 8)}: ${String(e?.message ?? e).slice(0, 120)}`); }
           }
           s.lastHeartbeatAt = now.getTime();
@@ -433,6 +508,10 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
       }
     } catch (e: any) {
       sum.errors.push(`${path.basename(file)}: ${String(e?.message ?? e).slice(0, 200)}`);
+    }
+    if (Date.now() - lastSave > STATE_SAVE_EVERY_MS) {
+      try { saveState(st); } catch { /* the end-of-pass save retries */ }
+      lastSave = Date.now();
     }
   }
 
@@ -449,22 +528,81 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
   return sum;
 }
 
-export async function helperLoop(cfg: Config, opts: HelperOpts & { intervalMs?: number } = {}): Promise<void> {
+/**
+ * Keep live sessions' claims alive independently of pass progress. A pass that stalls (a slow remote,
+ * a dead connection until query_timeout) used to let every lease lapse, and stale sessions then took
+ * the claims. Reads the last saved state; only sessions whose transcript is still being written count.
+ */
+export async function heartbeatLiveClaims(cfg: Config, opts: { now?: Date; quietEndMin?: number } = {}): Promise<number> {
+  if (!cfg.continuity) return 0;
+  const pool = getPool(cfg);
+  const nowMs = (opts.now ?? new Date()).getTime();
+  const quietMs = (opts.quietEndMin ?? 30) * 60_000;
+  let n = 0;
+  for (const [sid, s] of Object.entries(loadState())) {
+    if (!s.threadId || s.ended || s.sidechain) continue;
+    let mtime: number;
+    try { mtime = fs.statSync(s.file).mtimeMs; } catch { continue; }
+    if (nowMs - mtime > quietMs) continue;
+    if (await S.heartbeatClaim(pool, s.threadId, sid)) n++;
+  }
+  return n;
+}
+
+function beat(patch: Partial<HelperHeartbeat>, log: (s: string) => void): void {
+  try { writeHeartbeat(patch); } catch (e: any) { log(`heartbeat file write failed: ${String(e?.message ?? e).slice(0, 120)}`); }
+}
+
+export async function helperLoop(cfg: Config, opts: HelperLoopOpts = {}): Promise<void> {
   const log = opts.log ?? ((s: string) => process.stdout.write(`${new Date().toISOString()} ${s}\n`));
+  const exit = opts.exit ?? ((code: number) => process.exit(code));
+  const deadlineMs = opts.passDeadlineMs ?? (cfg.continuity?.pass_deadline_s ?? 900) * 1000;
   let stop = false;
   process.on("SIGTERM", () => { stop = true; });
   process.on("SIGINT", () => { stop = true; });
-  log(`helper started: author ${cfg.author}, machine ${cfg.continuity?.machine}, interval ${(opts.intervalMs ?? 10_000) / 1000}s`);
-  while (!stop) {
-    const t0 = Date.now();
-    try {
-      const s = await helperOnce(cfg, { ...opts, log });
-      if (s.events_spooled || s.events_uploaded || s.snapshots || s.classified || s.errors.length) log(`pass: ${s.sessions} sessions, ${s.events_spooled} spooled, ${s.events_uploaded} uploaded, ${s.snapshots} snapshots, ${s.checkpoints} checkpoints, ${s.classified} classified${s.errors.length ? `, errors: ${s.errors.join(" | ")}` : ""}`);
-    } catch (e: any) {
-      log(`pass failed: ${String(e?.message ?? e).slice(0, 300)}`);
+  log(`helper started: author ${cfg.author}, machine ${cfg.continuity?.machine}, interval ${(opts.intervalMs ?? 10_000) / 1000}s, pass deadline ${Math.round(deadlineMs / 1000)}s`);
+  beat({ pid: process.pid, cli: process.argv[1] ?? "", author: cfg.author, machine: cfg.continuity?.machine ?? os.hostname(), started_at: new Date().toISOString(), pass_deadline_s: Math.round(deadlineMs / 1000), last_pass_started_at: null, last_pass_finished_at: null, last_pass_ms: null, last_error: null }, log);
+
+  // claims are heartbeated on their own timer, so a slow or stuck pass cannot let a live session's lease lapse
+  let beating = false;
+  const claimTimer = setInterval(() => {
+    if (beating) return;
+    beating = true;
+    heartbeatLiveClaims(cfg, { quietEndMin: opts.quietEndMin })
+      .catch((e: any) => log(`claim heartbeat failed: ${String(e?.message ?? e).slice(0, 160)}`))
+      .finally(() => { beating = false; });
+  }, opts.claimHeartbeatMs ?? 30_000);
+  claimTimer.unref?.();
+
+  let passes = 0;
+  try {
+    while (!stop && (opts.maxPasses == null || passes < opts.maxPasses)) {
+      const t0 = Date.now();
+      beat({ last_pass_started_at: new Date(t0).toISOString() }, log);
+      const r = await withDeadline(helperOnce(cfg, { ...opts, log }).then((summary) => ({ summary }), (error: any) => ({ error })), deadlineMs);
+      passes++;
+      if (r.timedOut) {
+        const msg = `pass exceeded its ${Math.round(deadlineMs / 1000)}s deadline; exiting so launchd restarts the helper (spool acks and upload dedup let the next pass resume)`;
+        log(msg);
+        beat({ last_error: msg }, log);
+        exit(75);
+        return;
+      }
+      if ("error" in r.value) {
+        const msg = String(r.value.error?.message ?? r.value.error).slice(0, 300);
+        log(`pass failed: ${msg}`);
+        beat({ last_error: `pass failed: ${msg}` }, log);
+      } else {
+        const s = r.value.summary;
+        if (s.events_spooled || s.events_uploaded || s.snapshots || s.classified || s.errors.length) log(`pass: ${s.sessions} sessions, ${s.events_spooled} spooled, ${s.events_uploaded} uploaded, ${s.snapshots} snapshots, ${s.checkpoints} checkpoints, ${s.classified} classified${s.errors.length ? `, errors: ${s.errors.join(" | ")}` : ""}`);
+        beat({ last_pass_finished_at: new Date().toISOString(), last_pass_ms: Date.now() - t0, last_error: s.errors.length ? s.errors.join(" | ").slice(0, 300) : null }, log);
+      }
+      if (stop || (opts.maxPasses != null && passes >= opts.maxPasses)) break;
+      const wait = Math.max(1000, (opts.intervalMs ?? 10_000) - (Date.now() - t0));
+      await new Promise((res) => setTimeout(res, wait));
     }
-    const wait = Math.max(1000, (opts.intervalMs ?? 10_000) - (Date.now() - t0));
-    await new Promise((r) => setTimeout(r, wait));
+  } finally {
+    clearInterval(claimTimer);
   }
   log("helper stopped");
 }

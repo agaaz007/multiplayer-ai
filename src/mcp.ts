@@ -18,6 +18,7 @@ import { listThreads, createThread, getThread, claimThread, releaseClaim, upsert
 import { buildResumePack, threadLine } from "./continuity/resume.js";
 import { queryEvents, getArtifact, eventLine, EVENTS_DEFAULT_LIMIT, EVENTS_MAX_LIMIT, PREVIEW_CHARS, PREVIEW_MAX_CHARS, ARTIFACT_DEFAULT_CHARS, ARTIFACT_MAX_CHARS } from "./continuity/evidence.js";
 import { repoRoot, repoIdentity, currentBranch } from "./continuity/shadow.js";
+import { forbiddenSnapshotRoot, localTranscriptExists, resolveHarnessSession } from "./continuity/safety.js";
 import { openThreadsText } from "./continuity/brief.js";
 import { writeBinding, writeSignal } from "./helper/signals.js";
 import { buildRecordPack, listRecordSummaries, recordLine, unassignedLine } from "./continuity/recordpack.js";
@@ -275,7 +276,14 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
   // ---------- execution continuity (spec §8) ----------
   if (continuityConfigured(cfg)) {
     const pool = () => getPool(cfg);
-    const sessionOf = (given?: string) => given || process.env.CLAUDE_SESSION_ID || process.env.CODEX_THREAD_ID || `mcp:${cfg.author}:${process.pid}`;
+    // An explicit session_id, else a harness env id with a local transcript. Never a synthetic id: the helper
+    // looks bindings up by the transcript's id, so a claim written for `mcp:<author>:<pid>` split the successor's
+    // work onto another thread (2026-09-13 review). Claude Code exports CLAUDE_CODE_SESSION_ID.
+    const sessionOf = (given?: string): string => {
+      const r = resolveHarnessSession(given, process.env, (id) => localTranscriptExists(id));
+      if (!r.ok) throw new Error(r.error);
+      return r.id;
+    };
 
     server.registerTool(
       "ledger_threads",
@@ -313,17 +321,21 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
           record_id: z.string().optional().describe("Work record to resume instead of a thread (from ledger_records or the brief's Open work section)"),
           mode: z.enum(["continue", "fork", "inspect"]).default("continue"),
           cwd: z.string().optional().describe("Local checkout of the same repo, for the intervening-change diff"),
-          session_id: z.string().optional().describe("Your harness session id if known; binds this session to the thread"),
+          session_id: z.string().optional().describe('Your harness session id; SessionStart prints it as "Ledger session: <id>". Required for continue and fork unless this server can read it from CLAUDE_CODE_SESSION_ID or CODEX_THREAD_ID with a matching local transcript. Without it nothing is claimed or bound.'),
           budget_tokens: z.number().int().min(1500).max(20000).default(6000),
         },
       },
       async ({ thread_id, record_id, mode, cwd, session_id, budget_tokens }) => {
-        const sid = sessionOf(session_id);
+        // inspect never claims, so it needs no session; continue and fork refuse rather than claim under a made-up id
+        let sid: string | undefined;
+        if (mode !== "inspect") {
+          try { sid = sessionOf(session_id); } catch (e: any) { return text(`ledger_resume refused: ${e.message}`); }
+        }
         if (record_id) {
           if (mode === "fork") return text("mode=fork applies to threads; use mode=continue or mode=inspect with record_id (fork the underlying thread with thread_id if you need parallel work).");
           try {
             const pack = await buildRecordPack(cfg, pool(), record_id, { mode, author: cfg.author, sessionId: sid, repoPath: cwd, budgetTokens: budget_tokens });
-            if (mode === "continue" && pack.claim.acquired && pack.claim.thread_id) writeBinding(sid, { thread_id: pack.claim.thread_id });
+            if (sid && mode === "continue" && pack.claim.acquired && pack.claim.thread_id) writeBinding(sid, { thread_id: pack.claim.thread_id });
             return text(pack.text);
           } catch (e: any) {
             return text(`ledger_resume failed: ${e.message}`);
@@ -331,7 +343,7 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
         }
         if (!thread_id) return text("thread_id or record_id is required.");
         const pack = await buildResumePack(cfg, pool(), thread_id, { mode, author: cfg.author, sessionId: sid, repoPath: cwd, budgetTokens: budget_tokens });
-        if (mode !== "inspect" && pack.claim.acquired) writeBinding(sid, { thread_id: pack.fork?.id ?? thread_id });
+        if (sid && mode !== "inspect" && pack.claim.acquired) writeBinding(sid, { thread_id: pack.fork?.id ?? thread_id });
         return text(pack.text);
       }
     );

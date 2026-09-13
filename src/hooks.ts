@@ -3,6 +3,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { ledgerHome } from "./store.js";
 import { appendIndex, writeSignal } from "./helper/signals.js";
+import { captureStaleness, readHeartbeat } from "./helper/heartbeat.js";
 import { canonicalToolName, dataToolCalls, evidenceId, responseEnvelope, savedRecord } from "./capture-tools.js";
 export { isDataTool, DEFAULT_DATA_TOOLS } from "./capture-tools.js";
 import { DEFAULT_DATA_TOOLS } from "./capture-tools.js";
@@ -303,6 +304,20 @@ export function handleHook(event: string, input: any, opts: HookOpts = {}): Hook
   return withJournalLock(sessionId, () => handleHookLocked(event, input, opts), opts.dir ?? sessionsDir());
 }
 
+/**
+ * Continuity lines for SessionStart, only on a machine whose capture helper has written a heartbeat:
+ * the session id the MCP continuity tools need (their environment can be stale or absent), and a
+ * warning when capture here is dead, stalled or failing.
+ */
+export function continuityStartContext(sessionId: string, now = new Date()): string {
+  const hb = readHeartbeat();
+  if (!hb) return "";
+  const lines = [`Ledger session: ${sessionId}. Pass session_id: "${sessionId}" to ledger_resume, ledger_thread_start, ledger_thread_bind, ledger_thread_note and ledger_release.`];
+  const stale = captureStaleness(hb, now);
+  if (stale) lines.push(`WARNING: ${stale}`);
+  return lines.join("\n");
+}
+
 function handleHookLocked(event: string, input: any, opts: HookOpts = {}): HookResult {
   const dir = opts.dir ?? sessionsDir();
   const now = (opts.now ?? new Date()).toISOString();
@@ -315,7 +330,7 @@ function handleHookLocked(event: string, input: any, opts: HookOpts = {}): HookR
   switch (event) {
     case "SessionStart": {
       saveJournal(j, dir);
-      const ctx = sessionStartContext(j);
+      const ctx = [continuityStartContext(sessionId, opts.now ?? new Date()), sessionStartContext(j)].filter(Boolean).join("\n\n");
       return { stdout: ctx, exit: 0 };
     }
 

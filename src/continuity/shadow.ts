@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { DEFAULT_DENY_GLOBS, DEFAULT_SNAPSHOT_EXCLUDES, globToRegExp } from "./redact.js";
+import { forbiddenSnapshotRoot } from "./safety.js";
 
 /**
  * Shadow commits (spec §3.2, v1.1). Capture the exact worktree state onto a
@@ -33,7 +34,7 @@ export interface ShadowOpts {
 
 export interface ShadowResult {
   ok: boolean;
-  skipped?: "clean" | "unchanged" | "not_a_repo" | "no_head";
+  skipped?: "clean" | "unchanged" | "not_a_repo" | "no_head" | "forbidden_root";
   error?: string;
   tree?: string;
   commit?: string;
@@ -109,6 +110,9 @@ export function shadowCommit(worktree: string, opts: ShadowOpts): ShadowResult {
   const res: ShadowResult = { ok: false, files: [], gaps: [] };
   const root = repoRoot(worktree);
   if (!root) return { ...res, skipped: "not_a_repo" };
+  // defence in depth behind the helper's own check: never `add -A` and push a home directory
+  const forbidden = forbiddenSnapshotRoot(root);
+  if (forbidden) return { ...res, skipped: "forbidden_root", gaps: [{ kind: "forbidden_root", detail: forbidden }] };
   const head = headCommit(root);
   if (!head) return { ...res, skipped: "no_head" };
   const deny = [...DEFAULT_DENY_GLOBS, ...(opts.deny ?? [])];

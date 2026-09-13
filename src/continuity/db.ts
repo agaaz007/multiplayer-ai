@@ -28,7 +28,10 @@ export function getPool(cfg: Config): pg.Pool {
     const wantSsl = u.searchParams.get("sslmode") !== "disable" && !/^(localhost|127\.0\.0\.1|\/tmp)/.test(u.hostname);
     u.searchParams.delete("sslmode");
     u.searchParams.delete("channel_binding");
-    p = new pg.Pool({ connectionString: u.toString(), ssl: wantSsl ? { rejectUnauthorized: true } : false, max: 4, idleTimeoutMillis: 10_000, connectionTimeoutMillis: 8_000, statement_timeout: 20_000 });
+    // statement_timeout is enforced by the server, so it cannot end a query whose connection died silently
+    // (a laptop sleep or DNS loss). query_timeout is the client-side bound and TCP keepalive surfaces dead
+    // sockets; without both the helper once waited 39 h on one query while launchd reported it running.
+    p = new pg.Pool({ connectionString: u.toString(), ssl: wantSsl ? { rejectUnauthorized: true } : false, max: 4, idleTimeoutMillis: 10_000, connectionTimeoutMillis: 8_000, statement_timeout: 20_000, query_timeout: 30_000, keepAlive: true, keepAliveInitialDelayMillis: 10_000 });
     p.on("error", () => { /* idle client errors are retried on next query */ });
     pools.set(url, p);
   }

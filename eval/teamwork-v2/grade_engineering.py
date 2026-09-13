@@ -80,7 +80,17 @@ def grade(candidate,stage):
             app.start()
             def owner_test():
                 require(app.call('/jobs','POST',{'key':'k','payload':'p'},None)[0]==401,'missing identity accepted')
-                job=create();require(app.call('/jobs/'+job['id'],owner='team-b')[0]==404,'cross-owner job visible')
+                job=create();path='/jobs/'+job['id']
+                routes=[(path,'GET',None)]
+                if stage>='B':routes.append((path+'/execute','POST',{}))
+                if stage>='C':routes.extend([('/batches','POST',{'job_ids':[job['id']]}),('/batches/status?ids='+job['id'],'GET',None)])
+                if stage>='D':routes.append((path+'/cancel','POST',{}))
+                before=(len(provider.posts),len(provider.gets))
+                for route,method,data in routes:
+                    require(app.call(route,method,data,None)[0]==401,'missing identity accepted: '+route)
+                    require(app.call(route,method,data,'team-b')[0]==404,'cross-owner operation allowed: '+route)
+                require((len(provider.posts),len(provider.gets))==before,'unauthorized request contacted provider')
+                require(app.call(path)[1].get('state')=='pending','unauthorized request mutated job')
             check('owner-isolation',owner_test,'critical')
             def validation():
                 for body in ({},{'key':'','payload':'x'},{'key':'x','payload':[]},{'key':2,'payload':'x'}):
@@ -112,6 +122,14 @@ def grade(candidate,stage):
                     app.stop();app.start();status,again=app.call(path,'POST',{})
                     require(status==200 and again.get('receipt_id')==result['receipt_id'] and len(provider.posts)==before+1,'replayed external effect')
                 check('execution-receipt-and-restart-replay',successful,'critical')
+                def concurrent_execution():
+                    job=create();path='/jobs/'+job['id']+'/execute';before=len(provider.posts)
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+                        results=list(pool.map(lambda _:app.call(path,'POST',{}),range(4)))
+                    require(all(status in (200,202) for status,_ in results),'concurrent execution failed')
+                    status,result=app.call(path,'POST',{})
+                    require(status==200 and result.get('state')=='completed' and len(provider.posts)==before+1,'concurrent execution duplicated effect or lost completion')
+                check('concurrent-execution-single-effect',concurrent_execution,'critical')
                 def uncertain():
                     job=create('timeout-after-commit');path='/jobs/'+job['id']+'/execute';before=len(provider.posts)
                     status,result=app.call(path,'POST',{})
@@ -131,8 +149,9 @@ def grade(candidate,stage):
                     status,result=app.call('/batches','POST',{'job_ids':ids})
                     jobs=result.get('jobs',[])
                     require(status==200 and [j.get('id') for j in jobs]==ids and [j.get('state') for j in jobs]==['completed','outcome_unknown'],'batch loses states or order')
-                    before=len(provider.posts);status,result=app.call('/batches/status?ids='+','.join(ids))
-                    require(status==200 and len(provider.posts)==before,'GET mutated delivery')
+                    before=(len(provider.posts),len(provider.gets));status,result=app.call('/batches/status?ids='+','.join(ids))
+                    require(status==200 and (len(provider.posts),len(provider.gets))==before,'status GET contacted provider')
+                    require([j.get('id') for j in result.get('jobs',[])]==ids and [j.get('state') for j in result['jobs']]==['completed','outcome_unknown'],'status GET changed or omitted jobs')
                 check('batch-composes-storage-and-execution',batch)
                 def invalid_batch():
                     a=create();b=create(owner='team-b');before=len(provider.posts)

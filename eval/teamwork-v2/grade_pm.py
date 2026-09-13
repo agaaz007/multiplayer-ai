@@ -1,8 +1,21 @@
 """Check objective facts only. Never infer decision quality from keywords."""
 import json
 import math
+import re
 from pathlib import Path
 from fixtures import validate
+
+def normalized_fact(key, value):
+    """Only documented labels vary; never normalize population or authority away."""
+    if not isinstance(value, str): return value
+    label = re.sub(r'[\s_-]+', ' ', value.strip().casefold())
+    aliases = {
+        'population': {'north smb workspace': 'north_smb_workspaces',
+                       'north smb workspaces': 'north_smb_workspaces'},
+        'analysis_unit': {'workspace': 'workspace', 'workspaces': 'workspace'},
+    }
+    return aliases.get(key, {}).get(label, value)
+
 
 def grade(pack, stage, answer):
     validate(pack)
@@ -23,7 +36,7 @@ def grade(pack, stage, answer):
         if isinstance(value,bool): valid = type(got) is bool and got == value
         elif isinstance(value,(int,float)):
             valid = type(got) in (int,float) and math.isfinite(got) and math.isclose(got,value,rel_tol=1e-7,abs_tol=1e-8)
-        else: valid = type(got) is type(value) and got == value
+        else: valid = type(got) is type(value) and normalized_fact(key,got) == normalized_fact(key,value)
         check('fact:'+key,valid,got)
     ids = answer.get('source_ids')
     valid_ids = isinstance(ids,list) and len(ids)>0 and all(isinstance(x,str) and x in visible for x in ids)
@@ -55,6 +68,12 @@ def review_packet(answer, out, sources=None):
     import re
     out = Path(out); out.mkdir(parents=True,exist_ok=False)
     mapping = {}
+    sources = sources or []
+    source_ids = [source['id'] for source in sources]
+    if any(not isinstance(identity,str) or not identity for identity in source_ids) or len(set(source_ids)) != len(source_ids):
+        raise ValueError('review sources must have unique nonempty string IDs')
+    for identity in source_ids:
+        mapping[json.dumps(identity)] = f'source-{len(mapping)+1:03d}'
     def redact(value,key=''):
         if key == 'reuse_evidence': return '[withheld for separate continuity review]'
         if key in ('source_ids','evidence_ids') and isinstance(value,list):
@@ -68,10 +87,27 @@ def review_packet(answer, out, sources=None):
             return {k:redact(v,k) for k,v in value.items() if k not in ('arm','product','model','cost','usage','latency','native_tool')}
         if isinstance(value,list): return [redact(v) for v in value]
         if isinstance(value,str):
+            # Bind inline citations to the same aliases as structured citations.
+            # Replace once so a source called source-001 cannot cascade aliases.
+            aliases = {json.loads(original):alias for original,alias in mapping.items()
+                       if isinstance(json.loads(original),str)}
+            if aliases:
+                pattern = r'(?<![\w-])(?:'+'|'.join(re.escape(x) for x in sorted(aliases,key=len,reverse=True))+r')(?![\w-])'
+                value = re.sub(pattern,lambda match:aliases[match.group()],value)
             return re.sub(r'\b(ledger|supermemory|mem0|gbrain|graphify)\b','[memory product]',value,flags=re.I)
         return value
-    for source in sources or []:
-        mapping[json.dumps(source['id'])]=f'source-{len(mapping)+1:03d}'
+    def collect(value):
+        if isinstance(value,dict):
+            for key,items in value.items():
+                if key == 'reuse_evidence': continue
+                if key in ('source_ids','evidence_ids') and isinstance(items,list):
+                    for item in items:
+                        original=json.dumps(item,sort_keys=True)
+                        if original not in mapping: mapping[original]=f'source-{len(mapping)+1:03d}'
+                else: collect(items)
+        elif isinstance(value,list):
+            for item in value: collect(item)
+    collect(answer)
     packet = redact(answer)
     public_sources=[{**source,'id':mapping[json.dumps(source['id'])]} for source in sources or []]
     (out/'answer.json').write_text(json.dumps(packet,indent=2)+'\n')
