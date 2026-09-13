@@ -278,11 +278,13 @@ await R.linkSpan(pool, { record_id: recTypo.id, session_id: sidU, from_seq: 4, t
   assert.equal(c1.confirmed_via, null, "no channel given: not recorded, never assumed to be a person");
 
   // acceptance provenance: an agent's confirmation stays an agent's until a person accepts at the interactive prompt
+  const vStart = (await R.getRecord(pool, recBanner.id))!.state_version;
   const pa = await R.addStateUpdate(pool, { record_id: recBanner.id, kind: "note", text: "provenance probe", created_by: "rachit", proposed_session_id: sidR });
   assert.equal(pa.proposed_session_id, sidR);
   const va = (await R.confirmStateUpdate(pool, pa.id, "rachit", { via: "mcp", session_id: sidR }))!;
   assert.deepEqual({ via: va.confirmed_via, sid: va.confirmed_session_id, by: va.confirmed_by }, { via: "mcp", sid: sidR, by: "rachit" });
   const vBefore = (await R.getRecord(pool, recBanner.id))!.state_version;
+  assert.equal(vBefore, vStart + 1);
   const again = (await R.confirmStateUpdate(pool, pa.id, "rachit", { via: "cli" }))!;
   assert.equal(again.confirmed_via, "mcp", "a non-interactive re-confirmation does not change the channel");
   const person = (await R.confirmStateUpdate(pool, pa.id, "agaaz", { via: "cli-interactive" }))!;
@@ -292,9 +294,9 @@ await R.linkSpan(pool, { record_id: recTypo.id, session_id: sidU, from_seq: 4, t
   assert.equal((await R.getRecord(pool, recBanner.id))!.state_version, vBefore + 1);
   assert.equal((await R.getStateUpdate(pool, pa.id))!.id, pa.id);
   assert.equal(await R.getStateUpdate(pool, "not-a-uuid"), null);
-  await R.rejectStateUpdate(pool, (await R.addStateUpdate(pool, { record_id: recBanner.id, kind: "note", text: "x", created_by: "rachit" })).id, "rachit", "filler");
+  // remove the probe so the checks below see the record as before
   await pool.query(`delete from cont_state_updates where id = $1`, [pa.id]);
-  await pool.query(`update cont_records set state_version = $2 where id = $1`, [recBanner.id, vBefore]);
+  await pool.query(`update cont_records set state_version = $2 where id = $1`, [recBanner.id, vStart]);
 
   const rj = (await R.rejectStateUpdate(pool, n1.id, "rachit", "already covered by the fix"))!;
   assert.equal(rj.status, "rejected");

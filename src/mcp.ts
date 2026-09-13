@@ -316,7 +316,7 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
       "ledger_resume",
       {
         title: "Resume a thread or a work record",
-        description: "Continue a teammate's work. Pass thread_id for a thread (one session's worktree and claim) or record_id for a work record (one goal accumulated across sessions and teammates: state with proposed items flagged, evidence from every contributing session in time order, pending operations, contradictions, linked Ledger objects with supersession flags, unassigned spans that may belong, and the bootstrap for the latest snapshot). mode=continue claims the thread (advisory; for a record, the thread of its most recent contributing session; a non-code record has no claim) and returns the pack with worktree bootstrap commands; mode=fork (threads only) creates a linked fork you own; mode=inspect reads without claiming. Pass cwd (a checkout of the same repo) to get the diff of what changed since the checkpoint. Your first turn must inspect the worktree, state confirmed vs uncertain progress, never treat a proposed update as decided, and never blindly rerun a pending operation.",
+        description: "Continue a teammate's work. Pass thread_id for a thread (one session's worktree and claim) or record_id for a work record (one goal accumulated across sessions and teammates: state with proposed items flagged, evidence from every contributing session in time order, pending operations, contradictions, decisions in force, unassigned spans that may belong, and the bootstrap for the latest snapshot). Both packs list the Ledger decisions the work saved or linked, marked in force, SUPERSEDED, DRAFT or CONFLICT, and label each record decision with how it was accepted. mode=continue claims the thread (advisory; for a record, the thread of its most recent contributing session; a non-code record has no claim) and returns the pack with worktree bootstrap commands; mode=fork (threads only) creates a linked fork you own; mode=inspect reads without claiming. Pass cwd (a checkout of the same repo) to get the diff of what changed since the checkpoint. Your first turn must inspect the worktree, state confirmed vs uncertain progress, act only on decisions in force (never on a superseded, draft, proposed or agent-confirmed one as if a person decided it), and never blindly rerun a pending operation.",
         inputSchema: {
           thread_id: z.string().optional().describe("Thread to resume; thread_id or record_id is required"),
           record_id: z.string().optional().describe("Work record to resume instead of a thread (from ledger_records or the brief's Open work section)"),
@@ -327,13 +327,15 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
         },
       },
       async ({ thread_id, record_id, mode, cwd, session_id, budget_tokens }) => {
+        // argument errors first: they hold whatever the session
+        if (!record_id && !thread_id) return text("thread_id or record_id is required.");
+        if (record_id && mode === "fork") return text("mode=fork applies to threads; use mode=continue or mode=inspect with record_id (fork the underlying thread with thread_id if you need parallel work).");
         // inspect never claims, so it needs no session; continue and fork refuse rather than claim under a made-up id
         let sid: string | undefined;
         if (mode !== "inspect") {
           try { sid = sessionOf(session_id); } catch (e: any) { return text(`ledger_resume refused: ${e.message}`); }
         }
         if (record_id) {
-          if (mode === "fork") return text("mode=fork applies to threads; use mode=continue or mode=inspect with record_id (fork the underlying thread with thread_id if you need parallel work).");
           try {
             const pack = await buildRecordPack(cfg, pool(), record_id, { mode, author: cfg.author, sessionId: sid, repoPath: cwd, budgetTokens: budget_tokens });
             if (sid && mode === "continue" && pack.claim.acquired && pack.claim.thread_id) writeBinding(sid, { thread_id: pack.claim.thread_id });
