@@ -34,6 +34,14 @@ class PackTests(unittest.TestCase):
         for stage in 'ABCD':
             result=grade(self.pack,stage,self.answer(stage));self.assertTrue(result['factual_pass'],result)
             self.assertEqual(result['decision_quality'],'not_evaluated')
+    def test_equivalent_population_labels_pass_without_accepting_other_scopes(self):
+        answer=self.answer('A')
+        answer['facts']['population']='North SMB workspaces'
+        answer['facts']['analysis_unit']='Workspaces'
+        self.assertTrue(grade(self.pack,'A',answer)['factual_pass'])
+        for wrong in ['South SMB workspaces','North enterprise workspaces','North SMB users']:
+            answer['facts']['population']=wrong
+            self.assertFalse(grade(self.pack,'A',answer)['factual_pass'])
     def test_wrong_scope_stale_metric_and_future_citation_fail(self):
         answer=self.answer('B');answer['facts']['treatment_rate']=.25;answer['facts']['population']='south_enterprise';answer['source_ids']=['south-proposal']
         result=grade(self.pack,'B',answer);self.assertFalse(result['factual_pass'])
@@ -49,6 +57,24 @@ class PackTests(unittest.TestCase):
         review_packet(answer,self.root/'review')
         public=(self.root/'review/answer.json').read_text().lower()
         self.assertNotIn('ledger',public);self.assertNotIn('strategy',public)
+    def test_blind_inline_citations_bind_to_the_public_archive(self):
+        sources,_=pm_sources(41)
+        sources=[source for source in sources if source['released']<='B']
+        answer=self.answer('B')
+        answer['recommendation']='Apply [tracking-audit], retain `experiment-v1`, and follow strategy.'
+        result=review_packet(answer,self.root/'review',sources)
+        packet=json.loads((self.root/'review/answer.json').read_text())
+        public=json.loads((self.root/'review/sources.json').read_text())
+        by_title={source['title']:source['id'] for source in public}
+        audit=by_title['Accepted tracking correction']
+        self.assertIn('['+audit+']',packet['recommendation'])
+        self.assertIn(audit,packet['source_ids'])
+        self.assertNotIn('tracking-audit',packet['recommendation'])
+        self.assertEqual(len({source['id'] for source in public}),len(sources))
+    def test_duplicate_review_source_ids_are_rejected(self):
+        source={'id':'one','body':'evidence'}
+        with self.assertRaisesRegex(ValueError,'unique'):
+            review_packet(self.answer('A'),self.root/'review',[source,source])
     def test_unconfigured_profiles_fail_closed(self):
         result=preflight(self.pack,Path(__file__).with_name('profiles.example.json'))
         self.assertFalse(result['ready']);self.assertIn('freeze authorization',result['problems'])
@@ -83,6 +109,21 @@ class EngineeringTests(unittest.TestCase):
         code=Path(__file__).with_name('reference_app.py').read_text().replace("WHERE owner=? AND id=?',(owner,identity)","WHERE ? IS NOT NULL AND id=?',(owner,identity)")
         (candidate/'app.py').write_text(code)
         result=grade_engineering(candidate,'A')
+        self.assertIn('owner-isolation',result['critical_errors'])
+    def test_grader_catches_read_only_status_that_reconciles(self):
+        candidate=self.root/'mutant';candidate.mkdir()
+        code=Path(__file__).with_name('reference_app.py').read_text()
+        code=code.replace("'jobs':[execute(j)[1] for j in jobs] if run else jobs", "'jobs':[execute(j)[1] for j in jobs]")
+        (candidate/'app.py').write_text(code)
+        result=grade_engineering(candidate,'C')
+        failed={c['id'] for c in result['checks'] if not c['passed']}
+        self.assertIn('batch-composes-storage-and-execution',failed)
+    def test_grader_catches_execute_only_owner_bypass(self):
+        candidate=self.root/'mutant';candidate.mkdir()
+        code=Path(__file__).with_name('reference_app.py').read_text()
+        code=code.replace("parts=path.path.split('/');j=job(owner,parts[2])", "parts=path.path.split('/');j=job('team-a' if path.path.endswith('/execute') else owner,parts[2])")
+        (candidate/'app.py').write_text(code)
+        result=grade_engineering(candidate,'B')
         self.assertIn('owner-isolation',result['critical_errors'])
     @unittest.skipUnless(sys.platform=='darwin','kernel boundary requires macOS')
     def test_candidate_cannot_read_controller_evidence(self):
