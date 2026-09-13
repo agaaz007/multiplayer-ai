@@ -22,7 +22,8 @@ import { forbiddenSnapshotRoot, localTranscriptExists, resolveHarnessSession } f
 import { openThreadsText } from "./continuity/brief.js";
 import { writeBinding, writeSignal } from "./helper/signals.js";
 import { buildRecordPack, listRecordSummaries, recordLine, unassignedLine } from "./continuity/recordpack.js";
-import { addStateUpdate, confirmStateUpdate, createRecord, getRecord, linkSpan, rejectStateUpdate, searchEvents, unassignedSpans } from "./continuity/records.js";
+import { addStateUpdate, confirmStateUpdate, createRecord, getRecord, linkSpan, rejectStateUpdate, searchEvents, unassignedSpans, updateRecordMeta } from "./continuity/records.js";
+import { acceptanceLabel } from "./continuity/packsections.js";
 
 const text = (s: string) => ({ content: [{ type: "text" as const, text: s }] });
 
@@ -598,13 +599,14 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
           goal: z.string().max(2000).optional(),
           cwd: z.string().optional().describe("A path inside the repo for code work; omit for non-code work"),
           link: z.object({ session_id: z.string(), from_seq: z.number().int().min(0), to_seq: z.number().int().min(0) }).optional().describe("A span of a session to link explicitly at creation"),
+          ledger_refs: z.array(z.string().min(3)).max(20).optional().describe("Ledger decision, definition or finding ids this work depends on; resume packs show whether each is still in force"),
         },
       },
-      async ({ kind, title, goal, cwd, link }) => {
+      async ({ kind, title, goal, cwd, link, ledger_refs }) => {
         try {
           const root = cwd ? repoRoot(cwd) : null;
           const repo = root ? repoIdentity(root) : null;
-          const rec = await createRecord(pool(), { kind, title, goal: goal ?? null, repo, created_by: cfg.author });
+          const rec = await createRecord(pool(), { kind, title, goal: goal ?? null, repo, created_by: cfg.author, ledger_refs: [...new Set(ledger_refs ?? [])].map((id) => ({ id })) });
           let linked = "";
           if (link) {
             const l = await linkSpan(pool(), { record_id: rec.id, session_id: link.session_id, from_seq: link.from_seq, to_seq: link.to_seq, source: "explicit", created_by: cfg.author });

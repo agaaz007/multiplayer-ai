@@ -531,7 +531,8 @@ async function workRecordCommand(args: string[]): Promise<void> {
     const pending = await getStateUpdate(pool, pos[1]);
     if (!pending) throw new Error(`not found: ${pos[1]}`);
     let via: "cli" | "cli-interactive" = "cli";
-    if (pending.status === "proposed" && process.stdin.isTTY && process.stdout.isTTY) {
+    const needsPerson = pending.status === "proposed" || (pending.status === "confirmed" && pending.confirmed_via !== "cli-interactive");
+    if (needsPerson && process.stdin.isTTY && process.stdout.isTTY) {
       const readline = await import("node:readline/promises");
       const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
       console.log(`${pending.kind} update ${pending.id} (by ${pending.created_by}):\n  ${pending.text}`);

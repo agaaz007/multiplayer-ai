@@ -79,15 +79,10 @@ export interface RecordSources {
 
 export interface EvidenceItem { session_id: string; author: string; harness: string; seq: number; kind: string; at: string | null; link_source: LinkSource; line: string }
 
-export interface LedgerRefStatus {
-  id: string; version?: string; found: boolean; type: string | null; title: string | null; author: string | null; created: string | null;
-  status: string | null; superseded_by: string | null;
-  authority_status: string; current_ids: string[]; version_matches: boolean | null; warnings: string[];
-}
-
 export interface RecordPack {
   record: WorkRecord;
   state: RecordState;
+  /** explicit ledger_refs and Ledger objects saved inside the record's spans, resolved to what is in force now */
   ledger_refs: LedgerRefStatus[];
   /** the evidence shown, in time order, plus the gap named with the calls that fetch it */
   evidence_summary: { total: number; shown: EvidenceItem[]; omitted: { count: number; fetch: string[] } | null };
@@ -109,7 +104,6 @@ export interface RecordPack {
 
 const approxTokens = (s: string) => Math.ceil(s.length / 4);
 const fmt = (d: Date | string | null | undefined) => (d ? new Date(d).toISOString().slice(0, 19).replace("T", " ") + "Z" : "unknown");
-const dateOf = (d: Date | string | null | undefined) => (d ? new Date(d).toISOString().slice(0, 10) : "unknown");
 const oneLine = (s: unknown) => String(s ?? "").replace(/\s+/g, " ").trim();
 const clipTo = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
 const harnessName = (h: string | null | undefined) => (h === "claude" ? "Claude Code" : h === "codex" ? "Codex" : h || "unknown harness");
@@ -124,21 +118,6 @@ export function ago(d: Date | string | null | undefined, now = new Date()): stri
   if (min < 60) return `${min}m ago`;
   if (min < 48 * 60) return `${Math.round(min / 60)}h ago`;
   return `${Math.round(min / (24 * 60))}d ago`;
-}
-
-/** Evidence refs of a state update grouped by session: "evidence: seq 3,4 of 0199aaaa; seq 1 of agaaz-cl". */
-export function evidenceRefs(u: StateUpdate): string {
-  const by = new Map<string, number[]>();
-  for (const e of u.evidence ?? []) by.set(e.session_id, [...(by.get(e.session_id) ?? []), e.seq]);
-  if (!by.size) return "no evidence refs";
-  return "evidence: " + [...by].map(([sid, seqs]) => `seq ${[...new Set(seqs)].sort((a, b) => a - b).join(",")} of ${short(sid)}`).join("; ");
-}
-
-/** `[confirmed|PROPOSED] text (by <created_by>, <date>; evidence: seq a,b,c of <session short id>)` */
-export function stateLine(u: StateUpdate): string {
-  const flag = u.status === "confirmed" ? "confirmed" : "PROPOSED";
-  const who = u.status === "confirmed" && u.confirmed_by && u.confirmed_by !== u.created_by ? `by ${u.created_by}, ${dateOf(u.created_at)}, confirmed by ${u.confirmed_by}` : `by ${u.created_by}, ${dateOf(u.created_at)}`;
-  return `- [${flag}] ${oneLine(u.text)} (${who}; ${evidenceRefs(u)})`;
 }
 
 /** One line per unassigned span, for the pack, the brief, and `ledger unassigned`. */
@@ -260,21 +239,15 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
   const counts = await recordSourceCounts(pool, rec.id);
   const sources: RecordSources = { ...counts, proposed_updates: state.proposed_count, confirmed_updates: state.confirmed_count };
 
-  // ----- linked Ledger objects, with supersession flagged -----
+  // ----- decisions in force: explicit ledger_refs plus Ledger objects saved inside the record's spans -----
   const refs = Array.isArray(rec.ledger_refs) ? rec.ledger_refs : [];
-  const all = refs.length ? loadAll(cfg, TYPES) : [];
-  const ledgerRefs: LedgerRefStatus[] = refs.map((r) => {
-    const o = all.find((x) => x.id === r.id);
-    const resolution = resolveAccepted(all,r.id);
-    const current = resolution.current.some(c=>c.id===r.id);
-    return { id: r.id, version: r.version, found: Boolean(o), type: o?.type ?? null, title: o?.title ?? null, author: o?.author ?? null, created: o?.created ?? null,
-      status: o ? (current ? 'stable' : o.status==='draft' ? 'draft' : 'deprecated') : null,
-      superseded_by: current ? null : resolution.current.length===1 ? resolution.current[0].id : null,
-      authority_status: resolution.status, current_ids: resolution.current.map(c=>c.id), version_matches: o && r.version ? objectVersion(o)===r.version : null, warnings:resolution.warnings };
-  });
+  const saved = await writtenLedgerIds(pool, { recordId: rec.id });
+  const refInputs: LedgerRefInput[] = [...refs.map((r) => ({ id: r.id, version: r.version, source: "explicit" as const })), ...saved.refs];
+  const all = refInputs.length ? loadAll(cfg, TYPES) : [];
+  const ledgerRefs: LedgerRefStatus[] = ledgerRefStatuses(all, refInputs);
+  // accepted-source detail (formula, query, review impact) stays limited to what the record links explicitly
   const acceptedRefs = [...new Map(refs.flatMap(r=>resolveAccepted(all,r.id).current).map(o=>[o.id,o])).values()];
   const reviewImpacts = acceptedRefs.filter(o=>o.supersedes).map(o=>correctionImpact(all,o.id));
-  const supersededRefs = ledgerRefs.filter((r) => r.status === "deprecated");
 
   // ----- evidence across sessions, ordered by occurred_at, each attributed -----
   const [evFirst, evLast, evidenceTotal, latestComp] = await Promise.all([
@@ -438,17 +411,8 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
     if (!anyState) L.push(`(no state updates yet; propose one with ledger_record_update(record_id: ${q(rec.id)}, action: "propose", …))`);
     L.push(``);
 
-    // linked ledger objects
-    L.push(`## Linked Ledger objects (${ledgerRefs.length})`);
-    if (!ledgerRefs.length) L.push(`(none; a record references decisions, findings, and definitions by id in ledger_refs)`);
-    for (const r of ledgerRefs) {
-      if (!r.found) { L.push(`- ${r.id}${r.version ? ` @${r.version}` : ""}: NOT FOUND in the ledger (ledger_get ${q(r.id)})`); continue; }
-      const flag = r.status === "deprecated" ? ` — SUPERSEDED by ${r.superseded_by ?? "(unknown)"}; the record relied on a version that is no longer in force` : r.status === "draft" ? " — draft, not in force" : " — in force";
-      L.push(level >= 4 ? `- ${r.type} ${r.id}${flag}` : `- ${r.type} ${r.id}: ${r.title} (${r.author}, ${dateOf(r.created)})${r.version ? ` · pinned ${r.version}` : ""}${flag}`);
-      if (r.version_matches===false) L.push(`VERSION MISMATCH: ${r.id}; its pinned content does not match the retained object. Do not claim the original evidence was verified.`);
-      if (r.authority_status==='conflict') L.push(`UNRESOLVED ACCEPTED CONFLICT: ${r.current_ids.join(', ')}. No current answer has been selected.`);
-      for (const warning of r.warnings) L.push(`WARNING: ${warning}`);
-    }
+    // decisions in force (shared with the thread pack)
+    for (const line of renderDecisionsInForce(ledgerRefs, saved, { compact: level >= 4 })) L.push(line);
     for (const o of acceptedRefs) {
       const resolution = resolveAccepted(all,o.id);
       L.push(`${resolution.status==='conflict' ? 'CONFLICTING ACCEPTED SOURCE — resolve before reuse' : 'Accepted source candidate — check task applicability'}: ${o.type} ${o.id} @${objectVersion(o)}: ${String(o.fields.formula ?? o.fields.decision ?? o.fields.result ?? o.fields.what ?? '')}${o.fields.query ? `\nQuery: ${o.fields.query}` : ''}${o.fields.evidence_refs ? `\nEvidence: ${JSON.stringify(o.fields.evidence_refs)}` : ''}`);
@@ -458,8 +422,7 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
       for (const item of impact.affected) L.push(`NEEDS REVIEW: ${item.id}; ${item.reason}; ${item.path.join(' -> ')}`);
       for (const item of impact.incomplete) L.push(`INCOMPLETE IMPACT: ${item.id}; ${item.reason}`);
     }
-    if (level >= 4 && ledgerRefs.length) om.push(`linked Ledger object titles (ids and status kept); ledger_get per id`);
-    if (supersededRefs.length) L.push(`SUPERSEDED objects this record depends on: ${supersededRefs.map((r) => `${r.id} → ${r.superseded_by}`).join("; ")}`);
+    if (level >= 4 && ledgerRefs.length) om.push(`Ledger object titles in Decisions in force (ids and status kept); ledger_get per id`);
     L.push(``);
 
     // evidence
@@ -552,10 +515,10 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
 
     // contract
     L.push(`## First turn contract`);
-    L.push(`1. Inspect the state above. [confirmed] items were accepted by a person; [PROPOSED] items are unconfirmed suggestions. Do not treat a proposed item as decided; contradictions stay open until a person resolves them.`);
+    L.push(`1. Inspect the state and decisions above. ${DECISION_RULE} Contradictions stay open until a person resolves them.`);
     L.push(rec.repo ? `2. Check out the snapshot into a fresh worktree and inspect it; do not assume the branch tip matches. State what is confirmed (verified snapshot, linked evidence) vs uncertain (unverified edits, pending operations).` : `2. This is non-code work: there is no worktree. State what is confirmed (linked evidence, confirmed updates) vs uncertain (proposed updates, unassigned spans).`);
     L.push(`3. Do not rerun a pending operation that mutates anything until you know its outcome.`);
-    L.push(`4. Propose progress, decisions, hypotheses, blockers, and next steps with ledger_record_update(record_id: ${q(rec.id)}, action: "propose", …) citing exact evidence (session_id, seq); confirm only what a person accepts.`);
+    L.push(`4. Propose progress, decisions, hypotheses, blockers, and next steps with ledger_record_update(record_id: ${q(rec.id)}, action: "propose", …) citing exact evidence (session_id, seq). An agent confirmation is labelled agent-confirmed, never accepted by a person; ask the person to run \`ledger record confirm <update_id>\` for anything they decide.`);
     L.push(`5. Link this session's relevant spans with ledger_record_link(record_id: ${q(rec.id)}, session_id, from_seq, to_seq); the helper captures events automatically but does not know which record they serve.`);
     L.push(`6. Say what you are continuing and what your next action is. A record's confirmed state is still not a Ledger decision or finding; promote with ledger_record_decision / ledger_record_finding.`);
     if (om.length) { L.push(``); L.push(`## Omitted for budget or unavailable`); for (const o of om) L.push(`- ${o}`); }
