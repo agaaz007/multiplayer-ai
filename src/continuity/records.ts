@@ -78,7 +78,14 @@ export interface StateUpdate {
   reject_reason?: string | null;
   rejected_by?: string | null;
   rejected_at?: Date | null;
+  // acceptance provenance (2026-09-13): the sessions that proposed and confirmed it, and how it was confirmed
+  proposed_session_id?: string | null;
+  confirmed_session_id?: string | null;
+  /** mcp: an agent through the MCP tool; cli: the CLI without an interactive prompt; cli-interactive: a person typed yes at the CLI prompt; null: not recorded (rows before 2026-09-13) */
+  confirmed_via?: ConfirmChannel | null;
 }
+
+export type ConfirmChannel = "mcp" | "cli" | "cli-interactive";
 
 export interface RecordState {
   record: WorkRecord;

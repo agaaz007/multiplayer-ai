@@ -9,6 +9,9 @@ import { clipSummary, INSTRUCTIONS_HEAD, RECENT_FILES_MINUTES, SUMMARY_BUDGET_SH
 import { eventLine, PREVIEW_MAX_CHARS } from "./evidence.js";
 import { defaultRemoteBranch, repoIdentity, repoRoot } from "./shadow.js";
 import { readProgress } from "./classify.js";
+import { DECISION_RULE, ledgerRefStatuses, renderDecisionsInForce, writtenLedgerIds, type LedgerRefStatus } from "./packsections.js";
+export { acceptanceLabel, evidenceRefs, stateLine, type LedgerRefStatus } from "./packsections.js";
+import { stateLine } from "./packsections.js";
 
 /**
  * The record pack (spec §13a, "Retrieval by record"): the active context for
