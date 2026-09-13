@@ -547,6 +547,31 @@ const call = async (name: string, args: Record<string, unknown>) => {
   ok('full-history count and true tail, earlier pending operation, accepted constraint under proposal flood');
 }
 
+// ---------- decisions in force: Ledger ids saved inside a record's spans; ledger_refs through MCP ----------
+{
+  const sidS = "agaaz-claude-saves-1";
+  await S.upsertSession(pool, { id: sidS, author: "agaaz", harness: "claude", machine: "agaaz-mac", repo: null, started_at: T(95), last_seen_at: T(97) });
+  await S.appendEvents(pool, sidS, [
+    ev("s1", "instruction.added", 95, { text: "Record the readout decision" }),
+    ev("s2", "tool.finished", 96, { tool: "mcp__ledger__ledger_record_decision", output_preview: JSON.stringify({ receipt: { record_id: dec1.id } }) }, "s-c1"),
+    ev("s3", "tool.finished", 97, { tool: "mcp__ledger__ledger_record_decision", output_preview: JSON.stringify({ receipt: { record_id: dec2.id } }) }, "s-c2"),
+  ], null, null);
+  const started = await call("ledger_record_start", { kind: "other", title: "Readout source decision", link: { session_id: sidS, from_seq: 1, to_seq: 2 }, ledger_refs: ["dec-20260101-nope-zzzz"] });
+  const recId = started.match(/^Record ([0-9a-f-]{36})/)![1];
+  let p = await buildRecordPack(cfg, pool, recId, { mode: "inspect", author: "agaaz", now: T(130) });
+  assert.deepEqual(p.ledger_refs.map((r) => [r.id, r.source, r.origin?.seq ?? null, r.status]), [["dec-20260101-nope-zzzz", "explicit", null, null], [dec1.id, "saved", 2, "deprecated"]], "the explicit ref, then the id saved inside the linked span; seq 3 is outside it");
+  assert.ok(p.text.includes(`- [SUPERSEDED by ${dec2.id}, which is in force] decision ${dec1.id}: ClickHouse is the source of truth for the September paywall test (agaaz, ${TODAY}) · saved in session ${sidS.slice(0, 8)} seq 2`), p.text);
+  assert.ok(p.text.indexOf(`decision ${dec1.id}`) < p.text.indexOf("[NOT FOUND] dec-20260101-nope-zzzz"), "found decisions before missing ids");
+  const linked = await call("ledger_record_link", { record_id: recId, session_id: sidS, from_seq: 3, to_seq: 3, ledger_refs: [dec2.id, "dec-20260101-nope-zzzz"] });
+  assert.ok(linked.endsWith(`Ledger refs now: dec-20260101-nope-zzzz, ${dec2.id}.`), linked);
+  p = await buildRecordPack(cfg, pool, recId, { mode: "inspect", author: "agaaz", now: T(130) });
+  assert.deepEqual(p.ledger_refs.map((r) => [r.id, r.source, r.status]), [["dec-20260101-nope-zzzz", "explicit", null], [dec2.id, "explicit", "stable"], [dec1.id, "saved", "deprecated"]], "an explicit ref wins over the same id saved in a span");
+  assert.ok(p.text.includes(`- [in force] decision ${dec2.id}: `) && p.text.includes("Captured from 2 Ledger save results in 1 session and 2 explicit links."), p.text);
+  assert.ok(p.text.includes(`NOT IN FORCE (2): ${dec1.id} → ${dec2.id}; dec-20260101-nope-zzzz.`));
+  await pool.query(`delete from cont_records where id = $1`, [recId]);
+  ok("decisions in force on a record: ids saved inside linked spans are resolved (superseded flagged with the save event), ids outside the spans are not; ledger_record_start and ledger_record_link add explicit refs, which win over the same saved id");
+}
+
 await client.close();
 await server.close();
 await closePools();
