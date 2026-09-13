@@ -193,6 +193,9 @@ export function renderDecisionsInForce(refs: LedgerRefStatus[], captured: { resu
     L.push(`Ledger objects this work saved or linked, resolved to what is in force now. Only [in force] items are accepted knowledge.`);
     const rank = (r: LedgerRefStatus) => (r.found ? TYPE_ORDER[r.type ?? ""] ?? 4 : 5);
     const sorted = refs.map((r, i) => ({ r, i })).sort((a, b) => rank(a.r) - rank(b.r) || a.i - b.i).map((x) => x.r);
+    // a warning shared by several objects (legacy scope, say) prints once after the list, so it cannot bury a status line
+    const warnCount = new Map<string, number>();
+    for (const r of sorted) for (const w of new Set(r.warnings)) warnCount.set(w, (warnCount.get(w) ?? 0) + 1);
     for (const r of sorted) {
       const where = r.source === "explicit" ? "linked explicitly" : r.origin ? `saved in session ${short(r.origin.session_id)} seq ${r.origin.seq}` : "saved in this work";
       if (!r.found) { L.push(`- [NOT FOUND] ${r.id}${r.version ? ` @${r.version}` : ""} · ${where} (ledger_get "${r.id}")`); continue; }
@@ -200,8 +203,9 @@ export function renderDecisionsInForce(refs: LedgerRefStatus[], captured: { resu
         ? `- [${decisionTag(r)}] ${r.type} ${r.id} · ${where}`
         : `- [${decisionTag(r)}] ${r.type} ${r.id}: ${r.title} (${r.author}, ${dateOf(r.created)})${r.version ? ` · pinned ${r.version}` : ""} · ${where}`);
       if (r.version_matches === false) L.push(`VERSION MISMATCH: ${r.id}; its pinned content does not match the retained object. Do not claim the original evidence was verified.`);
-      for (const w of r.warnings) L.push(`WARNING: ${w}`);
+      for (const w of new Set(r.warnings)) if (warnCount.get(w) === 1) L.push(`WARNING: ${w}`);
     }
+    for (const [w, n] of warnCount) if (n > 1) L.push(`WARNING (${n} objects above): ${w}`);
     const notInForce = sorted.filter((r) => !r.found || r.status !== "stable" || r.authority_status === "conflict");
     if (notInForce.length) L.push(`NOT IN FORCE (${notInForce.length}): ${notInForce.map((r) => (r.status === "deprecated" && r.superseded_by ? `${r.id} → ${r.superseded_by}` : r.id)).join("; ")}. Do not act on these as decided.`);
     const explicit = refs.filter((r) => r.source === "explicit").length;
