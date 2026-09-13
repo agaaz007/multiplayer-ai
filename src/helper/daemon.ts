@@ -215,7 +215,6 @@ async function structuredState(pool: pg.Pool, sessionId: string, threadId: strin
     last_assistant_messages: msgs.map((m) => String(m.payload?.text ?? "").slice(0, 600)),
     pending_operations: pend.map((p) => ({ call_id: p.call_id, tool: p.tool, input: String(p.input).slice(0, 200), status: "unknown" })),
     last_error: lastErr ? { seq: lastErr.seq, ...lastErr.payload } : null,
-    decisions: [],
   };
 }
 

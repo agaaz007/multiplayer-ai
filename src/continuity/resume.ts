@@ -6,6 +6,7 @@ import { claimThread, createThread, getClaim, getThread, headCheckpoint, latestC
 import { defaultRemoteBranch, diffStat, fetchQuiet, repoRoot, repoIdentity } from "./shadow.js";
 import { PREVIEW_MAX_CHARS, sourcesLine, threadSourceCounts, type SourceCounts } from "./evidence.js";
 import { readProgress } from "./classify.js";
+import { DECISION_RULE, ledgerRefStatuses, renderDecisionsInForce, threadRecordDecisions, writtenLedgerIds, type LedgerRefStatus, type RecordDecisionGroup } from "./packsections.js";
 
 /**
  * The resume pack (spec §7). Built mechanically from the store and git; the
@@ -65,6 +66,10 @@ export interface ResumePack {
   pending_operations: { call_id: string; tool: string; input: string; seq: number }[];
   last_error: Record<string, unknown> | null;
   intervening: { git: string | null; ledger: string[] };
+  /** Ledger objects this thread's sessions saved, resolved to what is in force now */
+  decisions: LedgerRefStatus[];
+  /** decision updates of the work records these sessions contribute to, with how each was accepted */
+  record_decisions: RecordDecisionGroup[];
   bootstrap: string[];
   /** what the thread's evidence is made of */
   sources: SourceCounts;
@@ -211,14 +216,17 @@ export async function buildResumePack(cfg: Config, pool: pg.Pool, threadId: stri
   // ----- ledger objects since the checkpoint -----
   const since = latest?.created_at ?? t.created_at;
   const repoTag = path.basename(t.repo).toLowerCase();
-  const ledgerSince = loadAll(cfg, TYPES)
+  const allObjects = loadAll(cfg, TYPES);
+  const ledgerSince = allObjects
     .filter((o) => o.status === "stable" && o.created >= since.toISOString())
     .filter((o) => o.tags.some((x) => x.toLowerCase() === repoTag) || JSON.stringify(o.fields).toLowerCase().includes(repoTag) || o.title.toLowerCase().includes(repoTag))
     .slice(0, 10)
     .map((o) => `${o.type} ${o.id}: ${o.title} (${o.author}, ${o.created.slice(0, 10)})`);
-  const refDecisions: { ledger_id: string; version?: string }[] = Array.isArray(latest?.structured_state?.decisions) ? latest!.structured_state.decisions : [];
-  const all = refDecisions.length ? loadAll(cfg, ["decision"]) : [];
-  const superseded = refDecisions.map((d) => all.find((o) => o.id === d.ledger_id)).filter((o) => o && o.status === "deprecated").map((o) => `${o!.id} → superseded by ${o!.superseded_by}`);
+
+  // ----- decisions in force: Ledger objects this thread's sessions saved, resolved through the authority layer -----
+  const saved = await writtenLedgerIds(pool, { threadId: t.id });
+  const decisionRefs = ledgerRefStatuses(allObjects, saved.refs);
+  const recordDecisions = await threadRecordDecisions(pool, t.id);
 
   // ----- instructions: chronological when they fit; else first HEAD + last TAIL with the gap named -----
   const instrAll = instrRows.map((e) => ({ seq: e.seq, at: e.occurred_at ? e.occurred_at.toISOString() : null, text: String(e.payload?.text ?? "") }));
@@ -321,11 +329,13 @@ export async function buildResumePack(cfg: Config, pool: pg.Pool, threadId: stri
     if (level >= 1) { L.push(`(omitted for budget; ledger_events(thread_id: "${t.id}", kinds: ["assistant.message"]))`); om.push(`last assistant messages (omitted for budget; ledger_events(thread_id: "${t.id}", kinds: ["assistant.message"]))`); }
     else for (const m of msgRows) L.push(`- [${m.occurred_at ? m.occurred_at.toISOString().slice(11, 16) : "?"}] ${String(m.payload?.text ?? "").replace(/\n+/g, " ").slice(0, 600)}`);
     L.push(``);
+    for (const line of renderDecisionsInForce(decisionRefs, saved, { compact: level >= 4, groups: recordDecisions, perGroup: level >= 3 ? 2 : 5 })) L.push(line);
+    if (level >= 4 && decisionRefs.length) om.push(`Ledger object titles in Decisions in force (ids and status kept); ledger_get per id`);
+    L.push(``);
     L.push(`## Since the checkpoint`);
     L.push(gitDiff ? `git diff --stat ${gitDiff}` : `git: ${om.find((o) => o.startsWith("intervening")) ?? "no local checkout given; pass repoPath to compute"}`);
     if (level >= 4 && ledgerSince.length) { L.push(`ledger: ${ledgerSince.length} object(s) mentioning ${repoTag} since ${fmt(since)} (list omitted for budget; ledger_search "${repoTag}")`); om.push("ledger objects since the checkpoint"); }
     else L.push(ledgerSince.length ? `ledger objects mentioning ${repoTag} since ${fmt(since)}:\n${ledgerSince.map((s) => `- ${s}`).join("\n")}` : `ledger: nothing new mentioning ${repoTag} since ${fmt(since)}`);
-    if (superseded.length) L.push(`SUPERSEDED decisions this checkpoint relied on: ${superseded.join("; ")}`);
     L.push(``);
     L.push(`## Bootstrap`);
     L.push(bootstrap.length ? "```\n" + bootstrap.join("\n") + "\n```" : "(no snapshot to check out)");
@@ -334,7 +344,8 @@ export async function buildResumePack(cfg: Config, pool: pg.Pool, threadId: stri
     L.push(`1. Check out the snapshot into a fresh worktree and inspect it; do not assume the branch tip matches.`);
     L.push(`2. State what is confirmed (verified snapshot, acknowledged events) vs uncertain (loss window, pending operations, gaps).`);
     L.push(`3. Do not rerun a pending operation that mutates anything until you know its outcome.`);
-    L.push(`4. Say what you are continuing and what your next action is. Record progress as you go; the helper captures automatically.`);
+    L.push(`4. ${DECISION_RULE}`);
+    L.push(`5. Say what you are continuing and what your next action is. Record progress as you go; the helper captures automatically.`);
     if (om.length) { L.push(``); L.push(`## Omitted for budget or unavailable`); for (const o of om) L.push(`- ${o}`); }
     return { text: L.join("\n"), omitted: om };
   };
@@ -350,7 +361,9 @@ export async function buildResumePack(cfg: Config, pool: pg.Pool, threadId: stri
     session_summary: sessionSummary,
     last_messages: msgRows.map((m) => ({ at: m.occurred_at ? m.occurred_at.toISOString() : null, text: String(m.payload?.text ?? "") })),
     recent_files: recentFiles, files_touched: files, pending_operations: pend.map((p) => ({ call_id: p.call_id, tool: p.tool, input: p.input, seq: p.seq })),
-    last_error: lastErr ? lastErr.payload : null, intervening: { git: gitDiff, ledger: ledgerSince }, bootstrap, sources, omitted: out.omitted, text: out.text,
+    last_error: lastErr ? lastErr.payload : null, intervening: { git: gitDiff, ledger: ledgerSince },
+    decisions: decisionRefs, record_decisions: recordDecisions,
+    bootstrap, sources, omitted: out.omitted, text: out.text,
   };
 }
 

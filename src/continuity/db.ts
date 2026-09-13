@@ -208,6 +208,10 @@ create table if not exists cont_state_updates (
 );
 alter table cont_state_updates add column if not exists rejected_by text;
 alter table cont_state_updates add column if not exists rejected_at timestamptz;
+-- acceptance provenance (2026-09-13): which session proposed and confirmed an update, and through which channel
+alter table cont_state_updates add column if not exists proposed_session_id text;
+alter table cont_state_updates add column if not exists confirmed_session_id text;
+alter table cont_state_updates add column if not exists confirmed_via text;
 
 create index if not exists cont_records_repo_idx on cont_records(repo, status, updated_at desc);
 create index if not exists cont_records_updated_idx on cont_records(updated_at desc);

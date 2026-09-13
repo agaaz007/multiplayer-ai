@@ -23,6 +23,8 @@ import path from "node:path";
  * acceptance tests 28, 29, 30, 32, 33. Pass --show to print the pack.
  */
 
+// the MCP tools resolve the caller's session from these; unset them so provenance assertions do not depend on the shell running the test
+for (const k of ["CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID", "CODEX_THREAD_ID"]) delete process.env[k];
 const DB = process.env.LEDGER_CONTINUITY_DB || "postgresql://localhost:5432/ledger_selftest_recordpack";
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ledger-recpack-"));
 process.env.LEDGER_CONFIG_DIR = path.join(tmp, ".ledger");
@@ -164,7 +166,7 @@ if (process.argv.includes("--show")) console.log(pack.text.split("\n").map((l) =
   assert.ok(t.includes(" · state v1 · updated "), "header carries state_version");
   assert.ok(t.includes("goal: Explain why Mixpanel and ClickHouse disagree"), "goal line");
   assert.ok(t.includes("## State (v1 · 4 proposed · 1 confirmed)"), "state header counts");
-  assert.ok(t.includes(`- [confirmed] Use ClickHouse paywall_resolved as the source of truth for the September test (by agaaz, ${TODAY}; evidence: seq 3,4 of ${A8})`), "confirmed decision line");
+  assert.ok(t.includes(`- [confirmed by agaaz; how it was accepted was not recorded] Use ClickHouse paywall_resolved as the source of truth for the September test (by agaaz, ${TODAY}; evidence: seq 3,4 of ${A8})`), "a confirmation with no recorded channel never claims a person accepted it");
   assert.ok(t.includes(`- [PROPOSED] The Mixpanel gap comes from events with a missing distinct_id being dropped (by agaaz, ${TODAY}; evidence: seq 4,10 of ${A8})`), "agaaz's hypothesis PROPOSED");
   assert.ok(t.includes(`- [PROPOSED] The Mixpanel gap comes from the 7-day attribution window, not distinct_id (by rachit, ${TODAY}; evidence: seq 4 of ${R8})`), "rachit's hypothesis PROPOSED");
   assert.ok(t.includes(`- [PROPOSED] Cause of the gap disputed: missing distinct_id (agaaz, ${A8} seq 4) vs 7-day attribution window (rachit, ${R8} seq 4) (by classifier, ${TODAY}; evidence: seq 4 of ${A8}; seq 4 of ${R8})`), "contradiction line with both sides' evidence");
@@ -173,7 +175,7 @@ if (process.argv.includes("--show")) console.log(pack.text.split("\n").map((l) =
   assert.ok(!t.includes("### Blockers") && !t.includes("### Progress") && !t.includes("### Notes"), "empty kinds are not rendered");
   assert.equal(pack.state.hypotheses.length, 2);
   assert.ok(pack.state.hypotheses.every((u) => u.status === "proposed"));
-  assert.equal(stateLine(d1).slice(0, 13), "- [confirmed]");
+  assert.ok(stateLine(d1).startsWith("- [confirmed by agaaz;"), stateLine(d1));
   assert.equal(stateLine(h2).slice(0, 12), "- [PROPOSED]");
   ok("pack header (id, kind, repo, status, creator, state version) and state: confirmed decision, both contradicting hypotheses flagged PROPOSED, contradiction with both sides, kinds in order, empty kinds skipped");
 }
@@ -241,14 +243,15 @@ if (process.argv.includes("--show")) console.log(pack.text.split("\n").map((l) =
 {
   assert.deepEqual(pack.ledger_refs.map((r) => ({ id: r.id, found: r.found, type: r.type, status: r.status, superseded_by: r.superseded_by })), [{ id: dec1.id, found: true, type: "decision", status: "deprecated", superseded_by: dec2.id }]);
   const t = pack.text;
-  assert.ok(t.includes(`## Linked Ledger objects (1)\n- decision ${dec1.id}: ClickHouse is the source of truth for the September paywall test (agaaz, ${TODAY}) — SUPERSEDED by ${dec2.id}; the record relied on a version that is no longer in force`), "superseded ref flagged inline");
-  assert.ok(t.includes(`SUPERSEDED objects this record depends on: ${dec1.id} → ${dec2.id}`), "summary line");
+  assert.ok(t.includes(`## Decisions in force for this work (1)\nLedger objects this work saved or linked, resolved to what is in force now. Only [in force] items are accepted knowledge.\n- [SUPERSEDED by ${dec2.id}, which is in force] decision ${dec1.id}: ClickHouse is the source of truth for the September paywall test (agaaz, ${TODAY}) · linked explicitly`), "superseded ref flagged inline");
+  assert.ok(t.includes(`NOT IN FORCE (1): ${dec1.id} → ${dec2.id}. Do not act on these as decided.`), "summary line");
+  assert.ok(t.includes("Captured from 0 Ledger save results in 0 sessions and 1 explicit link."), "capture disclosure");
   const copyPack = await buildRecordPack(cfg, pool, recCopy.id, { mode: "inspect", author: "agaaz", now: T(120) });
-  assert.ok(copyPack.text.includes("## Linked Ledger objects (0)\n(none;"));
+  assert.ok(copyPack.text.includes("## Decisions in force for this work (0)\n(none:"));
   // an unknown id is reported, not guessed
   const recX = await R.createRecord(pool, { kind: "other", title: "Dangling ref", repo: null, created_by: "agaaz", ledger_refs: [{ id: "dec-20260101-nope-zzzz", version: "3" }] });
   const px = await buildRecordPack(cfg, pool, recX.id, { mode: "inspect", author: "agaaz", now: T(120) });
-  assert.ok(px.text.includes(`- dec-20260101-nope-zzzz @3: NOT FOUND in the ledger (ledger_get "dec-20260101-nope-zzzz")`));
+  assert.ok(px.text.includes(`- [NOT FOUND] dec-20260101-nope-zzzz @3 · linked explicitly (ledger_get "dec-20260101-nope-zzzz")`), px.text);
   assert.equal(px.ledger_refs[0].found, false);
   await pool.query(`delete from cont_records where id = $1`, [recX.id]);
   ok(`[acceptance 32] the record's ledger_ref ${dec1.id} was superseded by ${dec2.id} after the reference was made; the pack flags it inline and in a summary line; a missing id is reported as NOT FOUND`);
@@ -316,7 +319,7 @@ if (process.argv.includes("--show")) console.log(pack.text.split("\n").map((l) =
   const tight = await buildRecordPack(cfg, pool, recAttr.id, { mode: "inspect", author: "agaaz", now: T(120), budgetTokens: 1500 });
   assert.ok(approxTokens(pack.text) <= 6000, `default pack within 6000 tokens: ${approxTokens(pack.text)}`);
   assert.ok(tight.text.length < pack.text.length, `tight pack is smaller: ${tight.text.length} < ${pack.text.length}`);
-  for (const must of ["## Honesty", "Sources: 2 instructions", `Code saved through ${fmt(T(69))}`, "### Decisions (1)", "- [confirmed] Use ClickHouse paywall_resolved", "## Pending / unknown operations (1)", "seq 7 Bash: psql analytics", "## Bootstrap", `git fetch origin ${WIP_REF}:${WIP_REF}`, "## First turn contract", `SUPERSEDED objects this record depends on: ${dec1.id} → ${dec2.id}`, "## Omitted for budget or unavailable"]) {
+  for (const must of ["## Honesty", "Sources: 2 instructions", `Code saved through ${fmt(T(69))}`, "### Decisions (1)", "- [confirmed by agaaz; how it was accepted was not recorded] Use ClickHouse paywall_resolved", "## Pending / unknown operations (1)", "seq 7 Bash: psql analytics", "## Bootstrap", `git fetch origin ${WIP_REF}:${WIP_REF}`, "## First turn contract", `NOT IN FORCE (1): ${dec1.id} → ${dec2.id}`, "## Omitted for budget or unavailable"]) {
     assert.ok(tight.text.includes(must), `tight pack keeps: ${must}`);
   }
   assert.ok(pack.text.includes(codexSummary) && !tight.text.includes(codexSummary), "the summary text is dropped under budget");
@@ -406,7 +409,8 @@ const call = async (name: string, args: Record<string, unknown>) => {
   let st1 = (await R.recordState(pool, recAttr.id))!;
   assert.deepEqual({ status: st1.progress[0].status, by: st1.progress[0].created_by, ev: st1.progress[0].evidence, v: st1.record.state_version }, { status: "proposed", by: "agaaz", ev: [{ session_id: sidA, seq: 10 }], v: before }, "propose never confirms; state_version unchanged");
   const c = await call("ledger_record_update", { record_id: recAttr.id, action: "confirm", update_id: pid });
-  assert.equal(c, `Confirmed progress update ${pid} on record "Attribution investigation" by agaaz (state_version now ${before + 1}).`);
+  assert.equal(c, `Confirmed progress update ${pid} on record "Attribution investigation": successors see [agent-confirmed for agaaz; not reviewed by a person] (state_version now ${before + 1}). A person accepts it with \`ledger record confirm ${pid}\` in a terminal.`);
+  assert.equal((await R.getStateUpdate(pool, pid!))!.confirmed_via, "mcp", "an MCP confirmation is recorded as an agent's");
   st1 = (await R.recordState(pool, recAttr.id))!;
   assert.equal(st1.record.state_version, before + 1, "confirm bumps state_version");
   assert.equal(st1.progress[0].status, "confirmed");
@@ -505,7 +509,7 @@ const call = async (name: string, args: Record<string, unknown>) => {
   // 32: superseded decision flagged
   assert.equal(fresh.ledger_refs[0].status, "deprecated");
   assert.equal(fresh.ledger_refs[0].superseded_by, dec2.id);
-  assert.ok(fresh.text.includes(`— SUPERSEDED by ${dec2.id}`));
+  assert.ok(fresh.text.includes(`[SUPERSEDED by ${dec2.id}, which is in force]`));
   ok("[acceptance 32] a record referencing a decision that was later superseded: the pack flags it");
   // 33: session with no assignable content → Unassigned work in the brief; nothing invented
   // (its span was linked to the CI-flake record in the MCP check above, so re-create the situation with a fresh session)
@@ -541,6 +545,31 @@ const call = async (name: string, args: Record<string, unknown>) => {
   assert.ok(longPack.text.includes('ACCEPTED DENOMINATOR CONSTRAINT'),'proposals cannot crowd out accepted constraints');
   assert.equal(longPack.evidence_summary.omitted!.count,2106-longPack.evidence_summary.shown.length);
   ok('full-history count and true tail, earlier pending operation, accepted constraint under proposal flood');
+}
+
+// ---------- decisions in force: Ledger ids saved inside a record's spans; ledger_refs through MCP ----------
+{
+  const sidS = "agaaz-claude-saves-1";
+  await S.upsertSession(pool, { id: sidS, author: "agaaz", harness: "claude", machine: "agaaz-mac", repo: null, started_at: T(95), last_seen_at: T(97) });
+  await S.appendEvents(pool, sidS, [
+    ev("s1", "instruction.added", 95, { text: "Record the readout decision" }),
+    ev("s2", "tool.finished", 96, { tool: "mcp__ledger__ledger_record_decision", output_preview: JSON.stringify({ receipt: { record_id: dec1.id } }) }, "s-c1"),
+    ev("s3", "tool.finished", 97, { tool: "mcp__ledger__ledger_record_decision", output_preview: JSON.stringify({ receipt: { record_id: dec2.id } }) }, "s-c2"),
+  ], null, null);
+  const started = await call("ledger_record_start", { kind: "other", title: "Readout source decision", link: { session_id: sidS, from_seq: 1, to_seq: 2 }, ledger_refs: ["dec-20260101-nope-zzzz"] });
+  const recId = started.match(/^Record ([0-9a-f-]{36})/)![1];
+  let p = await buildRecordPack(cfg, pool, recId, { mode: "inspect", author: "agaaz", now: T(130) });
+  assert.deepEqual(p.ledger_refs.map((r) => [r.id, r.source, r.origin?.seq ?? null, r.status]), [["dec-20260101-nope-zzzz", "explicit", null, null], [dec1.id, "saved", 2, "deprecated"]], "the explicit ref, then the id saved inside the linked span; seq 3 is outside it");
+  assert.ok(p.text.includes(`- [SUPERSEDED by ${dec2.id}, which is in force] decision ${dec1.id}: ClickHouse is the source of truth for the September paywall test (agaaz, ${TODAY}) · saved in session ${sidS.slice(0, 8)} seq 2`), p.text);
+  assert.ok(p.text.indexOf(`decision ${dec1.id}`) < p.text.indexOf("[NOT FOUND] dec-20260101-nope-zzzz"), "found decisions before missing ids");
+  const linked = await call("ledger_record_link", { record_id: recId, session_id: sidS, from_seq: 3, to_seq: 3, ledger_refs: [dec2.id, "dec-20260101-nope-zzzz"] });
+  assert.ok(linked.endsWith(`Ledger refs now: dec-20260101-nope-zzzz, ${dec2.id}.`), linked);
+  p = await buildRecordPack(cfg, pool, recId, { mode: "inspect", author: "agaaz", now: T(130) });
+  assert.deepEqual(p.ledger_refs.map((r) => [r.id, r.source, r.status]), [["dec-20260101-nope-zzzz", "explicit", null], [dec2.id, "explicit", "stable"], [dec1.id, "saved", "deprecated"]], "an explicit ref wins over the same id saved in a span");
+  assert.ok(p.text.includes(`- [in force] decision ${dec2.id}: `) && p.text.includes("Captured from 2 Ledger save results in 1 session and 2 explicit links."), p.text);
+  assert.ok(p.text.includes(`NOT IN FORCE (2): ${dec1.id} → ${dec2.id}; dec-20260101-nope-zzzz.`));
+  await pool.query(`delete from cont_records where id = $1`, [recId]);
+  ok("decisions in force on a record: ids saved inside linked spans are resolved (superseded flagged with the save event), ids outside the spans are not; ledger_record_start and ledger_record_link add explicit refs, which win over the same saved id");
 }
 
 await client.close();
