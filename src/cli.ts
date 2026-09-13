@@ -524,10 +524,26 @@ async function workRecordCommand(args: string[]): Promise<void> {
     console.log(`proposed ${u.kind} update ${u.id} (status ${u.status}; confirm with: ledger record confirm ${u.id})`);
   } else if (sub === "confirm") {
     if (!pos[1]) throw new Error(usage);
-    const u = await confirmStateUpdate(pool, pos[1], cfg.author);
+    // A person accepts at an interactive prompt. Without a terminal (an agent running the CLI, a script) the
+    // confirmation is recorded as made without review, so successors are never told a person accepted it.
+    const { getStateUpdate } = await import("./continuity/records.js");
+    const { acceptanceLabel } = await import("./continuity/packsections.js");
+    const pending = await getStateUpdate(pool, pos[1]);
+    if (!pending) throw new Error(`not found: ${pos[1]}`);
+    let via: "cli" | "cli-interactive" = "cli";
+    if (pending.status === "proposed" && process.stdin.isTTY && process.stdout.isTTY) {
+      const readline = await import("node:readline/promises");
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      console.log(`${pending.kind} update ${pending.id} (by ${pending.created_by}):\n  ${pending.text}`);
+      const answer = (await rl.question(`Accept this as ${cfg.author}? Type "yes" to accept: `)).trim().toLowerCase();
+      rl.close();
+      if (answer !== "yes") { console.log("not accepted; nothing changed"); await closePools(); return; }
+      via = "cli-interactive";
+    }
+    const u = await confirmStateUpdate(pool, pos[1], cfg.author, { via });
     if (!u) throw new Error(`not found: ${pos[1]}`);
     const rec = await getRecord(pool, u.record_id);
-    console.log(`confirmed ${u.kind} update ${u.id} by ${u.confirmed_by}; record state_version ${rec?.state_version ?? "?"}`);
+    console.log(`${u.kind} update ${u.id} is now [${acceptanceLabel(u)}]; record state_version ${rec?.state_version ?? "?"}`);
   } else if (sub === "reject") {
     const reason = flag(args, "--reason");
     if (!pos[1] || !reason) throw new Error(usage);
