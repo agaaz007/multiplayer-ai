@@ -2,7 +2,7 @@
 
 The single maintained record for the continuity layer of `@tranzmit/ledger`. Update it whenever a decision is made, a feature lands, or something is learned the hard way. Canonical spec and runbook live beside it in `docs/continuity/`; the Ledger itself holds the formal decision records referenced below.
 
-Last updated: 2026-09-09
+Last updated: 2026-09-13
 
 **Evaluation validity correction:** 9 Sep independent review found a global Claude startup hook exposing other trials from the shared evaluation database. A forward L01 answer cited C02 evidence; phase-1 R01 also opened an earlier E01 record. Earlier counts remain historical observations, but their comparative interpretation is withdrawn. Finding `fnd-20260909-continuity-benchmark-isolation-failed-ledger-suc-2im0` supersedes the phase-1 tie finding. Fresh trials use separate databases and disabled global harness hooks; see the [handoff report](continuity/handoff-evaluation-2026-09-09.md).
 
@@ -110,6 +110,42 @@ Wave 1: records layer, emitter improvements, evidence query tools. Wave 2: class
 ## 4. Learnings
 
 Dated, concrete, with the evidence. Add one whenever reality disagreed with the plan.
+
+- **2026-09-13 · The helper sat about 39 h on a dead Neon connection while launchd reported it running.**
+  - **What happened:** the last completed pass was 2026-09-11T21:54Z, after DNS errors. The pool set `statement_timeout`, which the server enforces, but had no client `query_timeout` or TCP keepalive, and KeepAlive only restarts a process that exits. After a restart the first pass uploaded 128 events and then stalled for 86 minutes.
+  - **Fix:**
+    - `query_timeout` 30 s plus keepalive in `db.ts`
+    - a per-pass deadline that exits the process (`continuity.pass_deadline_s`, default 900)
+    - `~/.ledger/helper-heartbeat.json`, which SessionStart reads to warn when capture here is dead, stalled or failing
+  - **Record:** `fnd-20260913-agaaz-s-continuity-helper-stopped-capturing-39h--64f4`.
+- **2026-09-13 · Auto-bind let stale sessions take a live thread.**
+  - **What happened:** the rule matched only repo, branch, author and a 72 h window. Three older own sessions (last seen Sep 9, Sep 11 and 11:09 that day) bound to a thread created at 14:00 by a live session. Each claimed it (generation 2, 3, 4) after the owner's lease lapsed during the stall, because heartbeats only ran when the pass reached the session. A first prompt of "pwd" titled the thread.
+  - **Fix:**
+    - auto-bind adopts only threads created before the session started, and skips threads a teammate holds
+    - quiet sessions never claim on bind, and no session takes a claim from a live local holder
+    - claims heartbeat on an independent timer from saved state
+    - first prompts under three words no longer title threads
+    - after local helper state is lost, a session keeps the thread the store already records for it (found while deploying: the restarted helper had created a second thread for a live session, splitting its events)
+- **2026-09-13 · MCP continuity tools read `CLAUDE_SESSION_ID`, but Claude Code exports `CLAUDE_CODE_SESSION_ID`.**
+  - **What happened:** without an explicit session_id, `ledger_resume` claimed and bound under `mcp:<author>:<pid>`, which the helper never looks up, so a successor's work would land on another thread.
+  - **Fix:** use the explicit id, else an env id with a local transcript, else refuse. SessionStart prints `Ledger session: <id>`.
+- **2026-09-13 · `/Users/Agaaz` is itself a git repo with a push remote, and there was no snapshot allowlist.**
+  - **What happened:** a session started in `~` would have run `git add -A` on the home directory and pushed a wip ref. It was not triggered: 0 sessions and 0 wip refs.
+  - **Fix:** the helper, `shadowCommit` and `ledger_thread_start` refuse `$HOME` and its ancestors.
+- **2026-09-13 · The "Ledger engineering regression" was not an idempotency defect.**
+  - **v2:** the original grader required `state` in the execute body, which the contract never states. Corrected, Ledger scores 9/9, 11/11, 12/12, equal to every arm.
+  - **v3:** Ledger B omitted `receipt_id` on `GET /jobs/ID`, and C and D inherited it through code, tests and handoff text.
+  - **Lesson:** faithful recovery also propagates latent defects, while the State column scores preservation as success.
+  - **Record:** `fnd-20260913-ledger-s-engineering-check-failures-were-respons-dwoi`.
+- **2026-09-13 · `ledger-repo-zip` is a symlink to the `richmond-v1` worktree, whose `dist/` serves every hook, the MCP server and the helper.** `npm run build` there is a live deploy for all sessions on the machine. Test builds go to a separate `dist-*` output directory.
+- **2026-09-13 · After the watchdog deploy, no helper pass finished within its 900 s deadline.**
+  - **What happened:** 49 tracked sessions qualified for a snapshot every pass. 48 were unbound and quiet, and 47 sat in one worktree (`i-want-to-build-this-sdkf/cancun`), where a snapshot's `git add -A` into a fresh temporary index takes 64 s because nothing is stat-cached. Unbound sessions were never ended, so they were re-snapshotted every pass. The synchronous git calls blocked the event loop, so pool connects and the independent claim heartbeat timed out. The deadline then restarted the helper every 15 minutes with no progress. The stale-session auto-bind fix made this worse: those sessions stopped binding, so they were never ended.
+  - **Fix:** quiet sessions are snapshotted only on an explicit turn or end signal, and unbound sessions end when they go quiet.
+  - **Still open:** a live session in a large repo still costs a 64 s synchronous snapshot every cadence. The durable fix is a persistent per-session snapshot index, with git run off the event loop.
+- **2026-09-13 · The work-record classifier has failed on Agaaz's machine since at least 2026-09-09.** Every run ends with `codex exec --ephemeral: OpenAI Codex v0.149.0`: the configured default Codex model needs a newer CLI. Records there get no proposed updates, and nothing surfaces the failure outside the helper log.
+- **2026-09-13 · A restarted helper's snapshot pushes were rejected as non-fast-forward, so the session's code stopped being saved.**
+  - **What happened:** the helper that hung never saved its state, although it had already pushed snapshots to `refs/wip/agaaz/<session>`. The restarted helper had no previous shadow commit, so it parented its snapshot on HEAD. The push was rejected, and every later snapshot built on that rejected commit.
+  - **Fix:** without a known parent, a snapshot continues from the remote ref's tip. A non-fast-forward rejection re-parents once on the remote tip and pushes again, which also heals a chain already stuck this way.
 
 - **2026-09-09 · Conversation capture did not recover Rachit's nested checkout.** Three inspected Codex sessions on `MacBook-Pro.local` had non-repository Downloads working directories and null repo, thread, WIP ref, and verified snapshot timestamp. One transcript named `/Users/ramesh/Downloads/Tata1MG/tmp/tranzmit-current.iuURa9` and branch `local/adaptive-learning-five-phases`; neither that remote branch nor a matching Rachit WIP ref was available. The helper derives the repository from session cwd; a tool working in a nested repository does not establish a snapshot of that repository. The captured agent claimed local completion, which remains unverified. Start the real handoff from a session in the actual checkout and identify the remaining task.
 - **2026-09-09 · E03's public instruction and strict scorer disagree.** The instruction permits at least 20 px bottom clearance; the unchanged oracle requires exactly 20 and a content gap of 24. In the isolated rerun, Ledger recovered both unfinished seeds and preserved price/CTA height with 24/56 px clearance. A separate numeric check of the public requirements passed both; official scoring failed both. One Ledger successor also changed the content gap to 16, so this is not a claim that every configuration field was preserved. GBrain's two successors failed preservation/reconstruction and both validations. The starting files differed by condition: this demonstrates saved-file assistance on a controlled fixture, not a structured-record accuracy advantage.

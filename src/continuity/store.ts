@@ -148,10 +148,11 @@ export async function pendingOperations(q: Q, sessionId: string): Promise<{ call
 
 // ---------- threads ----------
 
-export async function createThread(q: Q, t: { repo: string; branch?: string | null; title: string; goal?: string | null; created_by: string; forked_from_thread_id?: string | null; forked_at_checkpoint_id?: string | null }): Promise<ThreadRow> {
+/** created_at defaults to the database clock; the helper passes its pass time so auto-bind compares one clock. */
+export async function createThread(q: Q, t: { repo: string; branch?: string | null; title: string; goal?: string | null; created_by: string; forked_from_thread_id?: string | null; forked_at_checkpoint_id?: string | null; created_at?: Date | string | null }): Promise<ThreadRow> {
   const r = await q.query<ThreadRow>(
-    `insert into cont_threads (repo, branch, title, goal, created_by, forked_from_thread_id, forked_at_checkpoint_id) values ($1,$2,$3,$4,$5,$6,$7) returning *`,
-    [t.repo, t.branch ?? null, t.title.slice(0, 140), t.goal ?? null, t.created_by, t.forked_from_thread_id ?? null, t.forked_at_checkpoint_id ?? null]
+    `insert into cont_threads (repo, branch, title, goal, created_by, forked_from_thread_id, forked_at_checkpoint_id, created_at) values ($1,$2,$3,$4,$5,$6,$7,coalesce($8::timestamptz, now())) returning *`,
+    [t.repo, t.branch ?? null, t.title.slice(0, 140), t.goal ?? null, t.created_by, t.forked_from_thread_id ?? null, t.forked_at_checkpoint_id ?? null, t.created_at ?? null]
   );
   return r.rows[0];
 }
@@ -211,6 +212,12 @@ export async function summarizeThread(q: Q, t: ThreadRow): Promise<ThreadSummary
 
 export async function getClaim(q: Q, threadId: string): Promise<ClaimRow | null> {
   const r = await q.query<ClaimRow>(`select * from cont_claims where thread_id = $1 and released_at is null and expires_at > now()`, [threadId]);
+  return r.rows[0] ?? null;
+}
+
+/** The claim row whether live, expired or released: who holds, or last held, the thread. */
+export async function getClaimAny(q: Q, threadId: string): Promise<ClaimRow | null> {
+  const r = await q.query<ClaimRow>(`select * from cont_claims where thread_id = $1`, [threadId]);
   return r.rows[0] ?? null;
 }
 

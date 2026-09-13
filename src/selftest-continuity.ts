@@ -320,5 +320,152 @@ ok("e2e 4: stale generation → fork created, late events routed there, history 
   ok('deduplicated artifact provenance and remote capture IDs require exact shared event evidence');
 }
 
+// ---------- wip ref chain survives lost helper state (2026-09-13: pushes were rejected as non-fast-forward) ----------
+{
+  const ref = "refs/wip/test/chain";
+  const chainFile = path.join(repoR, "src", "chain.txt");
+  fs.writeFileSync(chainFile, "1\n");
+  const a = shadowCommit(repoR, { ref, push: true });
+  assert.ok(a.verified, `first snapshot verified: ${a.error ?? ""}`);
+
+  // a restarted helper passes no parent and its local ref is gone: continue from the remote tip
+  fs.writeFileSync(chainFile, "2\n");
+  git(repoR, "update-ref", "-d", ref);
+  const b = shadowCommit(repoR, { ref, push: true });
+  assert.ok(b.verified, `parentless snapshot fast-forwards from the remote tip: ${b.error ?? ""}`);
+  assert.equal(git(repoR, "rev-parse", `${b.commit}^`), a.commit);
+
+  // the observed case: state carries a local chain the remote never accepted; the push is retried on the remote tip
+  fs.writeFileSync(chainFile, "3\n");
+  const head = git(repoR, "rev-parse", "HEAD");
+  const stale = git(repoR, "commit-tree", git(repoR, "rev-parse", "HEAD^{tree}"), "-p", head, "-m", "rejected local chain");
+  const c = shadowCommit(repoR, { ref, parent: stale, push: true });
+  assert.ok(c.verified, `rejected chain re-parented and pushed: ${c.error ?? ""}`);
+  assert.equal(git(repoR, "rev-parse", `${c.commit}^`), b.commit);
+  assert.equal(git(repoR, "ls-remote", "origin", ref).split(/\s+/)[0], c.commit);
+  fs.rmSync(chainFile);
+  ok("wip ref chain: a parentless or rejected snapshot continues from the remote tip, so pushes stay fast-forward");
+}
+
+// ---------- helper safety (2026-09-13 review): stale sessions, live holders, claim heartbeats, home root, liveness ----------
+{
+  const { heartbeatLiveClaims, helperLoop } = await import("./helper/daemon.js");
+  const { readHeartbeat } = await import("./helper/heartbeat.js");
+  const savedConfigDir = process.env.LEDGER_CONFIG_DIR;
+  process.env.LEDGER_CONFIG_DIR = path.join(tmp, ".ledger-sam"); // own state, spool, bindings and heartbeat file
+  try {
+    const cfgS: Config = { ...base, author: "sam", continuity: { ...base.continuity!, machine: "sam-mac" } };
+    const samRoots = { claude: path.join(tmp, "sam-claude"), codex: path.join(tmp, "sam-codex") };
+    const samDay = path.join(samRoots.codex, "2026", "09", "08");
+    fs.mkdirSync(samRoots.claude, { recursive: true });
+    fs.mkdirSync(samDay, { recursive: true });
+    const at = (min: number) => T(min).toISOString();
+    const userMsg = (min: number, text: string) => ({ timestamp: at(min), type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text }] } });
+    const writeCodex = (name: string, sid: string, startMin: number, cwd: string, lines: unknown[]) => {
+      const f = path.join(samDay, `rollout-${name}-${sid}.jsonl`);
+      fs.writeFileSync(f, [cl({ timestamp: at(startMin), type: "session_meta", payload: { id: sid, cwd } }), ...lines.map(cl)].join("\n") + "\n");
+      fs.utimesSync(f, T(startMin), T(startMin));
+    };
+    const pass = (min: number) => helperOnce(cfgS, { roots: samRoots, now: T(min), push: false, log: () => {} });
+    const expireClaim = (threadId: string) => pool.query(`update cont_claims set expires_at = now() - interval '1 minute' where thread_id = $1`, [threadId]);
+
+    // a session with no instruction yet is tracked but unbound, like the 53 found when the real helper restarted
+    const sOld = "0199aaaa-0000-7000-8000-00000000a001";
+    writeCodex("2026-09-08T13-40-00", sOld, 700, repoR, [
+      { timestamp: at(700), type: "response_item", payload: { type: "custom_tool_call", name: "exec", call_id: "o1", input: 'await tools.exec_command({cmd:"ls"})' } },
+      { timestamp: at(700), type: "response_item", payload: { type: "custom_tool_call_output", call_id: "o1", output: "src" } },
+    ]);
+    let r = await pass(701);
+    assert.equal(r.errors.length, 0, r.errors.join(" | "));
+    assert.equal((await S.getSession(pool, sOld))!.thread_id, null);
+
+    // 100 minutes later a live session starts with a one-word prompt and creates the only thread
+    const sNew = "0199aaaa-0000-7000-8000-00000000a002";
+    writeCodex("2026-09-08T15-20-00", sNew, 800, repoR, [userMsg(800, "pwd")]);
+    r = await pass(801);
+    assert.equal(r.errors.length, 0, r.errors.join(" | "));
+    const samThreads = await S.listThreads(pool, { author: "sam" });
+    assert.equal(samThreads.length, 1, "one thread, created by the live session only");
+    const samThread = samThreads[0];
+    assert.notEqual(samThread.title, "pwd");
+    assert.match(samThread.title, /work \(session 0199aaaa\)$/);
+    assert.equal(samThread.claim?.holder_session_id, sNew);
+    const old1 = (await S.getSession(pool, sOld))!;
+    assert.equal(old1.thread_id, null, "the stale session does not adopt a thread created after it started");
+    assert.match(String((old1.coverage as any).unbound_reason), /^quiet session older than own open thread/);
+    assert.ok(old1.ended_at, "a quiet unbound session is ended, so later passes stop re-processing and snapshotting it");
+    ok("auto-bind: a stale tracked session never adopts a newer thread; a one-word prompt does not become the title");
+
+    // the owner's lease lapses; its next pass revives the claim and nobody else takes it
+    await expireClaim(samThread.id);
+    r = await pass(802);
+    assert.equal(r.errors.length, 0, r.errors.join(" | "));
+    assert.equal((await S.getThread(pool, samThread.id))!.generation, 1, "no generation bump: nobody took the claim");
+    assert.equal((await S.getClaim(pool, samThread.id))?.holder_session_id, sNew);
+    assert.equal((await S.getSession(pool, sOld))!.thread_id, null);
+
+    // a later session continuing the work joins the thread but leaves the lapsed claim with the live owner
+    const sNext = "0199aaaa-0000-7000-8000-00000000a003";
+    writeCodex("2026-09-08T15-23-00", sNext, 803, repoR, [userMsg(803, "Continue the payment retry work")]);
+    await expireClaim(samThread.id);
+    r = await pass(804);
+    assert.equal(r.errors.length, 0, r.errors.join(" | "));
+    assert.equal((await S.getSession(pool, sNext))!.thread_id, samThread.id, "a session started after the thread continues it");
+    assert.equal((await S.getThread(pool, samThread.id))!.generation, 1);
+    assert.equal((await S.getClaim(pool, samThread.id))?.holder_session_id, sNew, "claim stays with the live owner");
+    ok("claims: a lapsed lease is revived by its live owner; neither a stale nor a newer local session takes it");
+
+    // the independent heartbeat revives a lapsed lease without waiting for a pass
+    await expireClaim(samThread.id);
+    assert.equal(await S.getClaim(pool, samThread.id), null);
+    assert.equal(await heartbeatLiveClaims(cfgS, { now: T(805) }), 1, "only the live claim holder is heartbeated");
+    assert.equal((await S.getClaim(pool, samThread.id))?.holder_session_id, sNew);
+    ok("heartbeatLiveClaims keeps a live session's claim alive from saved state, independent of pass progress");
+
+    // the helper loses its local state (a restart before any saved pass): the live session keeps the thread the store records
+    {
+      const { loadState, saveState } = await import("./helper/daemon.js");
+      const st = loadState();
+      assert.ok(st[sNew]?.threadId, "state had the binding before the loss");
+      delete st[sNew];
+      saveState(st);
+      r = await pass(806);
+      assert.equal(r.errors.length, 0, r.errors.join(" | "));
+      assert.equal((await S.listThreads(pool, { author: "sam" })).length, 1, "no second thread for the same session");
+      assert.equal((await S.getSession(pool, sNew))!.thread_id, samThread.id);
+      assert.equal(loadState()[sNew]?.threadId, samThread.id, "local state re-learns the stored binding");
+      assert.equal((await S.getThread(pool, samThread.id))!.generation, 1);
+      assert.equal((await S.getClaim(pool, samThread.id))?.holder_session_id, sNew);
+      ok("lost helper state: a session keeps its stored thread instead of creating a new one");
+    }
+
+    // a session whose git root is $HOME is captured as events only: no repo, thread or wip ref
+    const homeRepo = path.join(tmp, "home-as-repo");
+    fs.mkdirSync(homeRepo, { recursive: true });
+    git(homeRepo, "init", "--quiet");
+    fs.writeFileSync(path.join(homeRepo, ".netrc"), "machine example.com password hunter2\n");
+    const sHome = "0199aaaa-0000-7000-8000-00000000a004";
+    writeCodex("2026-09-08T15-30-00", sHome, 810, homeRepo, [userMsg(810, "Clean up my dotfiles please")]);
+    const savedHome = process.env.HOME;
+    process.env.HOME = homeRepo;
+    try { r = await pass(811); } finally { if (savedHome === undefined) delete process.env.HOME; else process.env.HOME = savedHome; }
+    assert.equal(r.errors.length, 0, r.errors.join(" | "));
+    const sh = (await S.getSession(pool, sHome))!;
+    assert.equal(sh.repo, null);
+    assert.equal(sh.thread_id, null);
+    assert.match(String((sh.coverage as any).unbound_reason), /is the home directory/);
+    assert.equal(git(homeRepo, "for-each-ref", "refs/wip"), "", "home directory never shadow-committed");
+    ok("home-directory git root: session captured as events only, no repo, thread or wip ref");
+
+    // the loop writes the liveness file SessionStart reads
+    await helperLoop(cfgS, { roots: samRoots, now: T(812), push: false, maxPasses: 1, intervalMs: 1000, passDeadlineMs: 120_000, claimHeartbeatMs: 3_600_000, log: () => {} });
+    const hb = readHeartbeat();
+    assert.ok(hb && hb.pid === process.pid && hb.last_pass_finished_at && typeof hb.last_pass_ms === "number" && hb.pass_deadline_s === 120, JSON.stringify(hb));
+    ok("helperLoop writes the liveness file around each pass, with its deadline");
+  } finally {
+    process.env.LEDGER_CONFIG_DIR = savedConfigDir;
+  }
+}
+
 await closePools();
 console.log(`selftest-continuity: ok (${step} checks) — tmp ${tmp}`);
