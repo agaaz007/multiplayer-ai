@@ -389,7 +389,7 @@ export async function unassignedSpans(q: Q, f: { session_id?: string; sinceHours
 
 // ---------- state updates (append-only, provenance, proposed → confirmed) ----------
 
-export async function addStateUpdate(q: Q, u: { record_id: string; session_id?: string | null; from_seq?: number | null; to_seq?: number | null; kind: UpdateKind; text: string; evidence?: { session_id: string; seq: number }[]; created_by: string; status?: UpdateStatus; supersedes?: string | null }): Promise<StateUpdate> {
+export async function addStateUpdate(q: Q, u: { record_id: string; session_id?: string | null; from_seq?: number | null; to_seq?: number | null; kind: UpdateKind; text: string; evidence?: { session_id: string; seq: number }[]; created_by: string; status?: UpdateStatus; supersedes?: string | null; proposed_session_id?: string | null; confirmed_via?: ConfirmChannel | null }): Promise<StateUpdate> {
   assertOneOf(UPDATE_KINDS, u.kind, "update kind");
   const status = u.status ?? "proposed";
   assertOneOf(UPDATE_STATUSES, status, "update status");
@@ -428,31 +428,44 @@ export async function addStateUpdate(q: Q, u: { record_id: string; session_id?: 
   // One statement: the insert and the record's version/activity bump cannot be observed apart.
   const r = await q.query<StateUpdate>(
     `with u as (
-       insert into cont_state_updates (record_id, session_id, from_seq, to_seq, status, kind, text, evidence, created_by, supersedes, confirmed_by, confirmed_at)
-       values ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11, case when $11::text is null then null else now() end)
+       insert into cont_state_updates (record_id, session_id, from_seq, to_seq, status, kind, text, evidence, created_by, supersedes, confirmed_by, confirmed_at, proposed_session_id, confirmed_session_id, confirmed_via)
+       values ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11, case when $11::text is null then null else now() end, $13, case when $11::text is null then null else $13 end, $14)
        returning *
      ), r as (
        update cont_records set state_version = state_version + $12::int, updated_at = now() where id = $1
      )
      select * from u`,
-    [u.record_id, resolvedSessionId, from, to, status, u.kind, text, JSON.stringify(evidence), createdBy, supersedes, confirmed ? createdBy : null, confirmed ? 1 : 0]
+    [u.record_id, resolvedSessionId, from, to, status, u.kind, text, JSON.stringify(evidence), createdBy, supersedes, confirmed ? createdBy : null, confirmed ? 1 : 0, u.proposed_session_id ?? null, confirmed ? (u.confirmed_via ?? null) : null]
   );
   return r.rows[0];
 }
 
-export async function confirmStateUpdate(q: Q, id: string, by: string): Promise<StateUpdate | null> {
+export async function getStateUpdate(q: Q, id: string): Promise<StateUpdate | null> {
+  if (!isUuid(id)) return null;
+  return (await q.query<StateUpdate>(`select * from cont_state_updates where id = $1`, [id])).rows[0] ?? null;
+}
+
+/**
+ * proposed → confirmed. `via` records how: an agent through MCP, the CLI without a prompt, or a person at the
+ * interactive CLI prompt; packs only say a person accepted an update confirmed via cli-interactive. Confirming an
+ * already-confirmed update is idempotent, except that a person's interactive acceptance upgrades an agent's
+ * confirmation (or one whose channel was never recorded) and takes over its confirmed_by.
+ */
+export async function confirmStateUpdate(q: Q, id: string, by: string, opts: { via?: ConfirmChannel | null; session_id?: string | null } = {}): Promise<StateUpdate | null> {
   if (!isUuid(id)) return null;
   const who = requireText(by, "confirmed_by");
+  const via = opts.via ?? null;
   // proposed → confirmed and the record's state_version bump happen in one statement.
   const r = await q.query<StateUpdate>(
     `with u as (
-       update cont_state_updates set status = 'confirmed', confirmed_by = $2, confirmed_at = now()
-        where id = $1 and status = 'proposed' returning *
+       update cont_state_updates set status = 'confirmed', confirmed_by = $2, confirmed_at = now(), confirmed_via = $3, confirmed_session_id = $4
+        where id = $1 and (status = 'proposed' or (status = 'confirmed' and $3::text = 'cli-interactive' and coalesce(confirmed_via, '') <> 'cli-interactive'))
+        returning *
      ), r as (
        update cont_records set state_version = state_version + 1, updated_at = now() where id in (select record_id from u)
      )
      select * from u`,
-    [id, who]
+    [id, who, via, opts.session_id ?? null]
   );
   if (r.rows[0]) return r.rows[0];
   const cur = await q.query<StateUpdate>(`select * from cont_state_updates where id = $1`, [id]);
