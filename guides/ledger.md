@@ -242,7 +242,7 @@ At session start the brief lists teammates' **Open threads** for the last 48 hou
 | `ledger_thread_note` | leave a mid-task note for whoever continues: a constraint learned, a next step, a dead end |
 | `ledger_release` | release your claim when you stop, so a teammate need not wait for lease expiry |
 
-**Work records.** A thread is one session's worktree. A **record** is one piece of work, accumulated across sessions and teammates: its state (decisions, blockers, next, progress, hypotheses, contradictions), with every line resting on exact events. The brief lists **Open work (records)** and **Unassigned work**. A classifier proposes links and state updates after each turn; everything it writes is `suggested` or `PROPOSED` until a person or their agent confirms it. **Never treat a PROPOSED line as decided.**
+**Work records.** A thread is one session's worktree. A **record** is one piece of work, accumulated across sessions and teammates: its state (decisions, blockers, next, progress, hypotheses, contradictions), with every line resting on exact events. The brief lists **Open work (records)** and **Unassigned work**. A classifier proposes links and state updates after each turn, for every session, including work outside any git repo (analysis, writing, planning); everything it writes is `suggested` or `PROPOSED` until a person or their agent confirms it. **Never treat a PROPOSED line as decided.**
 
 | tool | when |
 |---|---|
