@@ -646,7 +646,7 @@ let recLatency: import("./continuity/records.js").WorkRecord;
   assert.ok(lastPrompt()!.includes("Also check whether monthly-only hurts trial starts"));
   assert.equal(loadState()[sid].ended, true);
   assert.equal(loadState()[sid].classifyHoldSince, undefined);
-  assert.equal(C.readProgress(sid)!.last_seq, 3);
+  assert.equal(await C.unclassifiedCount(pool, sid), 0, "the tail is classified");
   assert.equal(H.debt(H.loadJournal(sid)).length, 1, "no new decision, the first prompt is still open");
 
   // pass 5: nothing new → no model call
