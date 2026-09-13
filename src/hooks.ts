@@ -259,12 +259,51 @@ export function acknowledgeCapture(ack: CaptureAck, opts: { dir?: string; now?: 
   return { acknowledged, pending_review };
 }
 
+export const DECISION_EVIDENCE_PREFIX = "d:";
+export interface DecisionObligation { update_id: string; record_title: string; text: string }
+
+/**
+ * The helper's classifier found a decision in this session's conversation and proposed it on a work record. A decision
+ * reached in conversation calls no data tool, so the checkpoint never asked about one (2026-09-14). The next Stop,
+ * PreCompact or SessionStart lists it beside uncaptured queries. It is settled like them, by recording a Ledger decision
+ * or skipping with a reason (both with capture_coverage), or by rejecting the proposal. Returns how many were new.
+ */
+export function addDecisionObligations(sessionId: string, items: DecisionObligation[], opts: { dir?: string; now?: Date } = {}): number {
+  if (!sessionId || !items.length) return 0;
+  const dir = opts.dir ?? sessionsDir();
+  return withJournalLock(sessionId, () => {
+    const j = loadJournal(sessionId, dir);
+    const known = new Set(j.entries.filter((e) => e.kind === "decision").map((e) => e.evidence_id));
+    let added = 0;
+    for (const it of items) {
+      const id = `${DECISION_EVIDENCE_PREFIX}${it.update_id}`;
+      if (known.has(id)) continue;
+      j.entries.push({ at: (opts.now ?? new Date()).toISOString(), kind: "decision", tool: "classifier", evidence_id: id, record_title: clip(it.record_title, 120), summary: clip(it.text, 300) });
+      known.add(id);
+      added++;
+    }
+    if (added) saveJournal(j, dir);
+    return added;
+  }, dir);
+}
+
 export function fingerprint(d: JournalEntry[]): string {
   return d.map(queryIdentity).sort().join("|");
 }
 
 export function debtText(d: JournalEntry[]): string {
-  return d.map((e) => `- ${queryIdentity(e)} · ${e.at.slice(11, 16)} ${e.tool}: ${e.summary}${e.input_complete === false ? " [input unresolved/incomplete]" : ""}`).join("\n");
+  return d.map((e) => e.kind === "decision"
+    ? `- ${queryIdentity(e)} · ${e.at.slice(11, 16)} decision proposed on record "${e.record_title || "untitled"}": ${e.summary}`
+    : `- ${queryIdentity(e)} · ${e.at.slice(11, 16)} ${e.tool}: ${e.summary}${e.input_complete === false ? " [input unresolved/incomplete]" : ""}`).join("\n");
+}
+
+/** "2 data queries", "1 decision found in this conversation", or both joined with "and". */
+function debtNoun(d: JournalEntry[]): string {
+  const decisions = d.filter((e) => e.kind === "decision").length, queries = d.length - decisions;
+  return [
+    queries ? `${queries} data quer${queries === 1 ? "y" : "ies"}` : "",
+    decisions ? `${decisions} decision${decisions === 1 ? "" : "s"} found in this conversation` : "",
+  ].filter(Boolean).join(" and ");
 }
 
 const RESOLVE =
@@ -275,12 +314,20 @@ const RESOLVE =
   `2. Or call ledger_skip_record with the reason this evidence produced no durable finding (exploration, a check that confirmed nothing, a dead end).\n` +
   `In either case include capture_coverage: [{session_id: the session printed here, evidence_ids: the exact query IDs covered}]. Unrelated saves and unscoped skips do not clear these obligations.`;
 
+/** Extra guidance when the list includes decisions the classifier found in the conversation. */
+function decisionsResolve(d: JournalEntry[]): string {
+  if (!d.some((e) => e.kind === "decision")) return "";
+  return `\nFor a d: item (a decision found in the conversation): if a person decided it, record it with ledger_record_decision under their name. ` +
+    `If nobody decided it (still exploring, a suggestion nobody accepted) or it is already recorded, call ledger_skip_record with that reason. ` +
+    `Rejecting the proposal with ledger_record_update(action: "reject") also settles it. Use the d: ID in capture_coverage.`;
+}
+
 function stopReason(d: JournalEntry[]): string {
   return (
-    `Ledger: ${d.length} data quer${d.length === 1 ? "y" : "ies"} still lack an explicitly scoped capture acknowledgment:\n` +
+    `Ledger: ${debtNoun(d)} still lack an explicitly scoped capture acknowledgment:\n` +
     debtText(d) +
     `\n\n` +
-    RESOLVE +
+    RESOLVE + decisionsResolve(d) +
     `\nThis reminder fires once per batch of uncaptured work.`
   );
 }
@@ -293,10 +340,10 @@ export function sessionStartContext(j: Journal): string {
   if (!d.length) return pending.trim();
   return (
     `## Uncaptured work from earlier in this session\n\n` +
-    `Session ${j.session_id}: ${d.length} data quer${d.length === 1 ? "y" : "ies"} have no explicitly scoped record. Context may have been compacted; the queries are still known:\n` +
+    `Session ${j.session_id}: ${debtNoun(d)} have no explicitly scoped record. Context may have been compacted; ${d.some((e) => e.kind === "decision") ? "they are" : "the queries are"} still known:\n` +
     debtText(d) +
     `\n\n` +
-    RESOLVE + pending
+    RESOLVE + decisionsResolve(d) + pending
   );
 }
 
@@ -417,10 +464,10 @@ function handleHookLocked(event: string, input: any, opts: HookOpts = {}): HookR
       j.entries.push({ at: now, kind: "compact", summary: fingerprint(d), evidence_ids: d.map(queryIdentity) });
       saveJournal(j, dir);
       const ctx =
-        `Ledger: session ${j.session_id} is about to be compacted and ${d.length} data quer${d.length === 1 ? "y" : "ies"} have no scoped record:\n` +
+        `Ledger: session ${j.session_id} is about to be compacted and ${debtNoun(d)} have no scoped record:\n` +
         debtText(d) +
         `\n\nRecord it now, while the method and assumptions are still in context. ` +
-        RESOLVE;
+        RESOLVE + decisionsResolve(d);
       return {
         stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: "PreCompact", additionalContext: ctx } }),
         exit: 0,
@@ -429,7 +476,8 @@ function handleHookLocked(event: string, input: any, opts: HookOpts = {}): HookR
 
     case "SessionEnd": {
       try { writeSignal(sessionId, "end"); } catch { /* best-effort */ }
-      const d = debt(j);
+      // only query debt goes to the transcript fallback; a decision prompt already sits on its work record as PROPOSED
+      const d = debt(j).filter((e) => e.kind === "query");
       if (d.length) {
         j.entries.push({ at: now, kind: "end", summary: `${d.length} uncaptured` });
         saveJournal(j, dir);

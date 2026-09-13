@@ -18,7 +18,7 @@ function parseCoverage(value: unknown): CaptureCoverage[] {
 function localIds(session: string, dir: string): Set<string> {
   // Already acknowledged queries remain valid coverage, including legacy journals.
   const journal=loadJournal(session,dir);
-  return new Set(journal.entries.filter(e=>e.kind==='query').map(e=>e.evidence_id ?? evidenceId(undefined,e.tool ?? '',e.at,e.summary ?? '')));
+  return new Set(journal.entries.filter(e=>e.kind==='query'||e.kind==='decision').map(e=>e.evidence_id ?? evidenceId(undefined,e.tool ?? '',e.at,e.summary ?? '')));
 }
 
 /** Remote coverage needs retained source evidence; it never creates a foreign local journal. */

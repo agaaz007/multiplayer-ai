@@ -66,6 +66,7 @@ function debtReason(j: Journal, d = debt(j)): string {
 export function extractionDebt(j: Journal, manual = false): JournalEntry[] {
   const batches = j.extractions ?? (j.extracted ? [j.extracted] : []);
   return debt(j).filter(query => {
+    if (query.kind !== "query") return false; // decision prompts come from the classifier and stay on their record
     if (manual) return true;
     const related = batches.filter(batch => batch.evidence_ids?.includes(query.evidence_id!) ||
       (!batch.evidence_ids && query.at <= batch.at)); // migration: old reconciler recorded a through-time, never coverage
