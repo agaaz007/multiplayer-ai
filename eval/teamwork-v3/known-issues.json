@@ -1,0 +1,16 @@
+{
+  "schema": "teamwork-known-issues/v3",
+  "ledger_short_file_evidence": {
+    "status": "unfixed integration/usability gap; must be replayed before scoring",
+    "observation": "The prior Ledger B agent supplied a raw 276-byte source file SHA as acceptance evidence. The corresponding captured event had a formatted preview but artifact_refs was empty; no retained artifact existed under that SHA. Other PostgreSQL artifacts were present. The rejected reference did not establish a carried correction.",
+    "rule": "A raw worktree hash is not a retained artifact reference. Do not pad files, fabricate references, inject controller evidence, omit required acceptance fields, or mark the correction accepted on a rejected operation. Use a supported exact retained evidence reference where available; otherwise retain the failure. No product fix is claimed here.",
+    "admission": "Ledger must demonstrate a successful evidence-backed corrected work-record chain in fresh readiness; configuration/classification flags alone cannot pass. Any product fix requires a new pre-score version pin and readiness replay."
+  },
+  "supermemory_file_support": {
+    "status": "native exact UTF8 file transport implemented; live readiness pending",
+    "observation": "Official native file upload and presigned download are configured. The bounded adapter rejects arbitrary binary files rather than representing base64 as semantic source memory. Rich multimodal ingestion is not configured or claimed as tested.",
+    "admission": "Pin the actual native download host after verifying it, prove scoped key isolation and fresh-agent original text-file recovery, record binary capability gaps separately. Plugin installation is not proof of end-to-end workflow readiness."
+  },
+  "intervention_policy": "Freeze this disclosure with every scored launch. Record any intervention with integrity.py before changing a scored run, naming actor, action, reason and affected paths. A freeze violation or recorded intervention stops the attempt; keep original traces and mark validity for explicit review. Never silently backfill memories, repair one lane during scoring, retry a stage for a better score, or reset the shared budget.",
+  "causal_attribution": "The primary comparison measures each configured native workflow. Trace-supported record use is association, not an isolated estimate of the benefit caused by structured records, snapshots or retrieval. Separate matched ablations are not part of this run."
+}

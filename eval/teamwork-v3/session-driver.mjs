@@ -46,9 +46,9 @@ export function deliver(cfg,answer,clock=monotonic) {
   const pending=path.join(cfg.output,'.delivery-pending');fs.mkdirSync(pending,{mode:0o700});
   try {
     save(path.join(pending,'answer.json'),answer);
-    const tree=cfg.track==='engineering'?snapshotTree(cfg.workspace,path.join(pending,'tree')):null;
+    const tree=snapshotTree(cfg.workspace,path.join(pending,'tree'));
     const received=clock();if(received>cfg.deadline)throw new Error('delivery snapshot missed deadline');
-    const receipt={schema:'teamwork-delivery/v2',received_monotonic_ms:received,
+    const receipt={schema:'teamwork-delivery/v3',received_monotonic_ms:received,
       elapsed_ms:received-cfg.started,answer_sha256:hash(encoded),tree,
       answer_file_sha256:hash(fs.readFileSync(path.join(pending,'answer.json'))),
       native_handoff:'not assessed by delivery',memory_write_required:false};
@@ -59,8 +59,28 @@ export function deliver(cfg,answer,clock=monotonic) {
   }
 }
 
+export function recover(cfg,evidence,clock=monotonic) {
+  if(fs.existsSync(path.join(cfg.output,'recovery.json')))throw new Error('recovery already submitted');
+  if(fs.existsSync(path.join(cfg.output,'delivery.json')))throw new Error('recovery must precede delivery');
+  if(clock()>cfg.deadline)throw new Error('stage deadline passed');
+  const pending=path.join(cfg.output,'.recovery-pending');fs.mkdirSync(pending,{mode:0o700});
+  try {
+    save(path.join(pending,'evidence.json'),evidence);
+    const tree=snapshotTree(cfg.workspace,path.join(pending,'tree'));
+    const received=clock();if(received>cfg.deadline)throw new Error('recovery snapshot missed deadline');
+    const receipt={schema:'teamwork-recovery/v3',received_monotonic_ms:received,elapsed_ms:received-cfg.started,
+      tree,evidence_file_sha256:hash(fs.readFileSync(path.join(pending,'evidence.json'))),
+      verification:'snapshot only; producer matching and actual native retrieval audited separately'};
+    fs.renameSync(pending,path.join(cfg.output,'recovery'));
+    save(path.join(cfg.output,'recovery.json'),receipt);return receipt;
+  } catch(error) {fs.rmSync(pending,{recursive:true,force:true});throw error;}
+}
+
 async function serve(config) {
-  const cfg=read(config);const server=new McpServer({name:'teamwork-delivery',version:'2.0.0'});
+  const cfg=read(config);const server=new McpServer({name:'teamwork-delivery',version:'3.0.0'});
+  server.registerTool('recover_handoff',{
+    description:'After restoring predecessor files through your product, BEFORE modifying those inherited files, freeze the recovered workspace and your evidence for independent checking. This tool does not supply, restore, or verify any predecessor content. If recovery is incomplete, submit what you actually recovered and describe missing material. Then continue the task.',
+    inputSchema:{evidence:z.record(z.string(),z.unknown())}},async({evidence})=>({content:[{type:'text',text:JSON.stringify(recover(cfg,evidence))}]}));
   server.registerTool('deliver_answer',{
     description:'Deliver the useful task result now. No memory save is required first. This freezes your answer and current code. After delivery, finish native memory handoff within the SAME original deadline. Delivery and handoff are measured separately.',
     inputSchema:{answer:z.record(z.string(),z.unknown())}},async ({answer})=>({content:[{type:'text',text:JSON.stringify(deliver(cfg,answer))}]}));
@@ -89,9 +109,9 @@ async function run(requestFile) {
   const guide=fs.readFileSync(profile.guide_file);
   if(hash(guide)!==profile.guide_sha256)throw new Error('native guide changed since freeze');
   const guideDir=path.join(req.fresh_home,'.claude');fs.mkdirSync(guideDir,{recursive:true});
-  const guidePath=path.join(guideDir,'ledger.md');fs.writeFileSync(guidePath,guide,{flag:'wx',mode:0o600});
+  const guidePath=path.join(guideDir,'native-workflow.md');fs.writeFileSync(guidePath,guide,{flag:'wx',mode:0o600});
   // Freeze/verify this source plus runtime and guide in launch preparation; only runtime is readable by the agent.
-  const {runSequenceCodex}=await import(pathToFileURL(path.join(req.runtime,'eval/sequence-codex.js')).href);
+  const {runSequenceCodex}=await import('./harness-codex.mjs');
   const {nativeSequenceTransport}=await import(pathToFileURL(path.join(req.runtime,'eval/sequence-transport.js')).href);
   const sockets=fs.mkdtempSync(path.join(os.tmpdir(),'tw-'));const transports=[];
   let captureProcess;
@@ -105,14 +125,19 @@ async function run(requestFile) {
     const permit=profile.budget_gate_module
       ?(await import(pathToFileURL(profile.budget_gate_module).href)).permitNativeCall:null;
     if(req.arm!=='fresh-agent'&&typeof permit!=='function')throw new Error('native transport requires an executable budget gate');
-    const servers={...(profile.mcp??{}),delivery:{command:process.execPath,args:[script,'serve',cfgFile],env:{PATH:process.env.PATH,HOME:output},cwd:output}};
+    const operationCfg=path.join(output,'operations-config.json');
+    const interruptFile=req.stress?.interrupt_after_supplier_effect?path.join(output,'interruption-trigger.json'):undefined;
+    const nativeRoot=read(req.native_config).root;
+    save(operationCfg,{root:path.join(nativeRoot,'external-operations'),stage:req.stage,interrupt_file:interruptFile});
+    const servers={...(profile.mcp??{}),delivery:{command:process.execPath,args:[script,'serve',cfgFile],env:{PATH:process.env.PATH,HOME:output},cwd:output},
+      operations:{command:process.execPath,args:[path.join(path.dirname(script),'operations.mjs'),operationCfg],env:{PATH:process.env.PATH,HOME:output},cwd:output}};
     if(req.arm==='fresh-agent'&&Object.keys(profile.mcp??{}).length)throw new Error('control must not have memory servers');
     for(const [name,server] of Object.entries(servers)) {
       if(!/^[a-zA-Z0-9_-]+$/.test(name)||typeof server.command!=='string'||!Array.isArray(server.args))throw new Error('invalid native server');
       const socket=path.join(sockets,name+'.sock');
       transports.push(await nativeSequenceTransport(socket,server.command,server.args,
         {PATH:process.env.PATH,HOME:output,...server.env},server.cwd??output,(d,m)=>append(name,d,m),
-        name==='delivery'?undefined:message=>permit(message,{arm:req.arm,stage:req.stage,server:name,request:req,profile})));
+        ['delivery','operations'].includes(name)?undefined:message=>permit(message,{arm:req.arm,stage:req.stage,server:name,request:req,profile})));
       mcp[name]={command:process.execPath,args:[path.join(req.runtime,'eval/sequence-runner.js'),'connect','--socket',socket]};
     }
     if(req.periodic_capture_argv) {
@@ -123,22 +148,48 @@ async function run(requestFile) {
       fs.closeSync(log);
       captureProcess.on('error',error=>append('capture','error',{message:error.message}));
     }
-    const prompt=fs.readFileSync(req.prompt_file,'utf8')+`\nYour frozen product workflow guide is at ${guidePath}; read it before using native memory. `+'Deliver your answer with deliver_answer before final bookkeeping. The immutable submitted code/answer is scored. Finish native handoff within the same deadline. Never claim tests or memory saves that did not run.';
+    const prompt=fs.readFileSync(req.prompt_file,'utf8')+`\nThis lane evaluates ${req.arm}; use its configured native tools and workflow. Your frozen product workflow guide is at ${guidePath}; read it before using native memory. `+'Deliver your answer with deliver_answer before final bookkeeping. The immutable submitted code/answer is scored. Finish native handoff within the same deadline. Never claim tests or memory saves that did not run.';
     const remaining=cfg.deadline-monotonic();if(remaining<=0)throw new Error('native setup exhausted stage deadline');
     const result=await runSequenceCodex({home:req.fresh_home,worktree:req.workspace,runtime:req.runtime,prompt,
-      model:req.model,reasoningEffort:req.reasoning_effort,timeoutMs:remaining,mcp,
+      model:req.model,reasoningEffort:req.reasoning_effort,timeoutMs:remaining,mcp,compactTokenLimit:req.stress?.compact_token_limit??req.compact_token_limit,interruptFile,
       hooks:profile.hooks,hookEnv:profile.hook_env??{},ledgerHooks:req.arm==='ledger',
       extraEnv:profile.extra_env??{},
       additionalReadPaths:profile.read_paths??[],additionalWritePaths:profile.write_paths??[],
-      forbiddenCanaries:req.forbidden_canaries,caFile:profile.ca_file,allowLocalPostgres:req.arm==='ledger'});
+      forbiddenCanaries:req.forbidden_canaries,forbiddenPaths:req.forbidden_paths??[],caFile:profile.ca_file,allowLocalPostgres:['ledger','gbrain'].includes(req.arm)});
     const elapsed=monotonic()-started,wallElapsed=Date.now()-wallStarted;
     const safe={...result,policy:undefined};save(path.join(output,'process.json'),safe);
+    const handoffDir=path.join(output,'handoff');fs.mkdirSync(handoffDir,{mode:0o700});
+    const handoffTree=snapshotTree(req.workspace,path.join(handoffDir,'tree'));
+    save(path.join(output,'handoff.json'),{schema:'teamwork-handoff/v3',tree:handoffTree,elapsed_ms:elapsed,source:'actual final worktree; never transported by controller'});
     // A late process completion cannot turn an already timely delivery into a missing answer.
     const delivered=fs.existsSync(path.join(output,'delivery.json'));
-    save(path.join(output,'stage-result.json'),{schema:'teamwork-stage/v2',arm:req.arm,track:req.track,stage:req.stage,
+    const compactions=[];
+    function inspectRollouts(dir){if(!fs.existsSync(dir))return;for(const e of fs.readdirSync(dir,{withFileTypes:true})){
+      const f=path.join(dir,e.name);if(e.isDirectory())inspectRollouts(f);else if(e.isFile()&&e.name.endsWith('.jsonl')){
+        let lineNo=0;for(const line of fs.readFileSync(f,'utf8').split('\n')){lineNo++;try{const e=JSON.parse(line);
+          if(e.type==='compacted'||(e.type==='event_msg'&&['context_compacted','context_compaction'].includes(e.payload?.type)))
+            compactions.push({file:f,line:lineNo,type:e.type,event_type:e.payload?.type??null,sha256:hash(line),timestamp:e.timestamp??null});
+        }catch{}}
+      }
+    }}
+    inspectRollouts(path.join(req.fresh_home,'.codex/sessions'));
+    const recoveryReceipt=fs.existsSync(path.join(output,'recovery.json'))?read(path.join(output,'recovery.json')):null;
+    const deliveryReceipt=delivered?read(path.join(output,'delivery.json')):null;
+    for(const event of compactions){
+      const t=Date.parse(event.timestamp);event.elapsed_wall_ms=Number.isFinite(t)?t-wallStarted:null;
+      event.after_recovery_before_delivery=event.elapsed_wall_ms!==null&&recoveryReceipt!==null&&deliveryReceipt!==null
+        &&event.elapsed_wall_ms>=recoveryReceipt.elapsed_ms&&event.elapsed_wall_ms<=deliveryReceipt.elapsed_ms;
+    }
+    const interveningCompaction=compactions.some(e=>e.after_recovery_before_delivery);
+    save(path.join(output,'compaction-evidence.json'),{schema:'teamwork-compaction/v3',requested_threshold:req.stress?.compact_token_limit??req.compact_token_limit??null,
+      observed:compactions.length>0,after_recovery_before_delivery:interveningCompaction,events:compactions});
+    save(path.join(output,'stage-result.json'),{schema:'teamwork-stage/v3',arm:req.arm,track:req.track,stage:req.stage,
       development_probe:developmentProbe,scored:!developmentProbe,
       delivered,delivery:delivered?read(path.join(output,'delivery.json')):null,
+      recovery:fs.existsSync(path.join(output,'recovery.json'))?read(path.join(output,'recovery.json')):null,
+      compaction:{requested_threshold:req.stress?.compact_token_limit??req.compact_token_limit??null,observed:compactions.length>0,after_recovery_before_delivery:interveningCompaction,events:compactions.length},
       elapsed_ms:elapsed,wall_elapsed_ms:wallElapsed,timed_out:result.timedOut,
+      interruption:result.interruption??null,
       timing_valid:elapsed<=req.stage_deadline_ms+5000&&wallElapsed<=req.stage_deadline_ms+5000&&Math.abs(wallElapsed-elapsed)<=5000,
       exit_code:result.exitCode,usage:result.usage??null,capture:'requires native post-stage capture receipt',
       isolation:result.isolation,model:req.model,reasoning_effort:req.reasoning_effort});

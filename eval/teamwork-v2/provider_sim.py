@@ -6,7 +6,7 @@ from urllib.parse import unquote
 
 class Provider:
     def __init__(self):
-        self.receipts={}; self.posts=[]; self.lock=threading.Lock()
+        self.receipts={}; self.posts=[]; self.gets=[]; self.lock=threading.Lock()
         outer=self
         class Handler(BaseHTTPRequestHandler):
             def log_message(self,*args): pass
@@ -16,7 +16,9 @@ class Provider:
                 self.end_headers();self.wfile.write(body)
             def do_GET(self):
                 key=unquote(self.path.removeprefix('/receipts/'))
-                with outer.lock: receipt=outer.receipts.get(key)
+                with outer.lock:
+                    outer.gets.append(self.path)
+                    receipt=outer.receipts.get(key)
                 self.reply(200 if receipt else 404,receipt or {'error':'unknown'})
             def do_POST(self):
                 try:
