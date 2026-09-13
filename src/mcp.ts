@@ -583,6 +583,8 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
           if (!reason?.trim()) return text("reject needs reason: say why the update is wrong or not durable; it is kept in history.");
           const u = await rejectStateUpdate(pool(), update_id, cfg.author, reason);
           if (!u) return text(`Not found: update ${update_id}`);
+          // a rejected proposal no longer needs the checkpoint's decision prompt in the session it came from
+          if (u.session_id) { try { acknowledgeLocalCapture({ schema: "ledger-capture/v1", action: "skip", status: "dismissed", reason: `proposal rejected: ${reason.trim()}`, coverage: [{ session_id: u.session_id, evidence_ids: [`d:${u.id}`] }] }); } catch { /* no local prompt for it */ } }
           return text(`Rejected ${u.kind} update ${u.id} on record "${rec.title}": ${reason.trim()} (state_version unchanged at ${rec.state_version}).`);
         } catch (e: any) {
           return failed("ledger_record_update", e);
