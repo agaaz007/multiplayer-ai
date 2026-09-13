@@ -72,6 +72,8 @@ export interface LedgerRefStatus {
   id: string; version?: string; found: boolean; type: string | null; title: string | null; author: string | null; created: string | null;
   status: string | null; superseded_by: string | null;
   authority_status: string; current_ids: string[]; version_matches: boolean | null; warnings: string[];
+  /** a draft someone discarded: deprecated without a replacement, never in force */
+  discarded: boolean;
   source: LedgerRefSource;
   /** the tool result event that saved it, for saved refs */
   origin: { session_id: string; seq: number } | null;
@@ -93,6 +95,7 @@ export function ledgerRefStatuses(all: LedgerObject[], refs: LedgerRefInput[]): 
       superseded_by: current ? null : resolution.current.length === 1 ? resolution.current[0].id : null,
       authority_status: resolution.status, current_ids: resolution.current.map((c) => c.id),
       version_matches: o && r.version ? objectVersion(o) === r.version : null, warnings: resolution.warnings,
+      discarded: Boolean(o?.fields.discarded),
       source: r.source, origin: r.origin ?? null,
     });
   }
@@ -178,6 +181,7 @@ export function decisionTag(r: LedgerRefStatus): string {
   if (!r.found) return "NOT FOUND";
   if (r.authority_status === "conflict") return `CONFLICT: ${r.current_ids.join(", ")} are all accepted; resolve before acting`;
   if (r.status === "stable") return "in force";
+  if (r.discarded) return "DISCARDED draft, never in force";
   if (r.status === "draft") return r.current_ids.length ? `DRAFT, not in force; in force instead: ${r.current_ids.join(", ")}` : "DRAFT, not in force";
   return r.superseded_by ? `SUPERSEDED by ${r.superseded_by}, which is in force` : "SUPERSEDED; no single replacement is in force";
 }

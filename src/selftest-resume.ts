@@ -366,10 +366,10 @@ const packB = await buildResumePack(cfg, pool, B.t.id, { mode: "inspect", author
 
 // ---------- 8. decisions in force: what the thread saved to the Ledger, and how record decisions were accepted ----------
 {
-  const { record, recordDraft, getById } = await import("./store.js");
+  const { record, recordDraft, discardDraft, getById } = await import("./store.js");
   const { objectVersion } = await import("./authority.js");
   const R = await import("./continuity/records.js");
-  const { savedLedgerIds, acceptanceLabel, decisionTag, DECISION_RULE } = await import("./continuity/packsections.js");
+  const { savedLedgerIds, acceptanceLabel, decisionTag, renderDecisionsInForce, DECISION_RULE } = await import("./continuity/packsections.js");
   const TODAY = new Date().toISOString().slice(0, 10);
   const decFields = (title: string, decision: string) => ({
     title, decision,
@@ -384,6 +384,8 @@ const packB = await buildResumePack(cfg, pool, B.t.id, { mode: "inspect", author
   const oldVersion = objectVersion(getById(cfg, old.id)!);
   const replacement = record(cfg, { type: "decision", fields: { ...decFields("Price moves to 599", "Move the price to 599"), supersedes: old.id, acceptance: { actor: "agaaz", accepted_at: "2026-09-10", expected_predecessor: { id: old.id, version: oldVersion }, evidence_refs: [{ artifact_id: old.id, sha256: oldVersion, role: "review" }] } } });
   const draft = recordDraft(cfg, { type: "decision", fields: { title: "Drop the annual plan", decision: "Remove the annual plan" }, capture: { method: "transcript_fallback", session: "sess-x", reason: "selftest" } });
+  const dropped = recordDraft(cfg, { type: "decision", fields: { title: "Pause the paywall test", decision: "Pause the paywall test for a week" }, capture: { method: "transcript_fallback", session: "sess-x", reason: "selftest" } });
+  discardDraft(cfg, dropped.id, "not a decision anyone made");
   assert.equal(getById(cfg, old.id)!.status, "deprecated");
 
   // what counts as saved: a save receipt (plain or JSON-escaped inside Codex output) or a "Recorded <type> <id>" line; a search listing or a clipped id does not
@@ -402,6 +404,7 @@ const packB = await buildResumePack(cfg, pool, B.t.id, { mode: "inspect", author
     ev("d4", "tool.finished", 293, { tool: "ledger_record_decision", output_preview: `Recorded decision ${old.id}. Committed and pushed.` }, "d-c3"),
     ev("d5", "tool.finished", 294, { tool: "mcp__ledger__ledger_search", output_preview: `[0.91] decision ${replacement.id} — Price moves to 599` }, "d-c4"),
     ev("d6", "tool.finished", 295, { tool: "mcp__ledger__ledger_record_decision", output_preview: receipt(inForce.id) }, "d-c5"),
+    ev("d7", "tool.finished", 296, { tool: "mcp__ledger__ledger_record_decision", output_preview: receipt(dropped.id) }, "d-c6"),
   ] });
 
   // record decisions on work this thread's session contributes to: proposed, agent-confirmed by the proposing session, accepted by a person
@@ -420,13 +423,15 @@ const packB = await buildResumePack(cfg, pool, B.t.id, { mode: "inspect", author
     [inForce.id, "in force", "saved", D.seqOf("d2")],
     [draft.id, "DRAFT, not in force", "saved", D.seqOf("d3")],
     [old.id, `SUPERSEDED by ${replacement.id}, which is in force`, "saved", D.seqOf("d4")],
-  ], "saved ids in order, deduplicated, each resolved; the id the session only searched for is absent");
+    [dropped.id, "DISCARDED draft, never in force", "saved", D.seqOf("d7")],
+  ], "saved ids in order, deduplicated, each resolved; the id the session only searched for is absent; a discarded draft is not called superseded");
   const t = pack.text;
-  assert.ok(t.includes(`## Decisions in force for this work (3)\nLedger objects this work saved or linked, resolved to what is in force now. Only [in force] items are accepted knowledge.\n- [in force] decision ${inForce.id}: Ship the banner behind a flag (agaaz, ${TODAY}) · saved in session ${S8} seq ${D.seqOf("d2")}`), t);
+  assert.ok(t.includes(`## Decisions in force for this work (4)\nLedger objects this work saved or linked, resolved to what is in force now. Only [in force] items are accepted knowledge.\n- [in force] decision ${inForce.id}: Ship the banner behind a flag (agaaz, ${TODAY}) · saved in session ${S8} seq ${D.seqOf("d2")}`), t);
   assert.ok(t.includes(`- [DRAFT, not in force] decision ${draft.id}: Drop the annual plan (agaaz, ${TODAY}) · saved in session ${S8} seq ${D.seqOf("d3")}`));
   assert.ok(t.includes(`- [SUPERSEDED by ${replacement.id}, which is in force] decision ${old.id}: Price stays at 499 (agaaz, ${TODAY}) · saved in session ${S8} seq ${D.seqOf("d4")}`));
-  assert.ok(t.includes(`NOT IN FORCE (2): ${draft.id}; ${old.id} → ${replacement.id}. Do not act on these as decided.`));
-  assert.ok(t.includes(`Captured from 4 Ledger save results in 1 session and 0 explicit links.`), "four save results (one id saved twice) are disclosed");
+  assert.ok(t.includes(`- [DISCARDED draft, never in force] decision ${dropped.id}: Pause the paywall test (agaaz, ${TODAY}) · saved in session ${S8} seq ${D.seqOf("d7")}`));
+  assert.ok(t.includes(`NOT IN FORCE (3): ${draft.id}; ${old.id} → ${replacement.id}; ${dropped.id}. Do not act on these as decided.`));
+  assert.ok(t.includes(`Captured from 5 Ledger save results in 1 session and 0 explicit links.`), "five save results (one id saved twice) are disclosed");
   assert.ok(t.includes(`### Work-record decisions (3)\nrecord "Pricing direction" (${rec.id}):`));
   assert.ok(t.includes(`  - [accepted by agaaz] Keep the annual plan until the test reads out (by rachit, `), "a person's interactive acceptance");
   assert.ok(t.includes(`  - [agent-confirmed for agaaz by the session that proposed it; not reviewed by a person] Roll the price change out on Android first (by rachit, `), "an agent confirming its own proposal is labelled as such");
@@ -438,7 +443,7 @@ const packB = await buildResumePack(cfg, pool, B.t.id, { mode: "inspect", author
   assert.ok(!packB.text.includes("### Work-record decisions"));
 
   const tight = await buildResumePack(cfg, pool, D.t.id, { mode: "inspect", author: "agaaz", now: T(310), budgetTokens: 400 });
-  for (const must of [`- [DRAFT, not in force] decision ${draft.id} · saved in session`, `NOT IN FORCE (2):`, `[agent-confirmed for agaaz`, DECISION_RULE]) assert.ok(tight.text.includes(must), `tight pack keeps: ${must}`);
+  for (const must of [`- [DRAFT, not in force] decision ${draft.id} · saved in session`, `NOT IN FORCE (3):`, `[agent-confirmed for agaaz`, DECISION_RULE]) assert.ok(tight.text.includes(must), `tight pack keeps: ${must}`);
 
   const base = { ...uAgent, status: "confirmed" as const, confirmed_by: "agaaz" };
   assert.equal(acceptanceLabel({ ...base, confirmed_via: null }), "confirmed by agaaz; how it was accepted was not recorded");
@@ -448,6 +453,9 @@ const packB = await buildResumePack(cfg, pool, B.t.id, { mode: "inspect", author
   const conflict = { ...pack.decisions[0], authority_status: "conflict", current_ids: ["dec-a", "dec-b"] };
   assert.equal(decisionTag(conflict), "CONFLICT: dec-a, dec-b are all accepted; resolve before acting");
   assert.equal(decisionTag({ ...pack.decisions[0], found: false }), "NOT FOUND");
+  const legacyWarned = [{ ...pack.decisions[0], warnings: ["analytical scope unknown (legacy record)"] }, { ...pack.decisions[1], warnings: ["analytical scope unknown (legacy record)", "only mine"] }];
+  const warnLines = renderDecisionsInForce(legacyWarned, { results: 2, sessions: 1 }).filter((l) => l.startsWith("WARNING"));
+  assert.deepEqual(warnLines, ["WARNING: only mine", "WARNING (2 objects above): analytical scope unknown (legacy record)"], "a warning shared by several objects prints once");
   ok("decisions in force: ids the thread saved (receipt, Codex-escaped receipt, Recorded line; not search hits or clipped ids) resolve to in force / DRAFT / SUPERSEDED with the save event; record decisions carry how they were accepted (person, self-confirming agent, proposed); the contract states the rule; compact under budget");
 }
 
