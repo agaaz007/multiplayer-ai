@@ -39,6 +39,8 @@ export interface ContinuityConfig {
   classify?: boolean;
   /** Sessions whose repo root is under one of these path prefixes are ignored by this machine's helper (e.g. evaluation fixtures). */
   exclude_paths?: string[];
+  /** A helper pass running longer than this exits the process so launchd restarts it. Default 900. */
+  pass_deadline_s?: number;
 }
 
 /**

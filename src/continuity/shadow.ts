@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { DEFAULT_DENY_GLOBS, DEFAULT_SNAPSHOT_EXCLUDES, globToRegExp } from "./redact.js";
+import { forbiddenSnapshotRoot } from "./safety.js";
 
 /**
  * Shadow commits (spec §3.2, v1.1). Capture the exact worktree state onto a
@@ -33,7 +34,7 @@ export interface ShadowOpts {
 
 export interface ShadowResult {
   ok: boolean;
-  skipped?: "clean" | "unchanged" | "not_a_repo" | "no_head";
+  skipped?: "clean" | "unchanged" | "not_a_repo" | "no_head" | "forbidden_root";
   error?: string;
   tree?: string;
   commit?: string;
@@ -109,6 +110,9 @@ export function shadowCommit(worktree: string, opts: ShadowOpts): ShadowResult {
   const res: ShadowResult = { ok: false, files: [], gaps: [] };
   const root = repoRoot(worktree);
   if (!root) return { ...res, skipped: "not_a_repo" };
+  // defence in depth behind the helper's own check: never `add -A` and push a home directory
+  const forbidden = forbiddenSnapshotRoot(root);
+  if (forbidden) return { ...res, skipped: "forbidden_root", gaps: [{ kind: "forbidden_root", detail: forbidden }] };
   const head = headCommit(root);
   if (!head) return { ...res, skipped: "no_head" };
   const deny = [...DEFAULT_DENY_GLOBS, ...(opts.deny ?? [])];
@@ -147,29 +151,55 @@ export function shadowCommit(worktree: string, opts: ShadowOpts): ShadowResult {
     }
     res.tree = tree;
     if (opts.lastTree && tree === opts.lastTree) return { ...res, ok: true, skipped: "unchanged" };
-    const parent = opts.parent ?? head;
     const headTree = git(root, ["rev-parse", `${head}^{tree}`]);
     if (!opts.parent && tree === headTree) return { ...res, ok: true, skipped: "clean" };
 
+    const remote = opts.remote ?? "origin";
+    /** The remote's current commit for the wip ref, with its objects present locally, or null. */
+    const remoteTip = (): string | null => {
+      try {
+        const sha = git(root, ["ls-remote", remote, opts.ref]).split(/\s+/)[0];
+        if (!/^[0-9a-f]{40}$/.test(sha)) return null;
+        try { git(root, ["cat-file", "-e", `${sha}^{commit}`]); } catch { git(root, ["fetch", "--quiet", remote, opts.ref]); }
+        return sha;
+      } catch { return null; }
+    };
+    // A restarted helper can lose the previous shadow commit. Continuing from the remote tip keeps the push a fast-forward;
+    // parenting on HEAD made every later push of the ref fail as non-fast-forward, so nothing was saved (2026-09-13).
+    const parent = opts.parent ?? (opts.push === false ? null : remoteTip()) ?? head;
+
     const when = (opts.now ?? new Date()).toISOString();
     const msg = opts.message ?? `wip snapshot ${when}`;
-    const commit = git(root, ["commit-tree", tree, "-p", parent, "-m", msg], {
-      GIT_AUTHOR_NAME: "ledger-helper", GIT_AUTHOR_EMAIL: "helper@ledger.local", GIT_COMMITTER_NAME: "ledger-helper", GIT_COMMITTER_EMAIL: "helper@ledger.local",
-    });
-    git(root, ["update-ref", opts.ref, commit]);
-    res.commit = commit;
-    res.parent = parent;
-    try {
-      res.files = git(root, ["diff-tree", "--no-commit-id", "--name-status", "-r", parent, commit]).split("\n").filter(Boolean).map((l) => { const [status, ...p] = l.split("\t"); return { status, path: p.join("\t") }; });
-    } catch { /* first commit or unusual parent */ }
+    const makeCommit = (p: string): string => {
+      const c = git(root, ["commit-tree", tree, "-p", p, "-m", msg], {
+        GIT_AUTHOR_NAME: "ledger-helper", GIT_AUTHOR_EMAIL: "helper@ledger.local", GIT_COMMITTER_NAME: "ledger-helper", GIT_COMMITTER_EMAIL: "helper@ledger.local",
+      });
+      git(root, ["update-ref", opts.ref, c]);
+      res.commit = c;
+      res.parent = p;
+      try {
+        res.files = git(root, ["diff-tree", "--no-commit-id", "--name-status", "-r", p, c]).split("\n").filter(Boolean).map((l) => { const [status, ...rest] = l.split("\t"); return { status, path: rest.join("\t") }; });
+      } catch { /* first commit or unusual parent */ }
+      return c;
+    };
+    let commit = makeCommit(parent);
 
     if (opts.push === false) return { ...res, ok: true, pushed: false, verified: false };
-    const remote = opts.remote ?? "origin";
+    const pushError = (e: any) => String(e?.stderr || e?.message || e);
     try {
       git(root, ["push", "--quiet", remote, `${commit}:${opts.ref}`]);
       res.pushed = true;
     } catch (e: any) {
-      return { ...res, ok: true, pushed: false, verified: false, error: `push failed: ${String(e?.stderr || e?.message || e).slice(0, 200)}` };
+      // the remote ref is not an ancestor of our parent (a lost or rejected local chain): re-parent once on the remote tip
+      const tip = /non-fast-forward|fetch first|rejected/i.test(pushError(e)) ? remoteTip() : null;
+      if (!tip || tip === parent) return { ...res, ok: true, pushed: false, verified: false, error: `push failed: ${pushError(e).slice(0, 200)}` };
+      commit = makeCommit(tip);
+      try {
+        git(root, ["push", "--quiet", remote, `${commit}:${opts.ref}`]);
+        res.pushed = true;
+      } catch (e2: any) {
+        return { ...res, ok: true, pushed: false, verified: false, error: `push failed after continuing from the remote tip: ${pushError(e2).slice(0, 200)}` };
+      }
     }
     try {
       const remoteSha = git(root, ["ls-remote", remote, opts.ref]).split(/\s+/)[0];
