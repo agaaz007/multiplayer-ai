@@ -635,7 +635,8 @@ let recLatency: import("./continuity/records.js").WorkRecord;
   assert.equal(f3.errors.length, 0, f3.errors.join(" | "));
   assert.equal(f3.classified, 0, "rate limited");
   assert.equal(lastPrompt(), null);
-  assert.equal(loadState()[sid].ended, false, "a quiet session waits for its unclassified tail instead of ending");
+  assert.ok(!loadState()[sid].ended, "a quiet session waits for its unclassified tail instead of ending");
+  assert.equal((await S.getSession(pool, sid))!.ended_at, null);
   assert.equal(loadState()[sid].classifyHoldSince, after(100_000).getTime());
 
   // pass 4: after the rate limit → the tail is classified and the session ends
