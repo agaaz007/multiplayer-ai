@@ -335,7 +335,7 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
         if (mode !== "inspect") {
           try { sid = sessionOf(session_id); } catch (e: any) { return text(`ledger_resume refused: ${e.message}`); }
         }
-        if (record_id) {
+        if (record_id && mode !== "fork") {
           try {
             const pack = await buildRecordPack(cfg, pool(), record_id, { mode, author: cfg.author, sessionId: sid, repoPath: cwd, budgetTokens: budget_tokens });
             if (sid && mode === "continue" && pack.claim.acquired && pack.claim.thread_id) writeBinding(sid, { thread_id: pack.claim.thread_id });
