@@ -516,14 +516,22 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
           from_seq: z.number().int().min(0),
           to_seq: z.number().int().min(0),
           note: z.string().max(500).optional().describe("Why this span belongs here"),
+          ledger_refs: z.array(z.string().min(3)).max(20).optional().describe("Ledger decision, definition or finding ids this work depends on; resume packs show whether each is still in force"),
         },
       },
-      async ({ record_id, session_id, from_seq, to_seq, note }) => {
+      async ({ record_id, session_id, from_seq, to_seq, note, ledger_refs }) => {
         try {
           const rec = await getRecord(pool(), record_id);
           if (!rec) return text(`Not found: record ${record_id}`);
           const l = await linkSpan(pool(), { record_id, session_id, from_seq, to_seq, source: "explicit", note: note ?? null, created_by: cfg.author });
-          return text(`Linked session ${session_id} seq ${from_seq}..${to_seq} to record "${rec.title}" (${rec.id}); link ${l.id}, explicit, by ${cfg.author}.`);
+          let refsNote = "";
+          if (ledger_refs?.length) {
+            const merged = [...(rec.ledger_refs ?? [])];
+            for (const id of ledger_refs) if (!merged.some((r) => r.id === id)) merged.push({ id });
+            await updateRecordMeta(pool(), rec.id, { ledger_refs: merged });
+            refsNote = ` Ledger refs now: ${merged.map((r) => r.id).join(", ")}.`;
+          }
+          return text(`Linked session ${session_id} seq ${from_seq}..${to_seq} to record "${rec.title}" (${rec.id}); link ${l.id}, explicit, by ${cfg.author}.${refsNote}`);
         } catch (e: any) {
           return failed("ledger_record_link", e);
         }
@@ -534,7 +542,7 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
       "ledger_record_update",
       {
         title: "Propose, confirm, or reject a record state update",
-        description: "Append to a work record's state. action=propose adds a proposed update (kind: progress | decision | hypothesis | blocker | next | contradiction | note) with the exact events it rests on; it is never confirmed on propose and does not change state_version. action=confirm accepts a proposed update on the person's behalf and bumps state_version. action=reject declines one with a reason (kept in history). To replace an earlier update, propose a new one with supersedes; nothing is edited. A confirmed record state is still not a Ledger decision or finding; promote with ledger_record_decision / ledger_record_finding.",
+        description: "Append to a work record's state. action=propose adds a proposed update (kind: progress | decision | hypothesis | blocker | next | contradiction | note) with the exact events it rests on; it is never confirmed on propose and does not change state_version. action=confirm records an agent confirmation on the author's behalf and bumps state_version; successors see it as agent-confirmed, not reviewed by a person. A person accepts with `ledger record confirm <update_id>` in a terminal. action=reject declines one with a reason (kept in history). To replace an earlier update, propose a new one with supersedes; nothing is edited. A confirmed record state is still not a Ledger decision or finding; promote with ledger_record_decision / ledger_record_finding.",
         inputSchema: {
           record_id: z.string(),
           action: z.enum(["propose", "confirm", "reject"]),
@@ -544,25 +552,30 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
           supersedes: z.string().optional().describe("propose: id of an earlier update this one replaces"),
           update_id: z.string().optional().describe("confirm / reject: the update id"),
           reason: z.string().max(1000).optional().describe("reject: why (required)"),
+          session_id: z.string().optional().describe('Your harness session id (SessionStart prints it as "Ledger session: <id>"); recorded as the session that proposed or confirmed the update'),
         },
       },
-      async ({ record_id, action, kind, text: body, evidence, supersedes, update_id, reason }) => {
+      async ({ record_id, action, kind, text: body, evidence, supersedes, update_id, reason, session_id }) => {
         try {
           const rec = await getRecord(pool(), record_id);
           if (!rec) return text(`Not found: record ${record_id}`);
+          // provenance is best effort: an unknown session never blocks a proposal or confirmation, it is just not recorded
+          let caller: string | null = null;
+          try { caller = sessionOf(session_id); } catch { caller = null; }
           if (action === "propose") {
             if (!kind) return text("propose needs kind (progress | decision | hypothesis | blocker | next | contradiction | note).");
             if (!body?.trim()) return text("propose needs text.");
             if (!evidence?.length) return text("propose needs evidence: at least one { session_id, seq } the update rests on. A state update without evidence is a guess; find the event with ledger_events or ledger_evidence_search first.");
-            const u = await addStateUpdate(pool(), { record_id, kind, text: body, evidence, created_by: cfg.author, supersedes: supersedes ?? null });
-            return text(`Proposed ${u.kind} update ${u.id} on record "${rec.title}" (status proposed; state_version unchanged at ${rec.state_version}${u.supersedes ? `; supersedes ${u.supersedes}` : ""}). It renders as [PROPOSED] until a person confirms it: ledger_record_update(record_id: "${rec.id}", action: "confirm", update_id: "${u.id}").`);
+            const u = await addStateUpdate(pool(), { record_id, kind, text: body, evidence, created_by: cfg.author, supersedes: supersedes ?? null, proposed_session_id: caller });
+            return text(`Proposed ${u.kind} update ${u.id} on record "${rec.title}" (status proposed; state_version unchanged at ${rec.state_version}${u.supersedes ? `; supersedes ${u.supersedes}` : ""}). It renders as [PROPOSED] until confirmed. A person accepts it with \`ledger record confirm ${u.id}\` in a terminal; an agent confirmation (ledger_record_update action "confirm") renders as agent-confirmed, not reviewed by a person.`);
           }
           if (!update_id) return text(`${action} needs update_id.`);
           if (action === "confirm") {
-            const u = await confirmStateUpdate(pool(), update_id, cfg.author);
+            const u = await confirmStateUpdate(pool(), update_id, cfg.author, { via: "mcp", session_id: caller });
             if (!u) return text(`Not found: update ${update_id}`);
             const after = await getRecord(pool(), record_id);
-            return text(`Confirmed ${u.kind} update ${u.id} on record "${rec.title}" by ${u.confirmed_by} (state_version now ${after?.state_version ?? "?"}).`);
+            const label = acceptanceLabel(u);
+            return text(`Confirmed ${u.kind} update ${u.id} on record "${rec.title}": successors see [${label}] (state_version now ${after?.state_version ?? "?"}).${u.confirmed_via === "cli-interactive" ? "" : ` A person accepts it with \`ledger record confirm ${u.id}\` in a terminal.`}`);
           }
           if (!reason?.trim()) return text("reject needs reason: say why the update is wrong or not durable; it is kept in history.");
           const u = await rejectStateUpdate(pool(), update_id, cfg.author, reason);
