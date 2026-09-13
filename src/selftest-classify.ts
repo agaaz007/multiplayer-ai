@@ -64,7 +64,8 @@ for (const c of canned) {
   if (c.dynamic) {
     // span every event shown: seqs are the leading numbers of lines after the "# Events" header
     const seqs = prompt.slice(prompt.indexOf("# Events")).split("\\n").map((l) => /^(\\d+) · /.exec(l)).filter(Boolean).map((m) => Number(m[1]));
-    const out = { assignments: [{ record_id: null, new_record: c.dynamic, from_seq: Math.min(...seqs), to_seq: Math.max(...seqs), confidence: 0.75, why: "dynamic fixture" }], state_updates: [], unassigned: [], notes: "dynamic" };
+    const state_updates = c.decision ? [{ record_ref: c.dynamic.title, kind: "decision", text: c.decision, evidence_seqs: [Math.min(...seqs)], confidence: 0.8 }] : [];
+    const out = { assignments: [{ record_id: null, new_record: c.dynamic, from_seq: Math.min(...seqs), to_seq: Math.max(...seqs), confidence: 0.75, why: "dynamic fixture" }], state_updates, unassigned: [], notes: "dynamic" };
     process.stdout.write(JSON.stringify(out)); process.exit(0);
   }
   process.stdout.write(typeof c.output === "string" ? c.output : JSON.stringify(c.output)); process.exit(0);
@@ -572,6 +573,93 @@ let recLatency: import("./continuity/records.js").WorkRecord;
   assert.equal(p6.classified, 1);
   assert.ok(logs.some((l) => /^classify 0199cccc: classifier failed/.test(l)), logs.join("\n"));
   ok("(e) daemon: a failing model is logged and the checkpoint still lands; capture never waits on the classifier");
+}
+
+// ---------- (f) work outside a git repo: classified at turn ends and when quiet; decisions become checkpoint prompts ----------
+{
+  const H = await import("./hooks.js");
+  const roots = { claude: path.join(tmp, "claude-empty-f"), codex: path.join(tmp, "codex-f") };
+  const day = path.join(roots.codex, "2026", "09", "08");
+  fs.mkdirSync(roots.claude, { recursive: true });
+  fs.mkdirSync(day, { recursive: true });
+  const notes = path.join(tmp, "pm-notes"); // a plain folder, not a git repo
+  fs.mkdirSync(notes, { recursive: true });
+  const sid = "0199dddd-eeee-7fff-8000-000000000002";
+  const tf = path.join(day, `rollout-2026-09-08T04-00-00-${sid}.jsonl`);
+  const write = (lines: string[], when: Date) => { fs.appendFileSync(tf, lines.join("\n") + "\n"); fs.utimesSync(tf, when, when); };
+  const after = (ms: number) => new Date(T(202).getTime() + ms);
+  write([
+    cl({ timestamp: "2026-09-08T04:00:00Z", type: "session_meta", payload: { id: sid, cwd: notes } }),
+    cl({ timestamp: "2026-09-08T04:00:01Z", type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "Pricing analysis: we will keep the annual plan until the test reads out" }] } }),
+    cl({ timestamp: "2026-09-08T04:00:02Z", type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Noted: the annual plan stays; I will size the monthly-only variant next." }] } }),
+  ], T(200));
+  setCanned([
+    { marker: "Pricing analysis: we will keep the annual plan", dynamic: { kind: "investigation", title: "Pricing analysis", goal: "Decide the plan lineup" }, decision: "Keep the annual plan until the pricing test reads out" },
+    { marker: "Also check whether monthly-only hurts trial starts", dynamic: { kind: "investigation", title: "Pricing analysis", goal: null } },
+  ]);
+  const logs: string[] = [];
+  const log = (m: string) => logs.push(m);
+
+  // pass 1: live, no turn signal → captured, not classified
+  clearPrompt();
+  const f1 = await helperOnce(cfg, { roots, now: T(201), push: false, log, classifyWaitMs: 60_000 });
+  assert.equal(f1.errors.length, 0, f1.errors.join(" | "));
+  assert.equal(f1.classified, 0);
+  assert.equal(lastPrompt(), null);
+  assert.equal((await S.getSession(pool, sid))!.repo, null, "a plain folder has no repo identity");
+
+  // pass 2: the Stop hook's turn signal classifies a session with no repo and no thread
+  writeSignal(sid, "checkpoint");
+  const f2 = await helperOnce(cfg, { roots, now: T(202), push: false, log, classifyWaitMs: 60_000 });
+  assert.equal(f2.errors.length, 0, f2.errors.join(" | "));
+  assert.equal(f2.classified, 1, "a turn end classifies work outside a repo");
+  assert.equal(f2.checkpoints, 0, "no thread, so no checkpoint");
+  const links = await R.sessionLinks(pool, sid);
+  assert.equal(links.length, 1);
+  const rec = (await R.getRecord(pool, links[0].record_id))!;
+  assert.deepEqual({ title: rec.title, repo: rec.repo }, { title: "Pricing analysis", repo: null });
+  const st = (await R.recordState(pool, rec.id))!;
+  assert.deepEqual(st.decisions.map((u) => [u.status, u.text]), [["proposed", "Keep the annual plan until the pricing test reads out"]]);
+  const dId = `d:${st.decisions[0].id}`;
+  assert.deepEqual(H.debt(H.loadJournal(sid)).map((e) => [e.kind, e.evidence_id, e.record_title]), [["decision", dId, "Pricing analysis"]]);
+  assert.ok(logs.some((l) => l.includes("1 decision(s) from the conversation queued for the next checkpoint")), logs.join("\n"));
+  const stop = H.handleHook("Stop", { session_id: sid }, { now: T(202) });
+  const reason = JSON.parse(stop.stdout!).reason as string;
+  assert.ok(reason.includes("1 decision found in this conversation still lack") && reason.includes(`${dId} · `) && reason.includes('decision proposed on record "Pricing analysis": Keep the annual plan until the pricing test reads out') && reason.includes("For a d: item"), reason);
+  ok("(f) daemon: a Codex session in a plain folder (no repo, no thread) is classified at its turn end into a non-code record; its proposed decision becomes a d: prompt at the next Stop");
+
+  // pass 3: new work, then quiet inside the 120 s rate limit → held open, not ended
+  write([cl({ timestamp: "2026-09-08T04:01:00Z", type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "Also check whether monthly-only hurts trial starts" }] } })], after(10_000));
+  clearPrompt();
+  const f3 = await helperOnce(cfg, { roots, now: after(100_000), quietEndMin: 1, push: false, log, classifyWaitMs: 60_000 });
+  assert.equal(f3.errors.length, 0, f3.errors.join(" | "));
+  assert.equal(f3.classified, 0, "rate limited");
+  assert.equal(lastPrompt(), null);
+  assert.equal(loadState()[sid].ended, false, "a quiet session waits for its unclassified tail instead of ending");
+  assert.equal(loadState()[sid].classifyHoldSince, after(100_000).getTime());
+
+  // pass 4: after the rate limit → the tail is classified and the session ends
+  const f4 = await helperOnce(cfg, { roots, now: after(130_000), quietEndMin: 1, push: false, log, classifyWaitMs: 60_000 });
+  assert.equal(f4.errors.length, 0, f4.errors.join(" | "));
+  assert.equal(f4.classified, 1);
+  assert.ok(lastPrompt()!.includes("Also check whether monthly-only hurts trial starts"));
+  assert.equal(loadState()[sid].ended, true);
+  assert.equal(loadState()[sid].classifyHoldSince, undefined);
+  assert.equal(C.readProgress(sid)!.last_seq, 3);
+  assert.equal(H.debt(H.loadJournal(sid)).length, 1, "no new decision, the first prompt is still open");
+
+  // pass 5: nothing new → no model call
+  clearPrompt();
+  writeSignal(sid, "checkpoint");
+  const f5 = await helperOnce(cfg, { roots, now: after(400_000), quietEndMin: 1, push: false, log, classifyWaitMs: 60_000 });
+  assert.equal(f5.classified, 0);
+  assert.equal(lastPrompt(), null);
+
+  // a scoped skip settles the decision prompt
+  const skip = { schema: "ledger-capture/v1" as const, action: "skip" as const, status: "dismissed" as const, reason: "nobody decided this yet; still exploring", coverage: [{ session_id: sid, evidence_ids: [dId] }] };
+  H.handleHook("PostToolUse", { session_id: sid, tool_name: "mcp__ledger__ledger_skip_record", tool_input: { reason: skip.reason, capture_coverage: skip.coverage }, tool_response: { structuredContent: { capture_ack: skip } }, tool_use_id: "skip-d" }, { now: after(410_000) });
+  assert.deepEqual(H.debt(H.loadJournal(sid)), []);
+  ok("(f) daemon: a quiet session is held open while its new tail waits out the rate limit, then classified and ended; nothing new means no model call; a scoped skip settles the d: prompt");
 }
 
 // ---------- relevance and confirmed state survive recency, closed status and proposal floods ----------
