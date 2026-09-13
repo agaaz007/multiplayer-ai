@@ -61,6 +61,8 @@ export interface ClassifyResult {
   since_seq: number;
   through_seq: number;
   dry_run: boolean;
+  /** state updates this run wrote, for the helper's follow-up (decision prompts at the next checkpoint) */
+  proposed: { id: string; record_id: string; record_title: string; kind: UpdateKind; text: string; confidence: number; evidence_seqs: number[] }[];
 }
 
 export interface ClassifyProgress { last_seq: number; runs: number; last_at: string }
@@ -95,6 +97,12 @@ export function classifyAllowed(cfg: Config, o: { now: number; lastClassifyAt?: 
   const min = o.minIntervalMs ?? CLASSIFY_MIN_INTERVAL_MS;
   if (o.lastClassifyAt != null && o.now - o.lastClassifyAt < min) return { ok: false, reason: `rate limited: next run in ${Math.ceil((min - (o.now - o.lastClassifyAt)) / 1000)} s` };
   return { ok: true };
+}
+
+/** Content events captured beyond this session's classifier progress: whether a quiet session still needs a run. */
+export async function unclassifiedCount(pool: pg.Pool, sessionId: string): Promise<number> {
+  const since = readProgress(sessionId)?.last_seq ?? 0;
+  return (await pool.query<{ n: number }>(`select count(*)::int as n from cont_events where session_id = $1 and kind = any($2) and seq > $3`, [sessionId, CONTENT_KINDS, since])).rows[0].n;
 }
 
 // ---------- progress file ----------
@@ -272,7 +280,7 @@ export async function classifySession(cfg: Config, pool: pg.Pool, sessionId: str
   const maxEvents = Math.max(1, opts.maxEvents ?? DEFAULT_MAX_EVENTS);
   const res: ClassifyResult = {
     session_id: sessionId, events_considered: 0, candidates: 0, candidate_pool_size: 0, candidates_omitted: 0, assignments_applied: 0, assignments_skipped: 0, records_created: 0, updates_proposed: 0, updates_skipped: 0,
-    unassigned: [], rejected: [], prompt_chars: 0, model_ok: false, notes: [], since_seq: 0, through_seq: 0, dry_run: dryRun,
+    unassigned: [], rejected: [], prompt_chars: 0, model_ok: false, notes: [], since_seq: 0, through_seq: 0, dry_run: dryRun, proposed: [],
   };
   const fail = (msg: string): ClassifyResult => { res.error = msg; return res; };
 
@@ -460,11 +468,13 @@ export async function classifySession(cfg: Config, pool: pg.Pool, sessionId: str
       try {
         const record_id = u.target.record_id ?? created.get(u.target.new_title!.toLowerCase())?.id;
         if (!record_id) { reject(u, `record "${u.target.new_title}" was not created`); continue; }
-        await R.addStateUpdate(pool, {
+        const added = await R.addStateUpdate(pool, {
           record_id, session_id: sessionId, from_seq: u.evidence_seqs[0], to_seq: u.evidence_seqs[u.evidence_seqs.length - 1],
           kind: u.kind, text: u.text, evidence: u.evidence_seqs.map((seq) => ({ session_id: sessionId, seq })), created_by: CREATED_BY, status: "proposed",
         });
         res.updates_proposed++;
+        const record_title = u.target.record_id ? byId.get(u.target.record_id)?.record.title ?? "" : u.target.new_title!;
+        res.proposed.push({ id: added.id, record_id, record_title, kind: u.kind, text: u.text, confidence: u.confidence, evidence_seqs: u.evidence_seqs });
       } catch (e: any) {
         reject(u, `apply failed: ${String(e?.message ?? e).slice(0, 200)}`);
       }

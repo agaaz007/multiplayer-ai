@@ -28,7 +28,7 @@ import { DEFAULT_DATA_TOOLS } from "./capture-tools.js";
  * pilot can count how often the nudge was ignored.
  */
 
-export type EntryKind = "query" | "record" | "skip" | "search" | "nudge" | "unresolved" | "compact" | "end";
+export type EntryKind = "query" | "decision" | "record" | "skip" | "search" | "nudge" | "unresolved" | "compact" | "end";
 
 export interface JournalEntry {
   at: string;
@@ -40,6 +40,8 @@ export interface JournalEntry {
   evidence_ids?: string[];
   capture_status?: CaptureAck["status"];
   input_complete?: boolean;
+  /** decision entries: the work record the classifier proposed the decision on */
+  record_title?: string;
 }
 
 export interface CaptureCoverage { session_id: string; evidence_ids: string[] }
@@ -169,7 +171,7 @@ const queryIdentity = (e: JournalEntry): string => e.evidence_id ?? evidenceId(u
 function obligations(j: Journal): { query: JournalEntry; status: CaptureAck["status"] | "unresolved" }[] {
   const queries = new Map<string, JournalEntry>(), states = new Map<string, CaptureAck["status"]>();
   for (const entry of j.entries) {
-    if (entry.kind === "query") { const id = queryIdentity(entry); queries.set(id, { ...entry, evidence_id: id }); }
+    if (entry.kind === "query" || entry.kind === "decision") { const id = queryIdentity(entry); queries.set(id, { ...entry, evidence_id: id }); }
     else if ((entry.kind === "record" || entry.kind === "skip") && entry.capture_status) {
       for (const id of entry.evidence_ids ?? []) if (queries.has(id)) states.set(id, entry.capture_status);
     }
