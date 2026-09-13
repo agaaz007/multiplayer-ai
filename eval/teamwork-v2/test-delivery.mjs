@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import {deliver} from './session-driver.mjs';
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'teamwork-delivery-'));
 try {
@@ -10,6 +11,7 @@ try {
   const cfg={workspace,output,track:'engineering',started:100,deadline:200};
   const receipt=deliver(cfg,{conclusion:'ready'},()=>150);
   assert.equal(receipt.memory_write_required,false);assert.equal(receipt.elapsed_ms,50);
+  assert.equal(receipt.answer_file_sha256,crypto.createHash('sha256').update(fs.readFileSync(path.join(output,'submission/answer.json'))).digest('hex'));
   fs.writeFileSync(path.join(workspace,'app.py'),'later handoff edit');
   assert.equal(fs.readFileSync(path.join(output,'submission/tree/app.py'),'utf8'),'submitted version');
   assert.throws(()=>deliver(cfg,{conclusion:'replace'},()=>160),/already delivered/);
