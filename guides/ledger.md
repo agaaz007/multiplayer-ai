@@ -242,7 +242,7 @@ At session start the brief lists teammates' **Open threads** for the last 48 hou
 | `ledger_thread_note` | leave a mid-task note for whoever continues: a constraint learned, a next step, a dead end |
 | `ledger_release` | release your claim when you stop, so a teammate need not wait for lease expiry |
 
-**Work records.** A thread is one session's worktree. A **record** is one piece of work, accumulated across sessions and teammates: its state (decisions, blockers, next, progress, hypotheses, contradictions), with every line resting on exact events. The brief lists **Open work (records)** and **Unassigned work**. A classifier proposes links and state updates after each turn; everything it writes is `suggested` or `PROPOSED` until a person or their agent confirms it. **Never treat a PROPOSED line as decided.**
+**Work records.** A thread is one session's worktree. A **record** is one piece of work, accumulated across sessions and teammates: its state (decisions, blockers, next, progress, hypotheses, contradictions), with every line resting on exact events. The brief lists **Open work (records)** and **Unassigned work**. A classifier proposes links and state updates after each turn, for every session, including work outside any git repo (analysis, writing, planning); everything it writes is `suggested` or `PROPOSED` until a person or their agent confirms it. **Never treat a PROPOSED line as decided.**
 
 | tool | when |
 |---|---|
@@ -266,7 +266,7 @@ In Claude Code and in Codex (CLI and desktop app), five hooks make the loop dete
 
 - **SessionStart:** the brief is injected. Unresolved query IDs and draft-covered evidence awaiting review are shown separately after resume or compaction.
 - **PostToolUse:** supported native and wrapped analytics calls create stable evidence IDs in a local journal. Static wrapper inspection never evaluates code; dynamic arguments and aggregate results remain labelled unresolved. The continuity helper retains permitted full query/parameter inputs as artifacts with hashes, independently of short display previews. Redacted, oversize, missing or undelivered inputs do not count as complete executable evidence.
-- **Stop:** unresolved evidence IDs trigger one reminder per unchanged batch. Save or dismiss only the IDs actually covered. A successful save without coverage remains a valid object but clears no query obligation.
+- **Stop:** unresolved evidence IDs trigger one reminder per unchanged batch. Save or dismiss only the IDs actually covered. A successful save without coverage remains a valid object but clears no query obligation. `d:` IDs are decisions the classifier found in the conversation itself, where a person chose a direction without any data query: record one with `ledger_record_decision` if the person decided it, or skip it with the reason (not decided, or already recorded).
 - **PreCompact:** unresolved query IDs are shown again while method and assumptions are still in context. The next session start also names pending review.
 - **SessionEnd:** unresolved evidence can start fallback extraction. Reconciliation processes explicit evidence batches, including new queries after a session resumes. A fallback draft only covers the IDs it names and remains pending review. Unmatched evidence remains owed; an unrelated draft does not advance past it. Quiet sessions are also eligible after the configured reconciliation delay.
 

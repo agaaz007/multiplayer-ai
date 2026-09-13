@@ -11,7 +11,8 @@ import * as S from "../continuity/store.js";
 import { spoolAppend, spoolPending, spoolAck } from "./spool.js";
 import { readBinding, takeSignal, readIndex, appendLocalNotifications } from "./signals.js";
 import { redactText } from "../continuity/redact.js";
-import { classifySession, classifyAllowed } from "../continuity/classify.js";
+import { classifySession, classifyAllowed, unclassifiedCount } from "../continuity/classify.js";
+import { addDecisionObligations } from "../hooks.js";
 import { autoBindEligible, forbiddenSnapshotRoot, threadTitleFor, transcriptRoots } from "../continuity/safety.js";
 import { writeHeartbeat, withDeadline, type HelperHeartbeat } from "./heartbeat.js";
 const putArtifact = S.putArtifact;
@@ -65,6 +66,8 @@ export interface SessState {
   lastClassifyAt?: number;
   /** a classification is running detached for this session; never start a second one */
   classifyInFlight?: boolean;
+  /** when a session without a thread started waiting to end for a classification slot (bounded by CLASSIFY_HOLD_MAX_MS) */
+  classifyHoldSince?: number;
 }
 
 export interface HelperOpts {
@@ -223,10 +226,20 @@ async function structuredState(pool: pg.Pool, sessionId: string, threadId: strin
  * (spec §13a). Gated by config/env and a per-session rate limit; contained by its
  * own try/catch so a model failure never touches capture or checkpoints.
  */
-function classifyAfterTurn(cfg: Config, pool: pg.Pool, sid: string, s: SessState, now: Date, sum: PassSummary, log: (m: string) => void): void {
+/** Detached classifications running at once across sessions; more wait for a later pass, so a burst of sessions going quiet cannot start dozens of model calls. */
+export const MAX_CONCURRENT_CLASSIFY = 2;
+/** A session without a thread waits at most this long to end while its unclassified tail waits for the rate limit or a free slot. */
+export const CLASSIFY_HOLD_MAX_MS = 10 * 60_000;
+/** Decisions the classifier proposes below this confidence stay PROPOSED on their record but do not become checkpoint prompts. */
+export const DECISION_PROMPT_MIN_CONFIDENCE = 0.6;
+
+type ClassifyStart = "started" | "disabled" | "rate_limited" | "in_flight" | "busy";
+
+function classifyAfterTurn(cfg: Config, pool: pg.Pool, sid: string, s: SessState, now: Date, sum: PassSummary, log: (m: string) => void): ClassifyStart {
   const gate = classifyAllowed(cfg, { now: now.getTime(), lastClassifyAt: s.lastClassifyAt });
-  if (!gate.ok) return;
-  if (classifyInFlight.has(sid)) return; // a model call is still running for this session
+  if (!gate.ok) return gate.reason.startsWith("rate limited") ? "rate_limited" : "disabled";
+  if (classifyInFlight.has(sid)) return "in_flight"; // a model call is still running for this session
+  if (classifyInFlight.size >= MAX_CONCURRENT_CLASSIFY) return "busy";
   s.lastClassifyAt = now.getTime();
   s.classifyInFlight = true;
   sum.classified++; // counts starts; the outcome is logged when the detached call returns
@@ -235,10 +248,18 @@ function classifyAfterTurn(cfg: Config, pool: pg.Pool, sid: string, s: SessState
       if (!r.model_ok) { log(`classify ${sid.slice(0, 8)}: ${r.error}`); return; }
       if (!r.events_considered) return;
       log(`classify ${sid.slice(0, 8)}: ${r.events_considered} events → ${r.assignments_applied} span(s) linked, ${r.records_created} new record(s), ${r.updates_proposed} update(s) proposed, ${r.unassigned.length} unassigned${r.rejected.length ? `, ${r.rejected.length} rejected` : ""}`);
+      // decisions reached in conversation call no data tool; ask about them at the session's next checkpoint
+      const decisions = r.proposed.filter((u) => u.kind === "decision" && u.confidence >= DECISION_PROMPT_MIN_CONFIDENCE);
+      if (!decisions.length || s.sidechain) return;
+      try {
+        const added = addDecisionObligations(sid, decisions.map((u) => ({ update_id: u.id, record_title: u.record_title, text: u.text })), { now });
+        if (added) log(`classify ${sid.slice(0, 8)}: ${added} decision(s) from the conversation queued for the next checkpoint`);
+      } catch (e: any) { log(`decision prompts for ${sid.slice(0, 8)} not queued: ${String(e?.message ?? e).slice(0, 160)}`); }
     })
     .catch((e: any) => log(`classify ${sid.slice(0, 8)} failed: ${String(e?.message ?? e).slice(0, 200)}`))
     .finally(() => { classifyInFlight.delete(sid); s.classifyInFlight = false; });
   classifyInFlight.set(sid, p);
+  return "started";
 }
 
 /** Wait up to `ms` for detached classifications (tests; a daemon pass passes 0 and moves on). */
@@ -491,10 +512,24 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
         }
       }
 
+      // ---- work state for sessions without a thread ----
+      // Work outside a git repo (a PM's analysis, writing, planning) and unbound repo sessions have no checkpoint to classify
+      // after, so they classify at each turn end and once more when they end or go quiet (2026-09-14: 69 such sessions had
+      // produced no work record). A session does not end while its unclassified tail waits for the rate limit or a free slot.
+      let holdForClassify = false;
+      if (!routing.thread_id && !s.sidechain && !s.ended && (cpSignal || quiet) && (await unclassifiedCount(pool, sid)) > 0) {
+        const start = classifyAfterTurn(cfg, pool, sid, s, now, sum, log);
+        if ((start === "rate_limited" || start === "busy" || start === "in_flight") && (endSignal || quiet)) {
+          s.classifyHoldSince ??= now.getTime();
+          holdForClassify = now.getTime() - s.classifyHoldSince < CLASSIFY_HOLD_MAX_MS;
+        }
+      }
+      if (!holdForClassify) s.classifyHoldSince = undefined;
+
       // ---- heartbeat / end ----
       // An unbound session that goes quiet leaves the active set too. It used to stay tracked forever and was re-processed
       // every pass; new transcript lines un-end it (see the tail step).
-      if (!s.threadId && !s.ended && (endSignal || quiet)) {
+      if (!s.threadId && !s.ended && (endSignal || quiet) && !holdForClassify) {
         await S.updateSession(pool, sid, { ended_at: now });
         s.ended = true;
         log(`session ${sid.slice(0, 8)} ${endSignal ? "ended" : "went quiet"} unbound${s.unbound_reason ? ` (${s.unbound_reason})` : ""}`);

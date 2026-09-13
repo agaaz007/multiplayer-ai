@@ -550,6 +550,8 @@ async function workRecordCommand(args: string[]): Promise<void> {
     if (!pos[1] || !reason) throw new Error(usage);
     const u = await rejectStateUpdate(pool, pos[1], cfg.author, reason);
     if (!u) throw new Error(`not found: ${pos[1]}`);
+    // a rejected proposal no longer needs the checkpoint's decision prompt in the session it came from
+    if (u.session_id) { try { acknowledgeLocalCapture({ schema: "ledger-capture/v1", action: "skip", status: "dismissed", reason: `proposal rejected: ${reason.trim()}`, coverage: [{ session_id: u.session_id, evidence_ids: [`d:${u.id}`] }] }); } catch { /* no local prompt for it */ } }
     console.log(`rejected ${u.kind} update ${u.id}: ${reason}`);
   } else throw new Error(usage);
   await closePools();

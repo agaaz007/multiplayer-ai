@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { execFile } from "node:child_process";
-import { acknowledgeCapture, captureEvidenceIds, captureStats, debt, handleHook, loadJournal, reviewDebt, saveJournal, sessionStartContext, validateCaptureCoverage, type CaptureAck } from "./hooks.js";
+import { acknowledgeCapture, addDecisionObligations, captureEvidenceIds, captureStats, debt, handleHook, loadJournal, reviewDebt, saveJournal, sessionStartContext, validateCaptureCoverage, type CaptureAck } from "./hooks.js";
 import { dataToolCalls, isDataTool, normalizeToolCalls, savedRecord } from "./capture-tools.js";
 import { evidenceText, parseTranscript, type Evidence } from "./transcript.js";
 import { extractionDebt, findCandidates, reconcile } from "./extract.js";
@@ -220,5 +220,26 @@ assert.deepEqual(debt(loadJournal(fallbackSid, dir)).map(q => q.evidence_id), ["
 assert.deepEqual(extractionDebt(loadJournal(fallbackSid, dir)).map(q => q.evidence_id), ["q:fourth"], "partial fallback cannot advance past uncovered work");
 assert.ok(findCandidates({ dir, quietMs: 0 }).some(candidate => candidate.journal.session_id === fallbackSid && candidate.evidence[0].evidence_id === "q:fourth"));
 ok("partial fallback coverage leaves unmatched evidence eligible for the next automatic batch");
+
+// decisions the classifier found in conversation are obligations beside queries
+{
+  const dsid = "decision-fixture", uid = "11111111-2222-4333-8444-555555555555", did = `d:${uid}`;
+  const item = { update_id: uid, record_title: "Pricing analysis", text: "Keep the annual plan until the test reads out" };
+  assert.equal(addDecisionObligations(dsid, [item], { dir, now: now() }), 1);
+  assert.equal(addDecisionObligations(dsid, [item], { dir, now: now() }), 0, "the same proposal is queued once");
+  assert.deepEqual(debt(loadJournal(dsid, dir)).map((e) => [e.kind, e.evidence_id]), [["decision", did]]);
+  assert.deepEqual(extractionDebt(loadJournal(dsid, dir), true), [], "decision prompts never go to the transcript fallback");
+  assert.deepEqual(validateCaptureCoverage(coverage([did], dsid), dir), coverage([did], dsid));
+  assert.equal(handleHook("SessionEnd", { session_id: dsid }, { dir, now: now() }).reconcile, undefined, "decision-only debt does not start the fallback");
+  const blocked = JSON.parse(handleHook("Stop", { session_id: dsid }, { dir, now: now() }).stdout!);
+  assert.equal(blocked.decision, "block");
+  assert.ok(blocked.reason.startsWith(`Session ${dsid}\nLedger: 1 decision found in this conversation still lack an explicitly scoped capture acknowledgment:\n- ${did} · `), blocked.reason);
+  assert.ok(blocked.reason.includes(`decision proposed on record "Pricing analysis": Keep the annual plan until the test reads out`) && blocked.reason.includes("For a d: item"), blocked.reason);
+  assert.ok(sessionStartContext(loadJournal(dsid, dir)).includes("1 decision found in this conversation have no explicitly scoped record. Context may have been compacted; they are still known"));
+  const decAck: CaptureAck = { schema: "ledger-capture/v1", action: "record", status: "recorded", record_id: "dec-20260910-keep-annual-plan-aaaa", coverage: coverage([did], dsid) };
+  hook("mcp__ledger__ledger_record_decision", { title: "Keep the annual plan", capture_coverage: decAck.coverage }, receipt(decAck), "decision-record", dsid);
+  assert.deepEqual(debt(loadJournal(dsid, dir)), [], "a scoped Ledger decision settles it");
+  ok("decisions found in conversation queue once as d: obligations, block Stop with their record and text, stay out of the transcript fallback, and settle with a scoped decision record");
+}
 
 console.log(`Capture regression suite: ${checks} scenarios passed. Temporary fixtures: ${tmp}`);

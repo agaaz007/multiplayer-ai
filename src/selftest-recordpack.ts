@@ -547,6 +547,18 @@ const call = async (name: string, args: Record<string, unknown>) => {
   ok('full-history count and true tail, earlier pending operation, accepted constraint under proposal flood');
 }
 
+// ---------- rejecting a proposed decision settles its checkpoint prompt ----------
+{
+  const H = await import("./hooks.js");
+  const u = await R.addStateUpdate(pool, { record_id: recAttr.id, session_id: sidA, from_seq: 1, to_seq: 1, kind: "decision", text: "Report only ClickHouse numbers in the readout", evidence: [{ session_id: sidA, seq: 1 }], created_by: "classifier" });
+  H.addDecisionObligations(sidA, [{ update_id: u.id, record_title: "Attribution investigation", text: u.text }]);
+  assert.deepEqual(H.debt(H.loadJournal(sidA)).map((e) => e.evidence_id), [`d:${u.id}`]);
+  const res = await call("ledger_record_update", { record_id: recAttr.id, action: "reject", update_id: u.id, reason: "nobody decided this; it was a suggestion" });
+  assert.ok(res.startsWith(`Rejected decision update ${u.id}`), res);
+  assert.deepEqual(H.debt(H.loadJournal(sidA)), [], "the rejection settled the prompt in the session it came from");
+  ok("rejecting a proposed decision through ledger_record_update settles its d: checkpoint prompt");
+}
+
 // ---------- decisions in force: Ledger ids saved inside a record's spans; ledger_refs through MCP ----------
 {
   const sidS = "agaaz-claude-saves-1";
