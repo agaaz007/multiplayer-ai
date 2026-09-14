@@ -570,8 +570,9 @@ def prepare(source_root, out, sessions, arms=ARMS, authorize=None, runtime=None,
         sroot = roots[sid]
         frozen_inputs += [sroot / 'native-config.json', sroot / 'stages' / STAGE / 'controller' / 'prompt.txt',
                           sroot / 'stages' / STAGE / 'controller' / 'transport.json']
-        frozen_inputs += [p for p in (sroot / 'native-guide.md', sroot / 'control-guide.md', sroot / 'stages' / STAGE / 'controller' / 'native-profile.json',
-                                      sroot / 'ledger-native-owner.json', sroot / 'native-state.json') if p.exists()]
+        # native-state.json / ledger-native-owner.json are NOT frozen: native-lifecycle stage appends stage B to both.
+        frozen_inputs += [p for p in (sroot / 'native-guide.md', sroot / 'control-guide.md',
+                                      sroot / 'stages' / STAGE / 'controller' / 'native-profile.json') if p.exists()]
     frozen = freeze_files(frozen_inputs)
     dump(out / 'frozen-files.json', frozen, exclusive=True)
     frozen_sha = digest(out / 'frozen-files.json')
