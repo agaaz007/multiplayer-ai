@@ -13,6 +13,7 @@
 **Effort:** S
 **Priority:** P1
 **Depends on:** None
+**Status (2026-09-15):** Tooling done, reset not yet done. No Neon API credential exists on this machine, so the reset happens in the Neon console; then `ledger continuity rotate <url>` on each machine verifies the URL, writes config.json (600) and restarts the helper. The password also appeared in a tool output on 2026-09-15, so rotate before the handoff test.
 
 ## Infrastructure
 
@@ -27,6 +28,7 @@
 **Effort:** M
 **Priority:** P1
 **Depends on:** None
+**Status (2026-09-15):** Done on Agaaz's machine. `ledger deploy` stages a release under `~/.ledger/bin/releases/<id>` and installs from it; installers refuse a worktree `cli.js`; `ledger deploy --status` shows every entry point ✓ release. Still open: run `node dist/cli.js deploy` on Rachit's machine (needs this branch pulled there) and re-trust the Codex hooks on both machines.
 
 ### Postgres backup and restore drill for the continuity store
 
