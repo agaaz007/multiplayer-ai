@@ -300,6 +300,7 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
           hours: z.number().int().min(1).max(720).default(72),
           limit: z.number().int().min(1).max(50).default(10),
         },
+        annotations: readOnly,
       },
       async ({ cwd, author, include_own, hours, limit }) => {
         const root = cwd ? repoRoot(cwd) : null;
