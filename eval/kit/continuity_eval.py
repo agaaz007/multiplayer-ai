@@ -57,6 +57,68 @@ def same_answer(value, check):
     return norm(value) in {norm(a) for a in alternates}
 
 
+FILLER = [
+    "Reviewed last week's Play Console crash list; nothing in it touches the paywall.",
+    "Renamed the onboarding illustration assets to match the new naming convention.",
+    "Answered the support thread about renewal receipts; no product change needed.",
+    "Checked the CI cache hit rate after the runner upgrade; it is back to normal.",
+    "Drafted the weekly update for the astrologer partner team; it contains no decisions.",
+    "Removed two feature flags that finished rolling out in June.",
+    "Confirmed the Hindi copy review is scheduled for next sprint, not this one.",
+    "Re-ran the nightly export job that failed on a transient storage timeout.",
+]
+
+
+def limits_events(noise_per_gap=2):
+    """D04's history: three planted facts, each separated from the question that needs it.
+
+    What each plant tests, and the failure it is designed to catch:
+
+      cvr-first / cvr-correct  A number and, later, its correction. Both stay in history. A store that
+                               ranks by similarity to "trial-start CVR" surfaces both and has no notion
+                               of which one is current; the failure is answering 12.4.
+      options / reject         One of two named options is dropped, with its reason, in the OTHER session.
+                               The failure is proposing the price cut, because the text discussing it
+                               matches the query better than the sentence retiring it.
+      filter                   The number is Android-only. This is said once, as a mechanical query
+                               detail, three turns before the number it qualifies and in the earlier
+                               session; nobody ever calls it an assumption or a caveat. The failure is
+                               reporting the CVR as if it described all users.
+
+    Unrelated turns sit in every gap so the successor cannot recover a fact by reading a short history
+    end to end. The gap size is a knob (--limits-noise): raise it to separate retrieval from recall.
+    """
+    out = []
+    filled = [0]
+    A, B = ("session-a", "rachit"), ("session-b", "agaaz")
+
+    def plant(id_, text, who):
+        session, author = who
+        out.append(event(id_, "trial-cvr", text, author, session))
+
+    def gap(who):
+        session, author = who
+        for _ in range(noise_per_gap):
+            i = filled[0]
+            filled[0] += 1
+            out.append(event("fill-%02d" % i, "unrelated", FILLER[i % len(FILLER)], author, session))
+
+    plant("cvr-first", "First pass on the marriage-intent paywall: trial-start CVR is 12.4 percent.", A)
+    gap(A)
+    plant("filter", "The pull has platform = android in the where clause, because the iOS export was "
+                    "still backfilling when I ran it.", A)
+    gap(A)
+    plant("options", "Two ways to lift it are on the table: cut the price to 149, or extend the trial "
+                     "to 14 days.", A)
+    plant("reject", "Rachit rejected the price cut: the India store price is locked for the quarter. "
+                    "We go with the 14 day trial.", B)
+    gap(B)
+    plant("cvr-correct", "Correction: 12.4 percent was wrong. It counted a user twice when they saw the "
+                         "paywall twice. Deduplicated by user, trial-start CVR is 9.8 percent.", B)
+    plant("recent", "Next step is to size the 14 day trial experiment from that CVR.", B)
+    return out
+
+
 def cases(noise_events=1000, minimum_origin_tokens=100000, maximum_boot_tokens=12000, limits_noise=2):
     """Public inputs and private assertions are separated by prepare()."""
     items = []
