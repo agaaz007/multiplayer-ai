@@ -447,7 +447,7 @@ assert.ok(!settings.hooks.SessionStart.some((e: any) => e.hooks[0].command.start
 // jsonb cannot hold U+0000: the escape is replaced, an escaped backslash before it is respected
 {
   const { jsonbSafe } = await import("./continuity/store.js");
-  assert.equal(jsonbSafe(JSON.stringify({ t: "a\u0000b" })), JSON.stringify({ t: "a\ufffdb" }), "NUL escape replaced");
+  assert.equal(JSON.parse(jsonbSafe(JSON.stringify({ t: "a\u0000b" }))).t, "a\ufffdb", "NUL escape replaced");
   assert.equal(jsonbSafe(JSON.stringify({ t: "literal \\u0000 text" })), JSON.stringify({ t: "literal \\u0000 text" }), "escaped backslash + u0000 is literal text, kept");
   assert.equal(JSON.parse(jsonbSafe(JSON.stringify({ t: "\\\u0000" }))).t, "\\\ufffd", "backslash followed by NUL: NUL replaced, backslash kept");
 }
