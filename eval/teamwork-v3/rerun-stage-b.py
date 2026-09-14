@@ -565,6 +565,10 @@ def prepare(source_root, out, sessions, arms=ARMS, authorize=None, runtime=None,
                                                 'native-ledger-capture.mjs', 'native-classifier.mjs', 'native-http-proxy.mjs')]
     frozen_inputs += [V2 / name for name in ('budget-gate.mjs', 'grade_engineering_contract_v2.py', 'provider_sim.py')]
     frozen_inputs += [runtime, node, source['pack'] / 'manifest.json', source['a_tree'], Path(driver_argv[0])]
+    # Files the session driver imports/reads at launch from the source native-config (Ledger arm only).
+    if 'ledger' in arms:
+        frozen_inputs += [Path(native_config[key]) for key in ('budget_gate_module', 'http_proxy_module', 'ca_file', 'readiness_receipt')
+                          if native_config.get(key) and Path(native_config[key]).is_file()]
     frozen_inputs += [Path(x) for x in driver_argv[1:] if Path(x).is_file()]
     for sid in order:
         sroot = roots[sid]
