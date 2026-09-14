@@ -24,7 +24,9 @@ import { openThreadsText } from "./continuity/brief.js";
 import { buildRecordPack, listRecordSummaries, recordLine, unassignedLine } from "./continuity/recordpack.js";
 import { addStateUpdate, confirmStateUpdate, createRecord, getRecord, linkSpan, rejectStateUpdate, unassignedSpans, type RecordKind, type RecordStatus, type UpdateKind } from "./continuity/records.js";
 import { helperOnce, helperLoop, loadState } from "./helper/daemon.js";
-import { installHelper, helperStatus } from "./install.js";
+import { installHelper, helperStatus, installSource } from "./install.js";
+import { stageRelease, activateRelease, installFromRelease, deployStatus, formatDeployStatus, listReleases } from "./deploy.js";
+import { readHeartbeat } from "./helper/heartbeat.js";
 
 const USAGE = `ledger — shared definitions, findings, changes, decisions for your agents
 
@@ -32,6 +34,8 @@ const USAGE = `ledger — shared definitions, findings, changes, decisions for y
   ledger use <dir>  [--author NAME]      point this machine at an existing ledger clone
   ledger install claude|codex|all        wire the MCP server, hooks, guide, and reconciler into your agent
   ledger install guides                 update both agents' guides without rewiring MCP or hooks
+  ledger deploy [--no-install]           copy this build to ~/.ledger/bin/releases/<version> and install hooks, MCP and helper from there
+  ledger deploy --status                 which cli.js every hook, MCP registration and launchd job runs right now
   ledger mcp                             run the MCP server (stdio)
   ledger mcp --http --scratch [--port N] serve MCP over HTTP from a scratch ledger at /mcp/$LEDGER_HTTP_SECRET (ChatGPT test endpoint; no login)
   ledger brief [--days N] [--tags a,b]   what an agent sees at session start
@@ -52,6 +56,7 @@ const USAGE = `ledger — shared definitions, findings, changes, decisions for y
 
   execution continuity (needs continuity.database_url in ~/.ledger/config.json):
   ledger continuity migrate|status       create the cont_* tables in the shared Postgres / show counts
+  ledger continuity rotate <postgres-url> verify the new database URL, write it to config.json (mode 600), restart the helper
   ledger helper once|start|status|install
                                          capture helper: one pass, run forever, show state, install the launchd agent
   ledger threads [--all] [--hours N]     open work threads (this repo by default)
@@ -149,6 +154,27 @@ async function main() {
         const author = flag(args, "--author") ?? loadAuthorFallback();
         initLedger(dir, author); // idempotent: fills in missing dirs, writes config
         console.log(`Using ledger at ${dir} (author: ${author})`);
+        return;
+      }
+      case "deploy": {
+        if (args.includes("--status")) {
+          const releases = listReleases();
+          console.log(`releases in ~/.ledger/bin/releases: ${releases.length ? releases.join(", ") : "(none)"}`);
+          console.log(formatDeployStatus(deployStatus()).join("\n"));
+          return;
+        }
+        const here = installSource();
+        console.log(`source: ${here.cli}${here.worktree ? ` (git worktree ${here.worktree})` : ""}`);
+        const info = stageRelease((l) => console.log(l));
+        console.log(`staged release ${info.id}\n  ${info.dir}`);
+        for (const p of activateRelease(info, (l) => console.log(l))) console.log(`  ${p}`);
+        if (!args.includes("--no-install")) installFromRelease(info, (l) => console.log(l));
+        else console.log(`skipped install (--no-install); run: node ${info.dir}/dist/cli.js install all && node ${info.dir}/dist/cli.js helper install`);
+        console.log("");
+        console.log(formatDeployStatus(deployStatus()).join("\n"));
+        const releases = listReleases();
+        if (releases.length > 3) console.log(`\n${releases.length} releases kept under ${path.dirname(info.dir)}; older ones are safe to delete once nothing references them (ledger deploy --status).`);
+        console.log("\nrunning MCP servers restart with their harness sessions; the helper and reconciler were restarted by install.");
         return;
       }
       case "install": {
@@ -359,7 +385,37 @@ async function main() {
           const t = await tableList(pool);
           const counts = await Promise.all(t.map(async (n) => `${n}=${(await pool.query(`select count(*)::int as c from ${n}`)).rows[0].c}`));
           console.log(`db ok · author ${cfg.author} · machine ${cfg.continuity!.machine}\n${counts.join("  ")}`);
-        } else throw new Error("usage: ledger continuity migrate|status");
+        } else if (sub === "rotate") {
+          // Neon (or any Postgres) password rotation: prove the new URL works before anything is
+          // written, never print it, then restart the launchd helper so the running process
+          // and the file agree. The old password stays valid until you revoke it upstream.
+          const url = args[1];
+          if (!url || !/^postgres(ql)?:\/\//.test(url)) throw new Error("usage: ledger continuity rotate <postgresql://…>  (the new URL; it is not echoed)");
+          const { default: pg } = await import("pg");
+          const probe = new pg.Client({ connectionString: url, connectionTimeoutMillis: 15_000 });
+          await probe.connect();
+          try {
+            const r = await probe.query("select current_user as u, count(*)::int as threads from cont_threads");
+            console.log(`new URL ok · role ${r.rows[0].u} · cont_threads=${r.rows[0].threads}`);
+          } finally { await probe.end(); }
+          const next = { ...cfg, continuity: { ...cfg.continuity!, database_url: url } };
+          saveConfig(next);
+          fs.chmodSync(path.join(ledgerHome(), "config.json"), 0o600);
+          console.log(`wrote ${path.join(ledgerHome(), "config.json")} (mode 600)`);
+          const before = readHeartbeat();
+          if (process.platform === "darwin") {
+            const { spawnSync } = await import("node:child_process");
+            const uid = process.getuid?.() ?? 0;
+            const r = spawnSync("launchctl", ["kickstart", "-k", `gui/${uid}/com.tranzmit.ledger.helper`], { encoding: "utf8", timeout: 20_000 });
+            if (r.status !== 0) console.log(`helper restart failed (${(r.stderr || "").trim()}); run: launchctl kickstart -k gui/${uid}/com.tranzmit.ledger.helper`);
+            else {
+              let hb = readHeartbeat();
+              for (let i = 0; i < 40 && (!hb || hb.pid === before?.pid || !hb.started_at || hb.started_at === before?.started_at); i++) { await new Promise((res) => setTimeout(res, 500)); hb = readHeartbeat(); }
+              console.log(hb && hb.pid !== before?.pid ? `helper restarted · pid ${hb.pid} · ${hb.cli}` : "helper restart requested; no new heartbeat yet (check: ledger helper status)");
+            }
+          } else console.log("restart the helper service so it picks up the new URL");
+          console.log("MCP servers inside open Claude/Codex sessions keep the old connection until those sessions restart.");
+        } else throw new Error("usage: ledger continuity migrate|status|rotate <url>");
         await closePools();
         return;
       }
