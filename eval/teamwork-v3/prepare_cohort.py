@@ -17,7 +17,7 @@ RETAINED_PER_SEQUENCE=GIB//2
 PEAK_PER_LANE=GIB//4
 SHARED_OVERHEAD=GIB//2
 MARGIN=2*GIB
-BATCHES={'all':ALL_ARMS,'six-arm':ALL_ARMS,'products':PRODUCT_ARMS,'controls':CONTROL_ARMS}
+BATCHES={'all':ALL_ARMS,'six-arm':ALL_ARMS,'products':PRODUCT_ARMS,'controls':CONTROL_ARMS,'ledger-vs-controls':('ledger',)+CONTROL_ARMS}
 DEFAULT_AUTHORIZATION='Decision 7A (2026-09-13 review): compare the four native products against the control-git and handoff-note baseline controls; preserve the original shared USD30 ceiling.'
 SIX_ARM_SCORED_BASIS='Six-arm scored cohort aggregate: 12 x 512 MiB retained + 6 x 256 MiB peak + 512 MiB shared + 2 GiB margin = 10 GiB.'
 
@@ -89,7 +89,7 @@ def build(out,budget,arms='all',authorization=DEFAULT_AUTHORIZATION):
 
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--out',required=True);p.add_argument('--budget',required=True)
-    p.add_argument('--arms',choices=sorted(BATCHES),default='all',help='six-arm cohort (all) or one batch: products, controls')
+    p.add_argument('--arms',choices=sorted(BATCHES),default='all',help='six-arm cohort (all) or one batch: products, controls, ledger-vs-controls')
     p.add_argument('--authorization',default=DEFAULT_AUTHORIZATION)
     a=p.parse_args();root=build(a.out,a.budget,a.arms,a.authorization);print(root)
     for name in ('readiness','scored'):print_summary(sequence.load(root/name/'preparation.json')['disk_plan'],name+': ')
