@@ -36,11 +36,28 @@ def event(id_, topic, text, author="rachit", session="session-a"):
     return dict(id=id_, topic=topic, text=text, author=author, session=session)
 
 
-def answer_check(key, value, sources, critical=True):
-    return dict(type="answer", key=key, expected=value, sources=sources, critical=critical)
+def answer_check(key, value, sources, critical=True, accept=None):
+    """`accept` lists further spellings of the SAME fact (D04). It never widens the fact itself:
+    a phrasing difference must not be scored as a memory failure, and a different fact still fails."""
+    check = dict(type="answer", key=key, expected=value, sources=sources, critical=critical)
+    if accept:
+        check["accept"] = list(accept)
+    return check
 
 
-def cases(noise_events=1000, minimum_origin_tokens=100000, maximum_boot_tokens=12000):
+def same_answer(value, check):
+    """Exact equality, or — only when the check lists `accept` — equality after the collector's own
+    identifier normalization (lowercase, collapsed whitespace, spaces to underscores)."""
+    if value == check["expected"]:
+        return True
+    alternates = check.get("accept")
+    if not alternates or not isinstance(value, str):
+        return False
+    norm = lambda s: "_".join(str(s).strip().lower().split())
+    return norm(value) in {norm(a) for a in alternates}
+
+
+def cases(noise_events=1000, minimum_origin_tokens=100000, maximum_boot_tokens=12000, limits_noise=2):
     """Public inputs and private assertions are separated by prepare()."""
     items = []
 
@@ -77,6 +94,30 @@ def cases(noise_events=1000, minimum_origin_tokens=100000, maximum_boot_tokens=1
         [answer_check("accepted_join_rate", None, ["hyp-a", "hyp-b"]),
          answer_check("status", "unresolved", ["hyp-a", "hyp-b"]),
          answer_check("next_check", "dataset_equivalence", ["hyp-b"])])
+
+    add("D04", 1, "A corrected number, a rejected option, and an assumption nobody states",
+        limits_events(limits_noise),
+        "Continue the marriage-intent paywall work and size the 14 day trial experiment. "
+        "Report the trial-start CVR percentage you would size it from, which of the two considered "
+        "options the team rejected and the reason it was rejected, and any condition attached to that "
+        "CVR that the team never wrote down as a caveat.",
+        ["Type the events in order into one real origin session per session label; do not summarize them.",
+         "Both the first number and its correction stay in history; nothing is deleted or edited.",
+         "The population filter is stated once, as a mechanical query detail, in the earlier session only.",
+         "Reset the successor; it gets its prompt and the condition's own retrieval tools, never this history."],
+        [answer_check("trial_start_cvr_pct", 9.8, ["cvr-correct"]),
+         answer_check("rejected_option", "price_cut", ["reject"],
+                      accept=["price cut", "price_cut_149", "price cut to 149", "price_cut_to_149",
+                              "cut_price", "cut price", "cut price to 149", "cut_price_to_149",
+                              "149_price_cut", "price_reduction", "lower_price", "price_149"]),
+         answer_check("rejection_reason", "locked", ["reject"],
+                      accept=["price_locked", "price locked", "store_price_locked", "store price locked",
+                              "india_price_locked", "locked_price", "store_listing_locked",
+                              "price_locked_for_quarter", "locked_for_quarter", "store_listing"]),
+         answer_check("cvr_caveat", "android", ["filter"],
+                      accept=["android_only", "android only", "android_users", "android users",
+                              "platform_android", "android_platform", "android_traffic",
+                              "excludes_ios", "ios_excluded", "no_ios"])])
 
     mixed = common + [
         event("hire", "hiring", "Hiring plan: interview two infrastructure candidates next week."),
@@ -229,7 +270,7 @@ def check_one(check, case, obs, base):
         item = obs.get("answers", {}).get(check["key"], {})
         if "value" not in item:
             return "missing", "No successor answer for " + check["key"]
-        if item["value"] != check["expected"]:
+        if not same_answer(item["value"], check):
             return "fail", "Incorrect " + check["key"]
         if not set(check["sources"]).issubset(set(item.get("evidence_ids", []))):
             return "fail", "Required supporting evidence not cited"
