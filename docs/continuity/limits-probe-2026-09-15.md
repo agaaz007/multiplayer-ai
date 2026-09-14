@@ -1,8 +1,8 @@
 # D04: the limits probe — ours vs gbrain on one buried history
 
-Status as of 15 September 2026: **built and validated without models; no scored trial has run.** Every
-result below is from the fake-successor path, which exercises the plumbing and the oracle, not memory
-or model capability. Nothing here is a measurement of Ledger or GBrain.
+Status as of 15 September 2026: **one scored trial has run (`d04-live-n2`). It did not discriminate.**
+Both arms recovered all three plants. See "The first live run" below before reading anything else here
+as a comparison.
 
 ## The question
 
@@ -71,8 +71,52 @@ back to keyword/tsvector search without one. A D04 history is small and lexicall
 questions, so a keyword-only arm can look fine while the product's actual hybrid retrieval goes
 untested. Set `LEDGER_EVAL_GBRAIN_KEYWORD_ONLY=1` to run that arm deliberately and report it as such.
 
+## The first live run (`d04-live-n2`, 14 September 2026)
+
+D04 at `--noise 2` (12 fixture events), codex-to-claude, one repetition. Origin: codex/`gpt-6-astra` as
+rachit for session-a, claude-haiku-4-5 as agaaz for session-b. Successor: claude-sonnet-5 both arms.
+Claude-reported cost $0.36 total (ours $0.238, gbrain $0.123); codex usage is not priced in that figure.
+
+**As scored at the time: ours 4/4 pass, gbrain 3/4 fail on `rejection_reason`.**
+**That gbrain failure was a scoring artifact, not a memory failure.** Both arms retrieved the same
+sentence and stated the same reason; ours wrote `price_locked_for_quarter`, which happened to be in the
+`accept` list, and gbrain wrote `locked_pricing`, which happened not to be. The check now matches on the
+stem `lock` instead (see `answer_check`), and re-scoring the **same retained observations** gives
+**4/4 for both arms**. Reproduce with `eval/runs/d04-live-n2-rescored`.
+
+The rule was changed after seeing the answers. That is disclosed rather than quietly folded in: the
+as-run matrix in `eval/runs/d04-live-n2/matrix.md` still records the original verdict.
+
+On the facts, both products recovered all three plants:
+
+| Plant | ours | gbrain |
+| --- | --- | --- |
+| Corrected number | 9.8, citing the correction | 9.8, citing the correction |
+| Rejected option + reason | `price_cut` / `price_locked_for_quarter` | `price_cut` / `locked_pricing` |
+| Unstated assumption | `android_only` | `android_only` |
+
+**Why it did not discriminate: at this size there was no retrieval problem to solve.** GBrain's session
+pages are complete linear transcripts — every normalized event, in order, with full text. Its successor
+called `search` twice and `get_page` once and had the entire history in context; three tool calls, 24 s.
+Ours took a different route — `ledger_investigation` → `ledger_resume(record, inspect)` → `ledger_search`
+→ two `ledger_events` calls across both session ids; six tool calls, 32 s — but it too could see
+everything. Neither arm had to *find* anything. `--noise 2` tests the successor's reading comprehension,
+which is the weakness this document already warned about; the run confirmed it empirically.
+
+Two differences did show up, neither of them scored:
+
+- Ours volunteered the acceptance state unprompted: "All of this remains [PROPOSED], not confirmed by a
+  person — nobody has run `ledger record confirm` on these state updates." Nothing in the prompt asked.
+- GBrain's free-text `notes` independently flagged the Android-only condition as never restated as a
+  caveat, so on this history it surfaced the hidden assumption in prose as well as in the scored answer.
+
+The next run must raise `--noise` far enough that neither a session page nor a resume pack can carry the
+whole history, which is the only condition under which the three plants test retrieval rather than
+reading. Until then D04 has no comparative result.
+
 ## What this does not measure
 
+- **Retrieval, at low `--noise`.** Demonstrated above, not hypothesised.
 - **Whether a successor spontaneously suspects the assumption.** The resume prompt asks for "any
   condition attached to that CVR that the team never wrote down as a caveat". That wording avoids
   naming *which* condition, but it does tell the successor to go looking. D04 measures whether each
