@@ -21,7 +21,7 @@ const KIT = path.join(REPO_ROOT, "eval", "kit", "continuity_eval.py");
 const ADAPTER = path.join(HERE, "adapter.js");
 const COMPARE = path.join(HERE, "compare.js");
 const PY = process.env.PYTHON || "python3";
-const PHASE1 = ["D01", "D02", "D03", "R01", "R02", "E01"];
+const PHASE1 = ["D01", "D02", "D03", "D04", "R01", "R02", "E01"];
 const PHASE2 = ["E02", "C01", "L02"];
 
 let step = 0;
@@ -41,7 +41,7 @@ const obsPath = (out: string, c: string, d = "codex-to-claude", r = 1) => path.j
 const suite = path.join(tmp, "suite");
 py(["prepare", "--out", suite, "--noise-events", "50"]);
 assert.ok(fs.existsSync(path.join(suite, "public", "D01.json")) && fs.existsSync(path.join(suite, "private", "oracle.json")));
-ok(`kit prepared 12 cases into ${suite}`);
+ok(`kit prepared 13 cases into ${suite}`);
 
 function kitRun(condition: string, out: string, extraEnv: Record<string, string> = {}) {
   const adapterJson = path.join(tmp, `adapter-${path.basename(out)}.json`);
