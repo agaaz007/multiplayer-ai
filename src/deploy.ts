@@ -165,7 +165,8 @@ export function deployStatus(): DeployStatusLine[] {
   } catch { add("claude MCP (user scope)", null); }
   try {
     const toml = fs.readFileSync(path.join(home, ".codex", "config.toml"), "utf8");
-    const block = toml.match(/\[mcp_servers\.ledger\][^[]*/m)?.[0] ?? "";
+    // the block runs to the next `[section]` header at a line start; `args = [` must not end it
+    const block = toml.match(/\[mcp_servers\.ledger\][\s\S]*?(?=\n\[|\s*$)/)?.[0] ?? "";
     add("codex MCP", cliFromCommand(block.match(/"([^"]*cli\.js)"/)?.[1]));
   } catch { add("codex MCP", null); }
   return lines;
