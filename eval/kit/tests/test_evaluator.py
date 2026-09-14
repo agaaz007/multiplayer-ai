@@ -41,9 +41,46 @@ class ScorerTests(unittest.TestCase):
         obs[key] = filename
 
     def test_supported_decisions_pass(self):
-        for id_ in ("D01", "D02", "D03", "R02"):
+        for id_ in ("D01", "D02", "D03", "D04", "R02"):
             with self.subTest(id_=id_):
                 self.assertEqual(self.score(id_, self.observation(id_))["status"], "pass")
+
+    def test_superseded_number_fails(self):
+        """D04's first pass is still in history and still matches the question. Answering it fails."""
+        obs = self.observation("D04")
+        obs["answers"]["trial_start_cvr_pct"]["value"] = 12.4
+        self.assertEqual(self.score("D04", obs)["status"], "fail")
+
+    def test_unstated_assumption_must_be_surfaced(self):
+        for value in (None, "all_users", "marriage_intent"):
+            with self.subTest(value=value):
+                obs = self.observation("D04")
+                obs["answers"]["cvr_caveat"]["value"] = value
+                self.assertEqual(self.score("D04", obs)["status"], "fail")
+
+    def test_rejected_option_must_come_from_the_rejection(self):
+        """Citing only the turn that proposed both options is not evidence that one was retired."""
+        obs = self.observation("D04")
+        obs["answers"]["rejected_option"]["evidence_ids"] = ["options"]
+        self.assertEqual(self.score("D04", obs)["status"], "fail")
+
+    def test_accepted_spellings_are_the_same_answer(self):
+        for key, value in (("rejected_option", "Price cut to 149"), ("rejection_reason", "store price locked"),
+                           ("cvr_caveat", "Android only")):
+            with self.subTest(key=key):
+                obs = self.observation("D04")
+                obs["answers"][key]["value"] = value
+                self.assertEqual(self.score("D04", obs)["status"], "pass")
+
+    def test_accept_does_not_admit_a_different_fact(self):
+        obs = self.observation("D04")
+        obs["answers"]["rejected_option"]["value"] = "longer_trial_14d"
+        self.assertEqual(self.score("D04", obs)["status"], "fail")
+
+    def test_accept_absent_keeps_exact_matching(self):
+        obs = self.observation("D01")
+        obs["answers"]["animation_target"]["value"] = "Locked Insight"
+        self.assertEqual(self.score("D01", obs)["status"], "fail")
 
     def test_wrong_price_fails(self):
         obs = self.observation("D01")
