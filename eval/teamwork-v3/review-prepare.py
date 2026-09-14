@@ -170,7 +170,7 @@ def prepare(entries, out, runtime, model='gpt-5.6-sol', reasoning_effort='medium
     plan = grading.preflight(entries, cohort_scope=cohort_scope)
     plan = [r for r in plan if r[2]['track'] == 'pm']
     if len(plan) != len(arms) or {r[2]['arm'] for r in plan} != set(arms):
-        raise ValueError('the complete ' + ('three-product' if len(arms) == 3 else 'four-product') + ' PM cohort is required')
+        raise ValueError('the complete ' + grading.cohort_label(arms) + ' PM cohort is required')
     if any([s['id'] for s in row[4]['stages']] != list('ABCD') for row in plan):
         raise ValueError('all four A-D stages required for each declared PM product')
     out = Path(out).resolve()

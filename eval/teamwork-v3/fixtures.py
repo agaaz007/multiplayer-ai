@@ -8,7 +8,8 @@ from pathlib import Path
 HERE=Path(__file__).resolve().parent
 spec=importlib.util.spec_from_file_location('v2fixtures',HERE.parent/'teamwork-v2/fixtures.py')
 v2=importlib.util.module_from_spec(spec);spec.loader.exec_module(v2)
-ARMS=['ledger','graphify','gbrain','supermemory']
+from cohort_scope import ALL_ARMS
+ARMS=list(ALL_ARMS)
 STAGES='ABCD'
 
 def write(root,name,value):

@@ -32,6 +32,30 @@ A classifier runs after each turn checkpoint (at most once per 120 s per session
 
 **PROPOSED means unconfirmed.** Do not treat a proposed hypothesis or decision as settled. Confirm with `ledger_record_update(action: "confirm")` when you have checked it; promotion to a Ledger decision or finding remains a separate, human act.
 
+## Stable install: `ledger deploy` (15 Sep 2026)
+
+Until 15 Sep every hook, the MCP registration, the reconciler and the helper on Agaaz's machine executed `…/richmond-v1/dist/cli.js`, so `npm run build` in that Conductor worktree was a production deploy. Installers now refuse a `cli.js` that sits inside a git worktree (`ledger install …`, `ledger helper install`; override only with `LEDGER_ALLOW_WORKTREE_INSTALL=1`), and the supported path is:
+
+```
+npm run build                 # in the source tree you want live
+node dist/cli.js deploy       # or: ledger deploy, once ~/.ledger/bin/ledger is on PATH
+ledger deploy --status        # every entry point and the cli.js it runs
+```
+
+`deploy` runs `npm pack --ignore-scripts` and `npm ci --omit=dev` into `~/.ledger/bin/releases/<version>-<utc stamp>-<git sha>[-dirty]/`, points `~/.ledger/bin/current` at it, writes the launcher `~/.ledger/bin/ledger`, then runs `install all` and `helper install` **from the release**, so hooks, MCP registrations and both launchd plists pin the versioned path. The helper and reconciler restart during install; MCP servers inside open Claude/Codex sessions keep running the previous binary until those sessions restart. Codex re-hashes hook commands, so `/hooks` must be trusted again after each deploy. Old releases are never deleted automatically; delete them by hand once `deploy --status` shows nothing references them. `ledger helper status` prints the `cli.js` the running helper executes and flags a worktree.
+
+On Agaaz's machine the first release is `0.1.0-20260914T203225Z-5364efa-dirty` and the nvm `ledger` symlink now points at the launcher (it used to be an `npm link` into richmond-v1).
+
+## Rotate the Neon password
+
+The password was pasted into an agent chat on 2026-09-08 and again appeared in a tool output on 2026-09-15. No Neon API credential exists on either machine (`~/.config/neonctl` is empty), so the reset itself happens in the Neon console: project → Roles → `neondb_owner` → Reset password, then copy the new pooled connection string. Then, on **each** machine:
+
+```
+ledger continuity rotate 'postgresql://neondb_owner:<new>@ep-…-pooler.…neon.tech/neondb?sslmode=require&channel_binding=require'
+```
+
+It connects with the new URL first (fails closed, never echoes the URL), writes `~/.ledger/config.json` with mode 600, kickstarts `com.tranzmit.ledger.helper` and waits for a heartbeat from the new pid. Run it on Agaaz's machine, then on Rachit's, within the same sitting; the old password is dead from the moment the console resets it, so both helpers log connection errors until their config is rotated. Confirm with `ledger continuity status` on both machines and `ledger helper status` showing a fresh pass. Restart open Claude/Codex sessions afterwards; their MCP servers hold the old URL in memory.
+
 ## Credentials the helper needs
 
 The helper runs under launchd with no terminal. macOS's keychain credential helper cannot answer there, so remote git operations use `gh auth git-credential`. Requirements: `gh` installed and `gh auth status` logged in for the account that can push to the project remotes. Override with `LEDGER_GIT_CREDENTIAL_HELPER` if you use something else. A push that cannot authenticate is recorded on the checkpoint as `snapshot_not_verified` and in the helper log as a pass error; the snapshot is not "saved" until the remote confirms it.
@@ -79,22 +103,34 @@ A healthy pass line looks like `pass: 1 sessions, 7 spooled, 7 uploaded, 1 snaps
 
 ## Rachit joins (Phase 3)
 
-On Rachit's machine, from a clone of this branch:
+On Rachit's machine, from a clone of this branch (after 15 Sep: any tree, because nothing runs from it afterwards):
 
 ```
-npm install && npm run build
-ledger use <path-to-tranzmit-ledger-clone> --author rachit
-ledger install all                       # MCP + hooks + reconciler for Claude and Codex
-# add continuity to ~/.ledger/config.json:
-#   "continuity": { "database_url": "<same Neon URL>", "machine": "<his hostname>" }
+git pull && npm install && npm run build
+node dist/cli.js use <path-to-tranzmit-ledger-clone> --author rachit
+node dist/cli.js deploy                  # copies the build to ~/.ledger/bin/releases/<id>, installs MCP + hooks + reconciler + helper from there
+# first time only, add continuity to ~/.ledger/config.json:
+#   "continuity": { "database_url": "<Neon URL>", "machine": "<hostname>" }
 chmod 600 ~/.ledger/config.json
-ledger continuity status                 # must print db ok
-ledger helper install                    # launchd, KeepAlive
+~/.ledger/bin/ledger continuity status   # must print db ok
+~/.ledger/bin/ledger deploy --status     # every line ✓ release
+launchctl kickstart -k gui/$(id -u)/com.tranzmit.ledger.helper   # only if config.json changed after deploy
 ```
+
+Put `~/.ledger/bin` on PATH (or symlink `ledger` to `~/.ledger/bin/ledger`). `ledger install all` and `ledger helper install` run straight from a clone now refuse with a message pointing at `deploy`.
 
 Then in Codex: run `/hooks`, review the five ledger entries, trust them. Capture works without this via transcript tailing; Stop-driven `turn` checkpoints need it.
 
-The pilot test: Rachit works on HiAstro in Codex; we kill it once and let the laptop sleep once; Agaaz continues both via `ledger_resume` in Conductor while another HiAstro agent runs in a different worktree. Three of three must reach a correct next action without a verbal handoff.
+### The one real handoff (the test that makes "multiplayer" honest)
+
+Second human, second machine, dirty repo, no verbal handoff. Preconditions, checked before anyone starts: both machines show `ledger deploy --status` all ✓ release on the same release id, both `ledger continuity status` print `db ok` after the Neon rotation, and Rachit's session runs **inside the actual git checkout** with a remote (the 9 Sep attempt failed because his sessions ran from `~/Downloads`; a nested checkout is not the repo).
+
+1. Rachit, in Codex from the HiAstro checkout, starts a task and works until the tree is dirty (edited, uncommitted files, at least one new file). He tells nobody what he did. He closes Codex mid-task (kill it once, let the laptop sleep once).
+2. Within a minute his helper must show a pass with `1 snapshots, 1 checkpoints`, and `git ls-remote origin 'refs/wip/rachit/*'` from any clone must list the snapshot ref.
+3. Agaaz, on his machine, in a fresh Claude session from a clean HiAstro checkout: the brief lists Rachit's thread under Open threads. `ledger_resume(thread_id, mode: "continue", cwd)` claims it and prints the bootstrap; run the two git lines to get a worktree at the snapshot. Check: the dirty files are present byte for byte, the pack's "saved through" time is remote-verified, pending operations are listed, and the next action stated by the pack is the one Rachit would have taken.
+4. Agaaz continues the task in that worktree and finishes it, then `ledger_release`. Rachit reopens his laptop and reads the notice in his next brief.
+
+Score it on three things only: the dirty files arrived intact, the pack named the correct next step, and Agaaz did not redo work Rachit had already done. Record the result as a Ledger finding either way; a failure with its trace is the deliverable, not a rerun until it passes.
 
 ## What leaves the machine
 

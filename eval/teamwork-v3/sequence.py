@@ -19,6 +19,7 @@ import time
 import contextvars
 import disk_budget
 import integrity
+from cohort_scope import BASELINE_CONTROLS
 
 _DISK_LEASE = contextvars.ContextVar("teamwork_disk_lease", default=None)
 
@@ -217,7 +218,7 @@ def validate_profile(profile, request, protected):
         raise ValueError('native profile arm mismatch')
     if profile.get('readiness_verified') is not True or profile.get('paid_paths_gated') is not True:
         raise ValueError('native readiness and executable budget gating required')
-    if request['arm'] != 'fresh-agent':
+    if request['arm'] not in BASELINE_CONTROLS:
         module = profile.get('budget_gate_module')
         if not module or not Path(module).is_file() or not profile.get('budget_file'):
             raise ValueError('executable native budget gate and shared budget file required')
@@ -430,7 +431,7 @@ def _execute(root, launch, state, cfg, pack, manifest, disk_admission):
                 raise ValueError('native preparation changed initial Git history')
             profile = load(request['native_profile'])
             validate_profile(profile, request, protected)
-            if state['arm'] != 'fresh-agent' and Path(profile['budget_file']).resolve() != Path(cfg['budget_file']).resolve():
+            if state['arm'] not in BASELINE_CONTROLS and Path(profile['budget_file']).resolve() != Path(cfg['budget_file']).resolve():
                 raise ValueError('native profile uses a different budget file')
             result['driver'] = run_command(expand(cfg['driver_argv'], request_file), root,
                                            stage['deadline_ms'] / 1000 + 15, ctl / 'driver.log')
