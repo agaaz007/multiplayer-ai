@@ -15,7 +15,8 @@ import mechanisms
 import integrity
 from cohort_scope import expected_arms
 
-ARMS={'ledger','graphify','gbrain','supermemory'}
+from cohort_scope import ALL_ARMS
+ARMS=set(ALL_ARMS)
 MINIMUM_FREE_BYTES=5*1024**3
 
 
@@ -151,7 +152,7 @@ def _run_reserved(plan,out,lease):
             with lock:state['arms'][a['arm']]['sequences'][s['track']].update(status,elapsed_seconds=time.monotonic()-start);save()
         with lock:state['arms'][a['arm']]['status']='finished';save()
     save()
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1,len(plan['arms']))) as pool:
         for f in concurrent.futures.as_completed([pool.submit(lane,a) for a in plan['arms']]):f.result()
     state['status']='ended';save();return state
 

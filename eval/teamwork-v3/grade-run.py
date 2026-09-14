@@ -1,6 +1,6 @@
 """Grade an ended native-continuation run without rewriting any run artifacts."""
 import mechanisms
-from cohort_scope import expected_arms
+from cohort_scope import expected_arms, cohort_label
 import argparse
 import hashlib
 import importlib.util
@@ -115,7 +115,7 @@ def preflight(entries, require_complete=False, cohort_scope=None):
     if require_complete:
         expected = {(arm, track) for arm in arms for track in ('pm', 'engineering')}
         if arms_tracks != expected or any([s['id'] for s in row[4]['stages']] != list('ABCD') for row in result):
-            raise ValueError('complete ' + ('three-product' if len(arms) == 3 else 'four-product') + ' two-track A-D cohort required; retain every expected task')
+            raise ValueError('complete ' + cohort_label(arms) + ' two-track A-D cohort required; retain every expected task')
     return result
 
 

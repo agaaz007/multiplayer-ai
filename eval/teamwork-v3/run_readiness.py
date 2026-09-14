@@ -1,16 +1,17 @@
-"""Run four unscored product probes concurrently under one shared disk reservation."""
+"""Run the declared unscored readiness lanes concurrently under one shared disk reservation."""
 import argparse,concurrent.futures,json
 from pathlib import Path
 import disk_budget,sequence,integrity
-ARMS={'ledger','graphify','gbrain','supermemory'}
+from cohort_scope import expected_arms,cohort_label
 
 def run(config,out):
     config=Path(config).resolve();cfg=sequence.load(config);entries=cfg.get('entries',[])
-    if cfg.get('schema')!='teamwork-readiness-matrix/v3' or len(entries)!=4 or {e['arm']for e in entries}!=ARMS:raise ValueError('four readiness product lanes required')
+    arms=expected_arms(cfg)
+    if cfg.get('schema')!='teamwork-readiness-matrix/v3' or len(entries)!=len(arms) or {e['arm']for e in entries}!=set(arms):raise ValueError('exactly the declared '+cohort_label(arms)+' readiness lanes required')
     manifests=set();budgets=set();roots=set()
     for entry in entries:
         root=Path(entry['root']).resolve();state=sequence.load(root/'sequence.json');launch=sequence.load(entry['launch']);pack=sequence.validate_pack(state['pack'])
-        if root in roots or state['executed'] or (root/'attempt.json').exists():raise ValueError('four fresh unattempted roots required')
+        if root in roots or state['executed'] or (root/'attempt.json').exists():raise ValueError('fresh unattempted roots required for every declared lane')
         roots.add(root)
         if state['arm']!=entry['arm'] or state['track']!=entry['track'] or pack['development'] is not True or launch.get('development_probe') is not True or launch.get('scored') is not False:raise ValueError('development pack and launch required')
         if state['transport_sha256']!=sequence.digest(sequence.__file__) or state['pack_manifest_sha256']!=sequence.digest(Path(state['pack'])/'manifest.json'):raise ValueError('prepared freeze changed')
@@ -27,11 +28,11 @@ def run(config,out):
         def lane(e):
             try:return {'arm':e['arm'],'root':e['root'],'sequence':sequence.run(e['root'],e['launch'],disk_lease=lease)}
             except Exception as error:return {'arm':e['arm'],'root':e['root'],'status':'failed','error':str(error)}
-        with concurrent.futures.ThreadPoolExecutor(4) as pool:
+        with concurrent.futures.ThreadPoolExecutor(len(entries)) as pool:
             results=[]
             for future in concurrent.futures.as_completed([pool.submit(lane,e)for e in entries]):
                 result=future.result();results.append(result);sequence.dump(out/(result['arm']+'.json'),result)
-        receipt={'schema':'teamwork-readiness-matrix-result/v3','disk_admission':lease.receipt,'results':results,'admission':'not automatic; inspect native capture, isolation, real compaction/interruption and Ledger record-use evidence'}
+        receipt={'schema':'teamwork-readiness-matrix-result/v3','disk_admission':lease.receipt,'results':results,'cohort_scope':cfg.get('cohort_scope'),'admission':'not automatic; inspect native capture, isolation, real compaction/interruption and Ledger record-use evidence; control arms need control-readiness.mjs assess'}
         sequence.dump(out/'result.json',receipt);return receipt
     finally:lease.release()
 
