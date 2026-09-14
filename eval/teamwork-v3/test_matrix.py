@@ -178,3 +178,18 @@ class MatrixAdmissionTests(unittest.TestCase):
         self.assertFalse(out.exists())
 
 if __name__=='__main__':unittest.main()
+
+
+class ApiBClarificationTests(unittest.TestCase):
+    def test_api_b_states_execute_and_get_response_fields(self):
+        import tempfile,fixtures
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            root=fixtures.build(Path(d)/'pack','engineering',271,True)
+            text=(Path(root)/'deltas/B/release/API-B.md').read_text()
+            self.assertIn('{id,key,payload,state,receipt_id}',text)
+            self.assertIn('GET /jobs/ID returns that same persisted job body, including state and receipt_id',text)
+            self.assertNotIn('reply 200.\nProvider failure',text)
+            a=(Path(root)/'deltas/A/release/API-A.md').read_text()
+            self.assertNotIn('receipt_id',a)
+
