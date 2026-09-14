@@ -36,25 +36,37 @@ def event(id_, topic, text, author="rachit", session="session-a"):
     return dict(id=id_, topic=topic, text=text, author=author, session=session)
 
 
-def answer_check(key, value, sources, critical=True, accept=None):
-    """`accept` lists further spellings of the SAME fact (D04). It never widens the fact itself:
-    a phrasing difference must not be scored as a memory failure, and a different fact still fails."""
+def answer_check(key, value, sources, critical=True, accept=None, stem=None):
+    """`accept` lists further spellings of the SAME fact; `stem` accepts any identifier containing it.
+
+    Neither widens the fact. A different fact still fails: `longer_trial_14d` contains no "lock".
+
+    `stem` exists because an enumerated list cannot cover a free-form reason word. The first live D04
+    run produced `price_locked_for_quarter` from one arm and `locked_pricing` from the other for the
+    same retrieved sentence; the first was in `accept` and the second was not, so two identical
+    recoveries scored differently. That is the confound `accept` was introduced to remove, so the
+    reason check now matches on the stem instead of on an ever-growing list of spellings."""
     check = dict(type="answer", key=key, expected=value, sources=sources, critical=critical)
     if accept:
         check["accept"] = list(accept)
+    if stem:
+        check["stem"] = stem
     return check
 
 
 def same_answer(value, check):
-    """Exact equality, or — only when the check lists `accept` — equality after the collector's own
-    identifier normalization (lowercase, collapsed whitespace, spaces to underscores)."""
+    """Exact equality; or, when the check declares them, an `accept` spelling or a `stem` substring.
+    Both comparisons use the collector's identifier normalization (lowercase, spaces to underscores)."""
     if value == check["expected"]:
         return True
-    alternates = check.get("accept")
-    if not alternates or not isinstance(value, str):
+    if not isinstance(value, str):
         return False
     norm = lambda s: "_".join(str(s).strip().lower().split())
-    return norm(value) in {norm(a) for a in alternates}
+    normalized = norm(value)
+    if normalized in {norm(a) for a in check.get("accept", [])}:
+        return True
+    stem = check.get("stem")
+    return bool(stem) and norm(stem) in normalized
 
 
 FILLER = [
@@ -172,10 +184,7 @@ def cases(noise_events=1000, minimum_origin_tokens=100000, maximum_boot_tokens=1
                       accept=["price cut", "price_cut_149", "price cut to 149", "price_cut_to_149",
                               "cut_price", "cut price", "cut price to 149", "cut_price_to_149",
                               "149_price_cut", "price_reduction", "lower_price", "price_149"]),
-         answer_check("rejection_reason", "locked", ["reject"],
-                      accept=["price_locked", "price locked", "store_price_locked", "store price locked",
-                              "india_price_locked", "locked_price", "store_listing_locked",
-                              "price_locked_for_quarter", "locked_for_quarter", "store_listing"]),
+         answer_check("rejection_reason", "locked", ["reject"], stem="lock"),
          answer_check("cvr_caveat", "android", ["filter"],
                       accept=["android_only", "android only", "android_users", "android users",
                               "platform_android", "android_platform", "android_traffic",

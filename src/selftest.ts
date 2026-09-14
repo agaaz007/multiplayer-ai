@@ -10,7 +10,7 @@ import { findCandidates, parseDrafts, reconcile, pendingDrafts } from "./extract
 import { findTranscript, parseTranscript, evidenceText } from "./transcript.js";
 import { brief, search, similarFindings, stats, renderFull } from "./query.js";
 import { regenerateViews } from "./views.js";
-import { agentRulesText, installGuides, upsertHooks, HOOK_EVENTS, isLedgerHookCommand } from "./install.js";
+import { agentRulesText, installGuides, upsertHooks, HOOK_EVENTS, isLedgerHookCommand, gitWorktreeOf, installSource, assertStableInstallSource, RELEASES_DIR } from "./install.js";
 import { handleHook, loadJournal, saveJournal, captureStats, debt } from "./hooks.js";
 import { EVIDENCE_URI } from "./evidence.js";
 import { readReceipt, savedReceipt, syncReceipt, renderReceiptBox } from "./receipts.js";
@@ -443,6 +443,30 @@ for (const ev of Object.keys(HOOK_EVENTS)) {
 }
 assert.ok(settings.hooks.Stop.some((e: any) => e.hooks[0].command === "someone-else"), "foreign hook kept");
 assert.ok(!settings.hooks.SessionStart.some((e: any) => e.hooks[0].command.startsWith("ledger brief")), "legacy brief hook replaced");
+
+// installer refuses a worktree source: a build in a Conductor workspace must not be a production deploy
+{
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "ledger-src-"));
+  const wt = path.join(scratch, "repo"); fs.mkdirSync(path.join(wt, "dist"), { recursive: true }); fs.writeFileSync(path.join(wt, ".git"), "gitdir: elsewhere\n");
+  const wtCli = path.join(wt, "dist", "cli.js"); fs.writeFileSync(wtCli, "");
+  assert.equal(gitWorktreeOf(wtCli), wt, "nearest .git (file or dir) wins");
+  const inWt = installSource(wtCli);
+  assert.ok(!inWt.stable && inWt.worktree === fs.realpathSync(wt), "cli.js inside a worktree is unstable");
+  assert.throws(() => assertStableInstallSource("the helper", inWt), /refusing to install the helper from a git worktree[\s\S]*ledger deploy/, "refusal names the fix");
+  const saved = process.env.LEDGER_ALLOW_WORKTREE_INSTALL; process.env.LEDGER_ALLOW_WORKTREE_INSTALL = "1";
+  assert.equal(assertStableInstallSource("x", inWt), inWt, "explicit override passes");
+  if (saved === undefined) delete process.env.LEDGER_ALLOW_WORKTREE_INSTALL; else process.env.LEDGER_ALLOW_WORKTREE_INSTALL = saved;
+  // a `ledger deploy` copy is stable even when ~/.ledger itself sits inside a git repo (a home directory under git)
+  const rel = path.join(RELEASES_DIR(), "0.0.0-test-abc", "dist"); fs.mkdirSync(rel, { recursive: true }); fs.writeFileSync(path.join(rel, "cli.js"), "");
+  fs.writeFileSync(path.join(path.dirname(RELEASES_DIR()), "..", ".git"), "gitdir: elsewhere\n");
+  const relSrc = installSource(path.join(rel, "cli.js"));
+  assert.ok(relSrc.release && relSrc.stable, `release copy is stable: ${JSON.stringify(relSrc)}`);
+  fs.rmSync(path.join(path.dirname(RELEASES_DIR()), "..", ".git"));
+  // an installed package copy (global npm) is stable too
+  const pk = path.join(wt, "node_modules", "@tranzmit", "ledger", "dist"); fs.mkdirSync(pk, { recursive: true }); fs.writeFileSync(path.join(pk, "cli.js"), "");
+  assert.ok(installSource(path.join(pk, "cli.js")).stable, "node_modules copy is stable");
+  fs.rmSync(scratch, { recursive: true, force: true });
+}
 assert.equal(settings.hooks.PostToolUse[0].matcher, undefined, "omitted matcher observes every host-supported native/wrapped tool path; hook code filters data work");
 assert.ok(isLedgerHookCommand("ledger brief --hook") && isLedgerHookCommand('"/opt/node" "/x/dist/cli.js" hook Stop') && !isLedgerHookCommand("someone-else"));
 

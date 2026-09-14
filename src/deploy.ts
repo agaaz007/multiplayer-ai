@@ -117,7 +117,8 @@ export function installFromRelease(info: ReleaseInfo, log: (l: string) => void =
   const cli = path.join(info.dir, "dist", "cli.js");
   for (const args of [["install", "all"], ["helper", "install"]]) {
     log(`$ node ${cli} ${args.join(" ")}`);
-    const r = spawnSync(NODE, [cli, ...args], { stdio: "inherit", env: { ...process.env, LEDGER_ALLOW_WORKTREE_INSTALL: undefined } as NodeJS.ProcessEnv, timeout: 180_000 });
+    const { LEDGER_ALLOW_WORKTREE_INSTALL: _ignored, ...env } = process.env; // the release must pass the guard on its own
+    const r = spawnSync(NODE, [cli, ...args], { stdio: "inherit", env, timeout: 180_000 });
     if (r.status !== 0) throw new Error(`${args.join(" ")} failed (exit ${r.status})`);
   }
 }
