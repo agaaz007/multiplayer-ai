@@ -126,6 +126,23 @@ the cancellation policy. Preserve the resolved supplier receipt and original
 design/test history; identify the affected assumptions in reports/D.md. Run
 appropriate functional checks against the actual recovered application.'''}
 
+API_B_CLARIFICATION=('Persist receipt_id and state="completed"; reply 200 with the job body '
+ '{id,key,payload,state,receipt_id}. GET /jobs/ID returns that same persisted job body, including state and '
+ 'receipt_id (null until the job is completed).')
+
+def clarify_api_b(contract):
+    """Decision dec-20260913-...-n12l: state the execute and GET /jobs/ID response fields in API-B.
+
+    The v2 text said only "Persist receipt_id and state=\"completed\"; reply 200" and "GET /jobs/ID returns
+    the job" (API-A), while grade_engineering_contract_v2.py requires receipt_id on the execute body and
+    state + receipt_id on GET. Every Ledger B/C/D loss in v3 was that omission (finding ...-dwoi). Applied
+    2026-09-15 after the frozen-tree stage-B rerun was prepared from immutable pack copies, so that rerun
+    still measures the original wording. v2's own fixture text is left as history.
+    """
+    old='Persist receipt_id and state="completed"; reply 200.'
+    if old not in contract:raise ValueError('API-B text changed; re-check the clarification anchor')
+    return contract.replace(old,API_B_CLARIFICATION,1)
+
 def build(out,track,seed=271,development=False):
     root=Path(out).resolve();root.mkdir(parents=True,exist_ok=False)
     write(root,'initial-repo/WORKFLOW.md',WORKFLOW)
@@ -155,6 +172,7 @@ def build(out,track,seed=271,development=False):
             if st!='A':
                 start=contract.index('\n'+st+':');end=contract.find('\n\n',start)
                 contract='# Dispatch API addition '+st+'\n'+contract[start:end]+'\nAll previously released invariants remain required.\n'
+            if st=='B':contract=clarify_api_b(contract)
             write(root,f'{delta}/release/API-{st}.md',contract)
             if st=='A':
                 write(root,f'{delta}/app.py',v2.STARTER)
