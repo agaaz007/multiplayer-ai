@@ -72,9 +72,9 @@ class SixArmPreparationTests(unittest.TestCase):
   matrix=sequence.load(config);self.assertEqual(len(matrix['entries']),6);self.assertEqual(matrix['cohort_scope'],scope)
   for entry in self.entries:
    launch=sequence.load(Path(entry['root'])/'launch.json');self.assertEqual(launch['authorization'],'test authorization')
-   frozen=launch['frozen_files'];self.assertIn(str(Path(entry['root'])/'native-guide.md'),frozen)
-   if entry['arm'] in cohort_scope.CONTROL_ARMS:self.assertFalse(any(k.endswith('proxy.json') and k.startswith(entry['root']) for k in frozen))
-   else:self.assertIn(str(Path(entry['root'])/'proxy.json'),frozen)
+   frozen=launch['frozen_files'];root=Path(entry['root']).resolve();self.assertIn(str(root/'native-guide.md'),frozen)
+   if entry['arm'] in cohort_scope.CONTROL_ARMS:self.assertFalse(any(k.endswith('proxy.json') and k.startswith(str(root)) for k in frozen))
+   else:self.assertIn(str(root/'proxy.json'),frozen)
   seen=[]
   def dispatch(root,launch,disk_lease):seen.append(sequence.load(Path(root)/'sequence.json')['arm']);return {'status':'ended'}
   with patch.object(run_readiness.sequence,'run',side_effect=dispatch):result=run_readiness.run(config,self.root/'run')

@@ -93,7 +93,8 @@ class ReuseGrading(unittest.TestCase):
         save(file, '\n'.join(rows) + '\n')
 
     def grade(self, seq):
-        return reuse.grade_reuse([{'root': str(seq)}], self.root / ('out-' + seq.name), require_complete=False)['sequences'][0]['stages']
+        scope = __import__('cohort_scope').batch_scope('six-arm', 'test cohort')
+        return reuse.grade_reuse([{'root': str(seq)}], self.root / ('out-' + seq.name), require_complete=False, cohort_scope=scope)['sequences'][0]['stages']
 
     # ---- tests
     def test_control_git_reuse_requires_carried_values_and_git_retrieval(self):
@@ -222,7 +223,7 @@ class ReuseGrading(unittest.TestCase):
     def test_numeric_tokens_normalize_percent_fraction_and_decimal(self):
         tokens = reuse.numeric_tokens('treatment 210/1000 = 21% (0.21), +1 percentage point')
         self.assertIn(0.21, tokens); self.assertIn(1.0, tokens); self.assertIn(0.01, tokens)
-        self.assertEqual(sorted(tokens[0.21]), ['0.21', '210/1000', '21%'])
+        self.assertEqual(sorted(tokens[0.21]), ['0.21', '21%', '210/1000'])
 
 
 if __name__ == '__main__':
