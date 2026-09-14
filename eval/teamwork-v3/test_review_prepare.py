@@ -27,6 +27,12 @@ class Preparation(unittest.TestCase):
         fixtures.build(self.pack, 'pm')
         self.entries = []
         for arm in ('ledger', 'graphify', 'gbrain', 'supermemory'):
+            self.entries.append(self.build_arm(arm))
+        self.runtime = self.root / 'runtime'; (self.runtime / 'eval').mkdir(parents=True)
+        (self.runtime / 'eval/sequence-codex.js').write_text('// never called in preparation tests')
+
+    def build_arm(self, arm):
+        if True:
             root = self.root / arm
             state = review.grading.sequence.prepare(self.pack, root, 'pm', arm)
             previous = None
@@ -50,9 +56,21 @@ class Preparation(unittest.TestCase):
                 state['stages'][name] = {'status': 'finished'}; previous = tree
             state['status'] = 'ended'; state['executed'] = True; save(root / 'sequence.json', state)
             events = root / 'events.jsonl'; events.write_text(json.dumps({'seq': 1, 'kind': 'effect', 'stage': 'B', 'key': arm + '-ticket-123456', 'receipt_id': 'receipt-12345678'}) + '\n')
-            self.entries.append({'root': str(root), 'provider_events': str(events)})
-        self.runtime = self.root / 'runtime'; (self.runtime / 'eval').mkdir(parents=True)
-        (self.runtime / 'eval/sequence-codex.js').write_text('// never called in preparation tests')
+            return {'root': str(root), 'provider_events': str(events)}
+
+    def test_declared_six_arm_cohort_prepares_24_slots(self):
+        import cohort_scope
+        scope = cohort_scope.batch_scope('six-arm', 'User declared the six-arm cohort')
+        entries = self.entries + [self.build_arm(arm) for arm in cohort_scope.CONTROL_ARMS]
+        out = self.root / 'reviews'; result = review.prepare(entries, out, self.runtime, cohort_scope=scope)
+        self.assertEqual((result['cases'], result['eligible_cases']), (24, 24))
+        self.assertEqual(len(review.read(out / 'review-config.json')['cases']), 24)
+        self.assertEqual(len(review.read(out / 'controller-map.json')['cases']), 24)
+        for c in review.read(out / 'review-config.json')['cases']:
+            serialized = (Path(c['packet']) / 'answer.json').read_text() + (Path(c['packet']) / 'sources.json').read_text()
+            self.assertIsNone(review.VENDOR.search(serialized))
+        with self.assertRaisesRegex(ValueError, 'complete six-arm'):
+            review.prepare(entries[:-1], self.root / 'reviews-2', self.runtime, cohort_scope=scope)
 
     def test_complete_cohort_has_ground_truth_and_actual_recovered_material_distinguished(self):
         out = self.root / 'reviews'; result = review.prepare(self.entries, out, self.runtime)

@@ -77,6 +77,36 @@ class RunGrading(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'authorized three-product'):
             run.preflight(entries, require_complete=True, cohort_scope=scope)
 
+    def declared_cohort(self, batch):
+        scope = run.cohort_label and __import__('cohort_scope').batch_scope(batch, 'User declared the ' + batch + ' cohort')
+        pm_pack = self.root / 'pm-pack'
+        if not pm_pack.exists(): fixtures.build(pm_pack, 'pm', seed=271)
+        entries = []
+        for track in ('pm', 'engineering'):
+            for arm in scope['included_arms']:
+                root = self.root / (track + '-' + arm)
+                state = run.sequence.prepare(pm_pack if track == 'pm' else self.pack, root, track, arm)
+                state['status'] = 'ended'; save(root / 'sequence.json', state)
+                entries.append({'root': str(root)})
+        return scope, entries
+
+    def test_declared_six_arm_cohort_retains_48_tasks(self):
+        scope, entries = self.declared_cohort('six-arm')
+        result = run.grade_run(entries, self.root / 'out', self.fake_functional, cohort_scope=scope)
+        self.assertEqual((result['expected_sequences'], result['expected_tasks']), (12, 48))
+        self.assertEqual(sum(len(s['stages']) for s in result['sequences']), 48)
+        with self.assertRaisesRegex(ValueError, 'complete six-arm'):
+            run.preflight(entries[:-1], require_complete=True, cohort_scope=scope)
+        with self.assertRaisesRegex(ValueError, 'complete four-product'):
+            run.preflight(entries, require_complete=True)
+
+    def test_declared_control_batch_grades_four_sequences(self):
+        scope, entries = self.declared_cohort('controls')
+        result = run.grade_run(entries, self.root / 'out', self.fake_functional, cohort_scope=scope)
+        self.assertEqual((result['expected_sequences'], result['expected_tasks']), (4, 16))
+        with self.assertRaisesRegex(ValueError, 'arm excluded'):
+            run.preflight(entries, require_complete=True, cohort_scope=__import__('cohort_scope').batch_scope('products', 'x'))
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name); self.pack = self.root / 'pack'
