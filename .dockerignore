@@ -1,0 +1,11 @@
+.git
+.context
+.gstack
+node_modules
+dist
+dist-*
+eval
+Library
+*.log
+.env
+.env.*
