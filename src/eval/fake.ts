@@ -139,6 +139,16 @@ function scriptedAnswers(caseId: string, by: (id: string) => string, keys: strin
         denominator: { value: "unique exposed users", evidence: [by("metric-v2")] },
         superseded: { value: "metric-v1", evidence: [by("metric-v2")] },
       };
+    case "D04":
+      // Deliberately messy shapes: a percent sign, a spelling that only the check's `accept` list
+      // admits, and a reason word lifted from the sentence. A real successor answers like this, and
+      // the fake path is where we verify that phrasing does not read as a memory failure.
+      return {
+        trial_start_cvr_pct: { value: "9.8%", evidence: [by("cvr-correct")] },
+        rejected_option: { value: "Price cut to 149", evidence: [by("reject")] },
+        rejection_reason: { value: "locked", evidence: [by("reject")] },
+        cvr_caveat: { value: "Android only", evidence: [by("filter")] },
+      };
     case "D03":
       return {
         accepted_join_rate: { value: null, evidence: [by("hyp-a"), by("hyp-b")] },

@@ -36,11 +36,90 @@ def event(id_, topic, text, author="rachit", session="session-a"):
     return dict(id=id_, topic=topic, text=text, author=author, session=session)
 
 
-def answer_check(key, value, sources, critical=True):
-    return dict(type="answer", key=key, expected=value, sources=sources, critical=critical)
+def answer_check(key, value, sources, critical=True, accept=None):
+    """`accept` lists further spellings of the SAME fact (D04). It never widens the fact itself:
+    a phrasing difference must not be scored as a memory failure, and a different fact still fails."""
+    check = dict(type="answer", key=key, expected=value, sources=sources, critical=critical)
+    if accept:
+        check["accept"] = list(accept)
+    return check
 
 
-def cases(noise_events=1000, minimum_origin_tokens=100000, maximum_boot_tokens=12000):
+def same_answer(value, check):
+    """Exact equality, or — only when the check lists `accept` — equality after the collector's own
+    identifier normalization (lowercase, collapsed whitespace, spaces to underscores)."""
+    if value == check["expected"]:
+        return True
+    alternates = check.get("accept")
+    if not alternates or not isinstance(value, str):
+        return False
+    norm = lambda s: "_".join(str(s).strip().lower().split())
+    return norm(value) in {norm(a) for a in alternates}
+
+
+FILLER = [
+    "Reviewed last week's Play Console crash list; nothing in it touches the paywall.",
+    "Renamed the onboarding illustration assets to match the new naming convention.",
+    "Answered the support thread about renewal receipts; no product change needed.",
+    "Checked the CI cache hit rate after the runner upgrade; it is back to normal.",
+    "Drafted the weekly update for the astrologer partner team; it contains no decisions.",
+    "Removed two feature flags that finished rolling out in June.",
+    "Confirmed the Hindi copy review is scheduled for next sprint, not this one.",
+    "Re-ran the nightly export job that failed on a transient storage timeout.",
+]
+
+
+def limits_events(noise_per_gap=2):
+    """D04's history: three planted facts, each separated from the question that needs it.
+
+    What each plant tests, and the failure it is designed to catch:
+
+      cvr-first / cvr-correct  A number and, later, its correction. Both stay in history. A store that
+                               ranks by similarity to "trial-start CVR" surfaces both and has no notion
+                               of which one is current; the failure is answering 12.4.
+      options / reject         One of two named options is dropped, with its reason, in the OTHER session.
+                               The failure is proposing the price cut, because the text discussing it
+                               matches the query better than the sentence retiring it.
+      filter                   The number is Android-only. This is said once, as a mechanical query
+                               detail, three turns before the number it qualifies and in the earlier
+                               session; nobody ever calls it an assumption or a caveat. The failure is
+                               reporting the CVR as if it described all users.
+
+    Unrelated turns sit in every gap so the successor cannot recover a fact by reading a short history
+    end to end. The gap size is a knob (--limits-noise): raise it to separate retrieval from recall.
+    """
+    out = []
+    filled = [0]
+    A, B = ("session-a", "rachit"), ("session-b", "agaaz")
+
+    def plant(id_, text, who):
+        session, author = who
+        out.append(event(id_, "trial-cvr", text, author, session))
+
+    def gap(who):
+        session, author = who
+        for _ in range(noise_per_gap):
+            i = filled[0]
+            filled[0] += 1
+            out.append(event("fill-%02d" % i, "unrelated", FILLER[i % len(FILLER)], author, session))
+
+    plant("cvr-first", "First pass on the marriage-intent paywall: trial-start CVR is 12.4 percent.", A)
+    gap(A)
+    plant("filter", "The pull has platform = android in the where clause, because the iOS export was "
+                    "still backfilling when I ran it.", A)
+    gap(A)
+    plant("options", "Two ways to lift it are on the table: cut the price to 149, or extend the trial "
+                     "to 14 days.", A)
+    plant("reject", "Rachit rejected the price cut: the India store price is locked for the quarter. "
+                    "We go with the 14 day trial.", B)
+    gap(B)
+    plant("cvr-correct", "Correction: 12.4 percent was wrong. It counted a user twice when they saw the "
+                         "paywall twice. Deduplicated by user, trial-start CVR is 9.8 percent.", B)
+    plant("recent", "Next step is to size the 14 day trial experiment from that CVR.", B)
+    return out
+
+
+def cases(noise_events=1000, minimum_origin_tokens=100000, maximum_boot_tokens=12000, limits_noise=2):
     """Public inputs and private assertions are separated by prepare()."""
     items = []
 
@@ -77,6 +156,30 @@ def cases(noise_events=1000, minimum_origin_tokens=100000, maximum_boot_tokens=1
         [answer_check("accepted_join_rate", None, ["hyp-a", "hyp-b"]),
          answer_check("status", "unresolved", ["hyp-a", "hyp-b"]),
          answer_check("next_check", "dataset_equivalence", ["hyp-b"])])
+
+    add("D04", 1, "A corrected number, a rejected option, and an assumption nobody states",
+        limits_events(limits_noise),
+        "Continue the marriage-intent paywall work and size the 14 day trial experiment. "
+        "Report the trial-start CVR percentage you would size it from, which of the two considered "
+        "options the team rejected and the reason it was rejected, and any condition attached to that "
+        "CVR that the team never wrote down as a caveat.",
+        ["Type the events in order into one real origin session per session label; do not summarize them.",
+         "Both the first number and its correction stay in history; nothing is deleted or edited.",
+         "The population filter is stated once, as a mechanical query detail, in the earlier session only.",
+         "Reset the successor; it gets its prompt and the condition's own retrieval tools, never this history."],
+        [answer_check("trial_start_cvr_pct", 9.8, ["cvr-correct"]),
+         answer_check("rejected_option", "price_cut", ["reject"],
+                      accept=["price cut", "price_cut_149", "price cut to 149", "price_cut_to_149",
+                              "cut_price", "cut price", "cut price to 149", "cut_price_to_149",
+                              "149_price_cut", "price_reduction", "lower_price", "price_149"]),
+         answer_check("rejection_reason", "locked", ["reject"],
+                      accept=["price_locked", "price locked", "store_price_locked", "store price locked",
+                              "india_price_locked", "locked_price", "store_listing_locked",
+                              "price_locked_for_quarter", "locked_for_quarter", "store_listing"]),
+         answer_check("cvr_caveat", "android", ["filter"],
+                      accept=["android_only", "android only", "android_users", "android users",
+                              "platform_android", "android_platform", "android_traffic",
+                              "excludes_ios", "ios_excluded", "no_ios"])])
 
     mixed = common + [
         event("hire", "hiring", "Hiring plan: interview two infrastructure candidates next week."),
@@ -173,12 +276,23 @@ def cases(noise_events=1000, minimum_origin_tokens=100000, maximum_boot_tokens=1
     return items
 
 
-def prepare(root, noise_events, minimum_origin_tokens=100000, maximum_boot_tokens=12000):
+def prepare(root, noise_events, minimum_origin_tokens=100000, maximum_boot_tokens=12000,
+            limits_noise=2, only=None):
+    """`only` builds a focused suite: public/ and the private oracle contain just those cases, so a
+    report over it is self-consistent rather than mostly `not_run`. A level is then demonstrated only
+    over the cases present, which is why a focused report states its case list."""
     root = Path(root)
     if root.exists() and any(root.iterdir()):
         raise ValueError("prepare target must be absent or empty")
     manifest = []
-    for case in cases(noise_events, minimum_origin_tokens, maximum_boot_tokens):
+    selected = cases(noise_events, minimum_origin_tokens, maximum_boot_tokens, limits_noise)
+    if only:
+        known = {c["id"] for c in selected}
+        unknown = [c for c in only if c not in known]
+        if unknown:
+            raise ValueError("unknown case(s): " + ", ".join(unknown))
+        selected = [c for c in selected if c["id"] in set(only)]
+    for case in selected:
         public = {k: v for k, v in case.items() if k != "checks"}
         # Keys/types are a response schema, not answer values.
         public["answer_keys"] = [c["key"] for c in case["checks"] if c["type"] == "answer"]
@@ -229,7 +343,7 @@ def check_one(check, case, obs, base):
         item = obs.get("answers", {}).get(check["key"], {})
         if "value" not in item:
             return "missing", "No successor answer for " + check["key"]
-        if item["value"] != check["expected"]:
+        if not same_answer(item["value"], check):
             return "fail", "Incorrect " + check["key"]
         if not set(check["sources"]).issubset(set(item.get("evidence_ids", []))):
             return "fail", "Required supporting evidence not cited"
@@ -448,6 +562,8 @@ def main():
     p.add_argument("--noise-events", type=int, default=1000)
     p.add_argument("--minimum-origin-tokens", type=int, default=100000)
     p.add_argument("--maximum-boot-tokens", type=int, default=12000)
+    p.add_argument("--limits-noise", type=int, default=2, help="D04: unrelated turns in each gap between planted facts")
+    p.add_argument("--cases", nargs="+", help="Build a focused suite containing only these case ids")
     for name in ("score", "run"):
         p = sub.add_parser(name)
         p.add_argument("--suite", required=True)
@@ -464,7 +580,10 @@ def main():
             parser.error("noise-events must be at least 2")
         if args.minimum_origin_tokens < 1 or args.maximum_boot_tokens < 1:
             parser.error("token limits must be positive")
-        prepare(args.out, args.noise_events, args.minimum_origin_tokens, args.maximum_boot_tokens)
+        if args.limits_noise < 0:
+            parser.error("limits-noise must not be negative")
+        prepare(args.out, args.noise_events, args.minimum_origin_tokens, args.maximum_boot_tokens,
+                args.limits_noise, args.cases)
     else:
         if args.repetitions < 1:
             parser.error("repetitions must be positive")

@@ -11,7 +11,8 @@ import type { ConditionPlugin, FixtureEvent, Metrics, Observation, OriginRun, Re
  *
  * Answer normalization (documented aliases; the kit compares values with Python `!=`):
  *   1. `null`/`undefined` stay null. The strings "null" and "none" (trimmed, case-insensitive) become null.
- *   2. Numeric keys (NUMERIC_KEYS: price_inr, unverified_viewport): numbers pass through; strings have
+ *   2. Numeric keys (NUMERIC_KEYS: price_inr, unverified_viewport, trial_start_cvr_pct): numbers pass
+ *      through; strings have
  *      thousands separators removed and the first number group parsed ("₹199" -> 199, "640px" -> 640,
  *      "INR 199" -> 199). Integral values are emitted as integers. A string with no digits falls through
  *      to rule 3.
@@ -31,7 +32,7 @@ import type { ConditionPlugin, FixtureEvent, Metrics, Observation, OriginRun, Re
  * dropped: an answer with no mappable citation gets an empty evidence_ids and fails the kit's check.
  */
 
-export const NUMERIC_KEYS = new Set(["price_inr", "unverified_viewport"]);
+export const NUMERIC_KEYS = new Set(["price_inr", "unverified_viewport", "trial_start_cvr_pct"]);
 export const MIN_EXCERPT_CHARS = 20;
 export const MIN_REF_CHARS = 6;
 /** Beyond this many fixture events, system-ref mapping of unmatched citations is skipped (L01 noise). */
