@@ -8,13 +8,14 @@ import pg from 'pg';
 import {execFileSync,execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import {fileURLToPath,pathToFileURL} from 'node:url';
+import {isControl,isTransportControl,provisionControl,prepareControlStage,captureControl,exportControl} from './native-controls.mjs';
 const here=path.dirname(fileURLToPath(import.meta.url)),run=promisify(execFile);
 const read=f=>JSON.parse(fs.readFileSync(f,'utf8'));
 const write=(f,o)=>fs.writeFileSync(f,JSON.stringify(o,null,2)+'\n',{mode:0o600});
 const sha=f=>crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex');
 const q=s=>"'"+s.replace(/'/g,"'\\''")+"'";
 const load=(cfg,name)=>import(pathToFileURL(path.join(cfg.runtime,'eval',name+'.js')).href);
-export function config(file){const cfg=read(file);for(const k of ['arm','root','runtime','guide_file'])if(!cfg[k])throw new Error('native config missing '+k);if(!['ledger','gbrain','graphify','supermemory'].includes(cfg.arm))throw new Error('v3 native arm unsupported');cfg.root=fs.realpathSync(cfg.root);return cfg;}
+export function config(file){const cfg=read(file);for(const k of ['arm','root','runtime','guide_file'])if(!cfg[k])throw new Error('native config missing '+k);if(!['ledger','gbrain','graphify','supermemory','control-git','handoff-note'].includes(cfg.arm))throw new Error('v3 native arm unsupported');cfg.root=fs.realpathSync(cfg.root);return cfg;}
 function statePath(cfg){return path.join(cfg.root,'native-state.json');}
 function owned(cfg,p){const real=fs.realpathSync(p);if(!real.startsWith(cfg.root+path.sep))throw new Error('stage path outside owned native sequence');return real;}
 function env(home,more={}){return {PATH:process.env.PATH,HOME:home,TMPDIR:home,LANG:'en_US.UTF-8',LEDGER_EVAL:'1',...more};}
@@ -27,7 +28,8 @@ function verifyEvidence(cfg){
  return r.arm===cfg.arm&&r.capture_recall_pass===true&&r.isolation_pass===true&&r.native_version===cfg.version;
 }
 function verifyNetworkGate(cfg){
- if(cfg.arm==='fresh-agent'||cfg.arm==='ledger')return true;
+ // Ledger and the baseline controls have no paid provider path; no proxy gate applies.
+ if(isControl(cfg.arm)||cfg.arm==='ledger')return true;
  if(!cfg.proxy_ready_file||!cfg.proxy_config)return false;
  const receipt=read(cfg.proxy_ready_file);
  return receipt.live_probe_pass===true&&receipt.config_sha256===sha(cfg.proxy_config)&&receipt.proxy_sha256===sha(cfg.http_proxy_module??path.resolve(here,'../teamwork-v2/native-http-proxy.mjs'));
@@ -68,8 +70,10 @@ export async function provision(cfg){
   // Scoped-key creation is setup; charged document operations still require the proxy gate.
   const api=await load(cfg,'analytical-supermemory'),previousSupermemoryKey=process.env.SUPERMEMORY_API_KEY;process.env.SUPERMEMORY_API_KEY=keyFile(cfg.supermemory_env_file,'SUPERMEMORY_API_KEY');
   try{const key=await api.createTrialSupermemoryKey(namespace);write(path.join(cfg.root,'supermemory-private.json'),{key:key.key,id:key.id});state.scoped_key_id=key.id;}finally{if(previousSupermemoryKey===undefined)delete process.env.SUPERMEMORY_API_KEY;else process.env.SUPERMEMORY_API_KEY=previousSupermemoryKey;}
+ }else if(isTransportControl(cfg.arm)){
+  provisionControl(cfg,state);
  }else if(cfg.arm!=='fresh-agent')throw new Error('arm is not handled by native lifecycle');
- write(statePath(cfg),state);return {arm:cfg.arm,namespace,state_file:statePath(cfg),provisioned:true,readiness_verified:false};
+ write(statePath(cfg),state);return {arm:cfg.arm,namespace,state_file:statePath(cfg),provisioned:true,readiness_verified:false,transport:state.transport??null};
 }
 export async function prepareStage(req){
  const cfg=config(req.native_config),state=read(statePath(cfg));
@@ -77,7 +81,7 @@ export async function prepareStage(req){
  owned(cfg,req.workspace);owned(cfg,req.fresh_home);owned(cfg,req.controller_output_dir);
  if(state.stages.includes(req.stage))throw new Error('native stage already prepared');
  const p={arm:cfg.arm,guide_file:cfg.guide_file,guide_sha256:sha(cfg.guide_file),mcp:{},hook_env:{},read_paths:[...(cfg.read_paths??[])],write_paths:[],ca_file:cfg.ca_file,
-  readiness_verified:verifyEvidence(cfg),paid_paths_gated:verifyNetworkGate(cfg)&&Boolean(cfg.arm==='fresh-agent'||(cfg.budget_gate_module&&cfg.budget_file)),budget_gate_module:cfg.budget_gate_module,budget_file:cfg.budget_file,operation_bounds:cfg.operation_bounds};
+  readiness_verified:verifyEvidence(cfg),paid_paths_gated:verifyNetworkGate(cfg)&&Boolean(isControl(cfg.arm)||(cfg.budget_gate_module&&cfg.budget_file)),budget_gate_module:cfg.budget_gate_module,budget_file:cfg.budget_file,operation_bounds:cfg.operation_bounds};
  if(cfg.arm==='ledger'){
   const api=await load(cfg,'analytical-ledger-native');const native=read(path.join(cfg.root,'ledger-native-owner.json'));
   const stage={home:req.fresh_home,worktree:req.workspace,harness:'codex',person:`benchmark-${req.stage.toLowerCase()}`,role:`stage-${req.stage}`};
@@ -111,6 +115,9 @@ export async function prepareStage(req){
   const fileConfig=path.join(req.controller_output_dir,'supermemory-files-config.json');write(fileConfig,{...cfg,namespace:state.namespace,workspace:req.workspace});
   p.mcp.supermemory_files={command:process.execPath,args:[path.join(here,'native-supermemory.mjs'),fileConfig],env:env(req.controller_output_dir,cfg.provider_env),cwd:req.workspace};
   p.hooks=hooks;p.hook_env={...cfg.provider_env};p.mcp.supermemory={command:process.execPath,args:[path.join(codexHome,'supermemory','mcp-proxy.js')],env:env(req.fresh_home,cfg.provider_env),cwd:req.workspace};
+ }else if(isTransportControl(cfg.arm)){
+  // Remote configuration / note grants only; the released inventory and one-commit history stay intact.
+  write(path.join(req.controller_output_dir,'control-preparation.json'),prepareControlStage(cfg,req,p));
  }
  state.stages.push(req.stage);write(statePath(cfg),state);write(req.native_profile,p);
  return {profile:req.native_profile,arm:cfg.arm,readiness_verified:p.readiness_verified};
@@ -139,6 +146,8 @@ export async function captureStage(req){
   for(;;){docs=[];for(let page=1;page<=100;page++){const out=await client.post('/v3/documents/list',{body:{containerTag:state.namespace,page,limit:100}});docs.push(...(out.memories??[]));if(page>=(out.pagination?.totalPages??1))break;}
    if(!docs.length||docs.every(d=>['done','failed'].includes(d.status))||Date.now()>=deadline)break;await new Promise(r=>setTimeout(r,2000));}
   result.documents=docs;result.processing_complete=docs.length>0&&docs.every(d=>d.status==='done');
+ }else if(isTransportControl(cfg.arm)){
+  result={...result,...captureControl(cfg,req)};
  }
  result.elapsed_ms=Date.now()-start;const file=path.join(req.controller_output_dir,`native-capture-${Date.now()}.json`);write(file,result);return {...result,receipt_file:file};
 }
@@ -150,6 +159,7 @@ export async function exportSequence(cfg){
   out.native_attachments=path.join(cfg.root,'gbrain-home','attachments');out.attachment_count=files.length;out.attachment_manifest=path.join(dir,'native-attachments.json');write(out.attachment_manifest,files);
  }
  if(cfg.arm==='graphify')out.directory=path.join(cfg.root,'graphify');
+ if(isTransportControl(cfg.arm))out={...out,...exportControl(cfg)};
  if(cfg.arm==='supermemory'){
   const state=read(statePath(cfg)),client=await scopedSupermemory(cfg),docs=[];
   for(let page=1;page<=100;page++){
@@ -170,7 +180,7 @@ export async function cleanupSequence(cfg){
   const client=api.supermemoryClient(keyFile(cfg.supermemory_env_file,'SUPERMEMORY_API_KEY'));
   await client.delete(`/v3/auth/scoped-key/${encodeURIComponent(key.id)}`);fs.unlinkSync(path.join(cfg.root,'supermemory-private.json'));
  }
- const result={arm:cfg.arm,cleaned_at:new Date().toISOString(),retained:'local exports, source corpus and Git evidence; Supermemory documents retained, scoped key revoked'};
+ const result={arm:cfg.arm,cleaned_at:new Date().toISOString(),retained:isTransportControl(cfg.arm)?'shared remote / handoff notes retained as evidence; nothing external to revoke':'local exports, source corpus and Git evidence; Supermemory documents retained, scoped key revoked'};
  write(path.join(cfg.root,'native-cleanup.json'),result);return result;
 }
 async function main(){const [op,file]=process.argv.slice(2);if(op==='provision')return provision(config(file));if(op==='stage')return prepareStage(read(file));if(op==='capture')return captureStage(read(file));if(op==='export')return exportSequence(config(file));if(op==='cleanup')return cleanupSequence(config(file));if(op==='periodic'){
