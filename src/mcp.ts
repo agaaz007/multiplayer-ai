@@ -51,6 +51,7 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
         days: z.number().int().min(1).max(90).default(14).describe("Lookback window"),
         tags: z.array(z.string()).optional().describe("Filter to tags, e.g. ['hiastro']"),
       },
+      annotations: readOnly,
     },
     async ({ days, tags }) => {
       const capture = reconcileSharedCapture(cfg);
@@ -270,6 +271,7 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
       title: "Ledger stats",
       description: "Pilot health: object counts by author, findings missing definitions, cross-author duplicate findings.",
       inputSchema: { days: z.number().int().min(1).max(365).default(14) },
+      annotations: readOnly,
     },
     async ({ days }) => text(stats(cfg, days))
   );
@@ -308,7 +310,7 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
 
     server.registerTool(
       "ledger_thread_get",
-      { title: "Thread detail", description: "Full detail for one thread: every human instruction, files touched, pending operations, checkpoint, claim state. Read-only; does not claim.", inputSchema: { thread_id: z.string() } },
+      { title: "Thread detail", description: "Full detail for one thread: every human instruction, files touched, pending operations, checkpoint, claim state. Read-only; does not claim.", inputSchema: { thread_id: z.string() }, annotations: readOnly },
       async ({ thread_id }) => text((await buildResumePack(cfg, pool(), thread_id, { mode: "inspect", author: cfg.author, budgetTokens: 12000 })).text)
     );
 
