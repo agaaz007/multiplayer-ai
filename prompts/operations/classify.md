@@ -25,6 +25,7 @@ A state update is one sentence the record should carry forward, with the exact e
 - `evidence_seqs` lists the exact seq numbers the update rests on. Every update needs at least one. Cite the event that shows it, not a nearby one.
 - `record_ref` is the candidate's id, or the exact `title` of a `new_record` you proposed in the same output.
 - Only the human's own words (`instruction.added`) establish a `decision`. The agent proposing, recommending, or assuming a direction is a `hypothesis` or a `note`, never a `decision`.
+- A `decision` is a direction for the work itself: which option, what is in or out of scope, what the product, analysis or team will do. An instruction or approval for the agent to carry out a step ("go ahead", "deploy it", "push it", "you do it", "retry", "run the tests") is not a decision; record it as `progress` once the step is done, or not at all.
 - A tool call shown without a result has no outcome. Do not state that it succeeded, failed, or produced anything; if it matters, it is a `note` that the call was issued and its outcome is unknown.
 - Numbers, file names, and claims come from the events. Do not infer what an event does not show.
 - Prefer few updates that a teammate would need over many that restate the events. Zero updates is a valid output.
