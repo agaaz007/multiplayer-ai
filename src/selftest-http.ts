@@ -55,6 +55,7 @@ for (const n of ["ledger_record_finding", "ledger_record_decision", "ledger_reco
   assert.notEqual(byName.get(n)?.annotations?.readOnlyHint, true, `${n} is a save, so ChatGPT asks before calling it`);
 }
 assert.ok(!byName.has("ledger_threads") && !byName.has("ledger_record_update"), "continuity tools need a database and are absent");
+assert.ok(tools.every((t: any) => t._meta === undefined && t.outputSchema === undefined), "web clients get no MCP Apps card metadata or output schemas");
 ok(`${tools.length} tools over HTTP; read tools carry readOnlyHint, save tools do not; no continuity tools without a database`);
 
 // ---------- 3. save, then find it, through the MCP client ----------
@@ -74,8 +75,12 @@ const saved = textOf(await client.callTool({
 const id = saved.match(/Recorded decision (dec-[a-z0-9-]+)/)?.[1];
 assert.ok(id, saved);
 assert.ok(fs.existsSync(path.join(tmp, "ledger", "decisions", `${id}.md`)), "the decision file is in the scratch ledger");
-const found = textOf(await client.callTool({ name: "ledger_search", arguments: { query: "annual plan pricing test" } }));
+const rawSearch: any = await client.callTool({ name: "ledger_search", arguments: { query: "annual plan pricing test" } });
+const found = textOf(rawSearch);
 assert.ok(found.includes(id!), found);
+// 2026-09-15 ChatGPT Plus test: results carrying structuredContent or _meta failed with "Unexpected response type"
+assert.ok(!("structuredContent" in rawSearch) && !("_meta" in rawSearch), `search result is text-only: ${Object.keys(rawSearch).join(",")}`);
+assert.ok(rawSearch.content.every((c: any) => Object.keys(c).sort().join(",") === "text,type"), "content items carry only type and text");
 const brief = textOf(await client.callTool({ name: "ledger_brief", arguments: {} }));
 assert.ok(brief.includes("Keep the annual plan"), "the brief lists the new decision");
 ok(`ledger_record_decision over HTTP saved ${id} to the scratch ledger; ledger_search and ledger_brief return it`);

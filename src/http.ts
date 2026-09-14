@@ -76,6 +76,26 @@ function readJson(req: http.IncomingMessage): Promise<unknown> {
   });
 }
 
+/**
+ * Web clients get text-only tool results. In the first ChatGPT Plus test (2026-09-15) the plain-text tool
+ * (ledger_brief) worked, while every tool returning structuredContent or result _meta (ledger_search, the save
+ * tools) showed "Unexpected response type", even though the saves themselves went through and ChatGPT retried
+ * them into duplicates. Structured receipts and evidence-card metadata serve local hosts and hooks; the text
+ * content carries the same facts. Tool definitions lose _meta (the MCP Apps card) and outputSchema to match.
+ */
+export function webSafeMessage(message: any): any {
+  const result = message?.result;
+  if (!result || typeof result !== "object") return message;
+  if (Array.isArray(result.content)) {
+    const { structuredContent: _sc, _meta: _m, ...rest } = result;
+    return { ...message, result: { ...rest, content: result.content.map((c: any) => (c?.type === "text" ? { type: "text", text: String(c.text ?? "") } : c)) } };
+  }
+  if (Array.isArray(result.tools)) {
+    return { ...message, result: { ...result, tools: result.tools.map(({ _meta: _m, outputSchema: _o, ...tool }: any) => tool) } };
+  }
+  return message;
+}
+
 export async function startHttpMcp(opts: HttpMcpOpts): Promise<http.Server> {
   const log = opts.log ?? ((m: string) => process.stderr.write(`${m}\n`));
   prepareScratch(log);
@@ -93,6 +113,8 @@ export async function startHttpMcp(opts: HttpMcpOpts): Promise<http.Server> {
     try { body = await readJson(req); } catch (e: any) { return sendJson(res, 400, rpcError(-32700, `Parse error: ${e.message}`)); }
     const mcp = createMcpServer(cfg);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+    const send = transport.send.bind(transport);
+    transport.send = ((message: any, options?: any) => send(webSafeMessage(message), options)) as typeof transport.send;
     res.on("close", () => { transport.close().catch(() => {}); mcp.close().catch(() => {}); });
     try {
       await mcp.connect(transport);
