@@ -1,0 +1,18 @@
+{
+  "schema": "teamwork-profiles/v2",
+  "model": "gpt-5.6-sol",
+  "reasoning_effort": "medium",
+  "stage_deadline_ms": null,
+  "provider_wait_ms": null,
+  "maximum_approved_usd": null,
+  "authorization": null,
+  "note": "Do not reuse the prior pilot budget. Fill actual native adapter/version/probe evidence before live dispatch. Nulls intentionally fail preflight.",
+  "arms": {
+    "ledger": {"version": null, "capture_mode": "native-classifier-on", "session_driver_argv": null, "guide_sha256": null, "isolation_probe": null, "recall_probe": null},
+    "supermemory": {"version": null, "capture_mode": "official-native-plugin", "session_driver_argv": null, "guide_sha256": null, "isolation_probe": null, "recall_probe": null},
+    "mem0": {"version": "Platform V3; live pin still required", "capture_mode": "official-native-integration", "session_driver_argv": null, "guide_sha256": null, "isolation_probe": null, "recall_probe": null},
+    "gbrain": {"version": null, "capture_mode": "official-native-workflow", "session_driver_argv": null, "guide_sha256": null, "isolation_probe": null, "recall_probe": null},
+    "graphify": {"version": null, "capture_mode": "official-code-and-document-graph", "session_driver_argv": null, "guide_sha256": null, "isolation_probe": null, "recall_probe": null},
+    "fresh-agent": {"version": "no-memory-control", "capture_mode": "none", "session_driver_argv": null, "guide_sha256": null, "isolation_probe": null, "recall_probe": null}
+  }
+}

@@ -1,0 +1,10 @@
+import assert from 'node:assert/strict';
+import {scopedRequest} from './native-mem0-proxy.mjs';
+const ns='teamwork_test123',events=new Set(['owned']);
+assert.throws(()=>scopedRequest('POST','/v3/memories/search/',{app_id:'foreign'},ns,events));
+assert.throws(()=>scopedRequest('GET','/v1/event/foreign/',null,ns,events));
+assert.equal(scopedRequest('GET','/v1/event/owned/',null,ns,events),null);
+const search=scopedRequest('POST','/v3/memories/search/',{app_id:ns,top_k:3,filters:{OR:[{user_id:'foreign'}]}},ns,events);
+assert.deepEqual(search.filters.AND[0],{app_id:ns});
+assert.throws(()=>scopedRequest('POST','/v3/memories/add/',{app_id:ns,user_id:'foreign',agent_id:ns+'-abc',infer:true,messages:[]},ns,events));
+console.log('Mem0 proxy scope tests passed');
