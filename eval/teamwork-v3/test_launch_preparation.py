@@ -138,3 +138,17 @@ class PrepareCohortBatchTests(unittest.TestCase):
   self.assertEqual(len(scored['entries']),12);self.assertEqual(cohort_scope.expected_arms(scored),cohort_scope.ALL_ARMS);self.assertEqual(scored['disk_plan']['summary']['total_gib'],10.0)
   for e in scored['entries']:self.assertTrue((Path(e['root'])/'sequence.json').exists())
 if __name__=='__main__':unittest.main()
+
+
+class LedgerVsControlsScopeTests(unittest.TestCase):
+    def test_ledger_vs_controls_is_a_closed_declared_scope(self):
+        import cohort_scope
+        scope=cohort_scope.batch_scope('ledger-vs-controls','bake-off authorization')
+        self.assertEqual(scope['included_arms'],['ledger','control-git','handoff-note'])
+        self.assertEqual(sorted(scope['excluded_arms']),['gbrain','graphify','supermemory'])
+        self.assertEqual(cohort_scope.expected_arms({'cohort_scope':scope}),('ledger','control-git','handoff-note'))
+        self.assertEqual(cohort_scope.cohort_label(('ledger','control-git','handoff-note')),'ledger-vs-controls')
+        self.assertEqual(cohort_scope.cohort_label(cohort_scope.PRODUCT_ARMS[:3]),'three-product')
+        self.assertEqual(cohort_scope.cohort_label(cohort_scope.PRODUCT_ARMS),'four-product')
+        self.assertIn('ledger-vs-controls',__import__('prepare_cohort').BATCHES)
+

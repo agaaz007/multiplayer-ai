@@ -19,6 +19,9 @@ SCOPES = {
     'products': (list(PRODUCT_ARMS), list(CONTROL_ARMS)),
     'controls': (list(CONTROL_ARMS), list(PRODUCT_ARMS)),
     'six-arm': (list(ALL_ARMS), []),
+    # The bake-off the user asked for on 2026-09-15: Ledger against "just commit" and
+    # "just write a note", runnable without OpenAI/Supermemory provider routes.
+    'ledger-vs-controls': (['ledger'] + list(CONTROL_ARMS), [a for a in PRODUCT_ARMS if a != 'ledger']),
 }
 LABELS = {3: 'three-product', 4: 'four-product', 2: 'two-control', 6: 'six-arm'}
 
@@ -45,6 +48,9 @@ def expected_arms(config):
 
 
 def cohort_label(arms):
+    for name, (included, _excluded) in SCOPES.items():
+        if list(arms) == included:
+            return name if name != 'products' else 'four-product'
     return LABELS.get(len(arms), str(len(arms)) + '-arm')
 
 
