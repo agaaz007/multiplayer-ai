@@ -61,7 +61,7 @@ class TransportTests(unittest.TestCase):
         return sequence.stage_workspace(self.pack, next(s for s in self.manifest['stages'] if s['id'] == stage),
                                         self.work(stage), self.controller(stage))
 
-    def launch(self):
+    def launch(self, arm='fresh-agent'):
         driver = self.base / 'fake-driver.py'
         driver.write_text('# test stand-in; never executed\n')
         budget = self.base / 'shared-budget.json'
@@ -69,7 +69,7 @@ class TransportTests(unittest.TestCase):
         profiles = {}
         for name in 'ABC':
             profile = self.base / (name + '-profile.json')
-            sequence.dump(profile, {'arm': 'fresh-agent', 'readiness_verified': True, 'paid_paths_gated': True})
+            sequence.dump(profile, {'arm': arm, 'readiness_verified': True, 'paid_paths_gated': True})
             profiles[name] = str(profile)
         cfg = {'execution_authorized': True, 'authorization': 'controller unit test only', 'paid_paths_gated': True,
                'maximum_approved_usd': 30, 'budget_file': str(budget), 'runtime': str(self.base),
@@ -182,6 +182,30 @@ class TransportTests(unittest.TestCase):
             profile['read_paths'] = [str(bad)]
             with self.assertRaisesRegex(ValueError, 'private/previous'):
                 sequence.validate_profile(profile, {'arm': 'ledger'}, protected)
+
+    def test_baseline_controls_need_no_budget_gate_but_products_do(self):
+        protected = [self.pack, self.controller('B')]
+        for arm in ('control-git', 'handoff-note', 'fresh-agent'):
+            sequence.validate_profile({'arm': arm, 'readiness_verified': True, 'paid_paths_gated': True}, {'arm': arm}, protected)
+        with self.assertRaisesRegex(ValueError, 'budget gate'):
+            sequence.validate_profile({'arm': 'gbrain', 'readiness_verified': True, 'paid_paths_gated': True}, {'arm': 'gbrain'}, protected)
+        with self.assertRaisesRegex(ValueError, 'readiness'):
+            sequence.validate_profile({'arm': 'control-git', 'readiness_verified': False, 'paid_paths_gated': True}, {'arm': 'control-git'}, protected)
+
+    def test_control_git_sequence_runs_with_origin_only_workspace(self):
+        self.manifest['arms'].append('control-git'); self.freeze_pack()
+        self.prepare('control-git')
+        launch, cfg = self.launch('control-git')
+        bare = self.root / 'shared-remote.git'; bare.mkdir(); sequence.git(bare, 'init', '--bare', '-q')
+        cfg['stage_profile_argv'] = ['test-prepare', '{request}']; sequence.dump(launch, cfg)
+        def prepare_stage(argv, *args):
+            if argv[0] == 'test-prepare':
+                req = sequence.load(argv[-1]); sequence.git(Path(req['workspace']), 'remote', 'add', 'origin', str(bare))
+                return {'exit_code': 0, 'timed_out': False, 'timing_valid': True}
+            return self.fake_driver(argv, *args)
+        with patch.object(sequence, 'run_command', side_effect=prepare_stage):
+            state = sequence.run(self.root, launch)
+        self.assertEqual([x['status'] for x in state['stages'].values()], ['finished'] * 3, state['stages'])
 
     def test_pm_requires_artifact_snapshot_and_hashes(self):
         self.prepare()

@@ -7,6 +7,7 @@ from sequence import prepare,dump,digest,load
 from matrix import preflight,run,disk_preflight,DiskAdmissionError,MINIMUM_FREE_BYTES
 from unittest.mock import patch
 from types import SimpleNamespace
+import cohort_scope
 
 class MatrixAdmissionTests(unittest.TestCase):
     def setUp(self):
@@ -22,21 +23,41 @@ class MatrixAdmissionTests(unittest.TestCase):
         fixture=test_mechanisms.RecordUseTests();fixture.setUp();self.addCleanup(fixture.doCleanups)
         proof=self.root/'record-use.json';dump(proof,mechanisms.audit(fixture.r,fixture.w))
         self.proof=proof
-        lanes=[];self.launches=[];self.readies=[]
-        for arm in ['ledger','graphify','gbrain','supermemory']:
-            seqs=[]
-            for t in ['pm','engineering']:
-                r=self.root/'sequences'/f'{t}-{arm}';prepare(packs[t],r,t,arm)
-                ready=r/'ready.json';dump(ready,{'arm':arm,'capture_recall_pass':True,'isolation_pass':True,'full_harness_pass':True,'native_version':'fixture-v1','record_use_audit':{'path':str(proof),'sha256':digest(proof)}})
-                native=r/'native.json';dump(native,{'readiness_receipt':str(ready),'version':'fixture-v1'})
-                launch=r/'launch.json';dump(launch,{'schema':'teamwork-launch/v3','authorization':'test only','execution_authorized':True,'paid_paths_gated':True,'maximum_approved_usd':30,
-                    'budget_file':str(self.budget),'native_config':str(native),'known_issues_file':str(self.issues),'frozen_files':{str(self.bound):digest(self.bound),str(self.issues):digest(self.issues)},
-                    'model':'same-model','reasoning_effort':'medium','capture_timeout_ms':300000,
-                    'runtime':str(self.root/'runtime'),'driver_argv':['node',str(self.bound),'run','{request}'],
-                    'stage_profiles':{s:str(r/'stages'/s/'controller/native-profile.json') for s in 'ABCD'}})
-                self.launches.append(launch);self.readies.append(ready);seqs.append({'root':str(r),'launch':str(launch)})
-            lanes.append({'arm':arm,'sequences':seqs})
-        self.config=self.root/'matrix.json';dump(self.config,{'schema':'teamwork-matrix/v3','arms':lanes,'disk_plan':{'schema':'teamwork-disk-plan/v3','sequences':[{'root':s['root'],'arm':a['arm'],'track':load(Path(s['root'])/'sequence.json')['track'],'filesystem_path':s['root'],'retained_output_bytes':256*1024**2,'peak_working_capture_bytes':64*1024**2,'basis':'test retention and peak'}for a in lanes for s in a['sequences']],'shared':[{'filesystem_path':str(self.root),'overhead_bytes':0,'margin_bytes':1024**3,'basis':'test shared margin'}]}})
+        self.packs=packs;self.launches=[];self.readies=[]
+        lanes=[self.lane(arm) for arm in ['ledger','graphify','gbrain','supermemory']]
+        self.config=self.root/'matrix.json';dump(self.config,self.matrix_config(lanes))
+    def lane(self,arm):
+        seqs=[]
+        for t in ['pm','engineering']:
+            r=self.root/'sequences'/f'{t}-{arm}';prepare(self.packs[t],r,t,arm)
+            ready=r/'ready.json';dump(ready,{'arm':arm,'capture_recall_pass':True,'isolation_pass':True,'full_harness_pass':True,'native_version':'fixture-v1','record_use_audit':{'path':str(self.proof),'sha256':digest(self.proof)}})
+            native=r/'native.json';dump(native,{'readiness_receipt':str(ready),'version':'fixture-v1'})
+            launch=r/'launch.json';dump(launch,{'schema':'teamwork-launch/v3','authorization':'test only','execution_authorized':True,'paid_paths_gated':True,'maximum_approved_usd':30,
+                'budget_file':str(self.budget),'native_config':str(native),'known_issues_file':str(self.issues),'frozen_files':{str(self.bound):digest(self.bound),str(self.issues):digest(self.issues)},
+                'model':'same-model','reasoning_effort':'medium','capture_timeout_ms':300000,
+                'runtime':str(self.root/'runtime'),'driver_argv':['node',str(self.bound),'run','{request}'],
+                'stage_profiles':{s:str(r/'stages'/s/'controller/native-profile.json') for s in 'ABCD'}})
+            self.launches.append(launch);self.readies.append(ready);seqs.append({'root':str(r),'launch':str(launch)})
+        return {'arm':arm,'sequences':seqs}
+    def matrix_config(self,lanes,scope=None):
+        cfg={'schema':'teamwork-matrix/v3','arms':lanes,'disk_plan':{'schema':'teamwork-disk-plan/v3','sequences':[{'root':s['root'],'arm':a['arm'],'track':load(Path(s['root'])/'sequence.json')['track'],'filesystem_path':s['root'],'retained_output_bytes':256*1024**2,'peak_working_capture_bytes':64*1024**2,'basis':'test retention and peak'}for a in lanes for s in a['sequences']],'shared':[{'filesystem_path':str(self.root),'overhead_bytes':0,'margin_bytes':1024**3,'basis':'test shared margin'}]}}
+        if scope is not None:cfg['cohort_scope']=scope
+        return cfg
+    def test_six_arm_scope_admits_twelve_sequences_and_controls_need_no_record_proof(self):
+        lanes=load(self.config)['arms']+[self.lane(arm) for arm in cohort_scope.CONTROL_ARMS]
+        for ready in self.readies[-4:]:self.change(ready,record_use_audit=None)
+        dump(self.config,self.matrix_config(lanes));self.rejects_without_dispatch('declared competitor')
+        dump(self.config,self.matrix_config(lanes,cohort_scope.batch_scope('six-arm','user declared the six-arm cohort')))
+        result=preflight(self.config);self.assertEqual(len(result['arms']),6);self.assertEqual(len(result['disk_members']),12)
+        self.assertEqual({a['arm'] for a in result['arms']},set(cohort_scope.ALL_ARMS))
+        self.change(self.readies[-1],full_harness_pass=False)
+        with self.assertRaisesRegex(ValueError,'full-harness'):preflight(self.config)
+    def test_controls_batch_runs_two_lanes(self):
+        lanes=[self.lane(arm) for arm in cohort_scope.CONTROL_ARMS]
+        for ready in self.readies[-4:]:self.change(ready,record_use_audit=None)
+        dump(self.config,self.matrix_config(lanes,cohort_scope.batch_scope('controls','controls batch')))
+        with patch('matrix.run_sequence',return_value={'status':'ended','stages':{}}) as dispatch:state=run(self.config,self.root/'run-output')
+        self.assertEqual(dispatch.call_count,4);self.assertEqual(set(state['arms']),set(cohort_scope.CONTROL_ARMS))
     def test_missing_known_issue_disclosure_rejected(self):
         self.change(self.launches[-1],known_issues_file=None)
         self.rejects_without_dispatch('known issues')
