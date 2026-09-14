@@ -83,14 +83,28 @@ function readJson(req: http.IncomingMessage): Promise<unknown> {
  * them into duplicates. Structured receipts and evidence-card metadata serve local hosts and hooks; the text
  * content carries the same facts. Tool definitions lose _meta (the MCP Apps card) and outputSchema to match.
  */
-export function webSafeMessage(message: any): any {
+export type WebResultMode = "text" | "rich";
+
+/**
+ * `rich` keeps the evidence card (tool `_meta.ui`, result structuredContent and `_meta`) and only reduces each
+ * content item to `{type, text}`: in that test the failing tools and the working one differed in both their
+ * structured data and their content items, and ChatGPT renders the card itself. `text` strips everything but
+ * text, the configuration that passed. Chosen per deployment with LEDGER_HTTP_RESULTS.
+ */
+export function webResultMode(env: NodeJS.ProcessEnv = process.env): WebResultMode {
+  return env.LEDGER_HTTP_RESULTS === "rich" ? "rich" : "text";
+}
+
+export function webSafeMessage(message: any, mode: WebResultMode = "text"): any {
   const result = message?.result;
   if (!result || typeof result !== "object") return message;
   if (Array.isArray(result.content)) {
+    const content = result.content.map((c: any) => (c?.type === "text" ? { type: "text", text: String(c.text ?? "") } : c));
+    if (mode === "rich") return { ...message, result: { ...result, content } };
     const { structuredContent: _sc, _meta: _m, ...rest } = result;
-    return { ...message, result: { ...rest, content: result.content.map((c: any) => (c?.type === "text" ? { type: "text", text: String(c.text ?? "") } : c)) } };
+    return { ...message, result: { ...rest, content } };
   }
-  if (Array.isArray(result.tools)) {
+  if (Array.isArray(result.tools) && mode === "text") {
     return { ...message, result: { ...result, tools: result.tools.map(({ _meta: _m, outputSchema: _o, ...tool }: any) => tool) } };
   }
   return message;
@@ -114,7 +128,7 @@ export async function startHttpMcp(opts: HttpMcpOpts): Promise<http.Server> {
     const mcp = createMcpServer(cfg);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     const send = transport.send.bind(transport);
-    transport.send = ((message: any, options?: any) => send(webSafeMessage(message), options)) as typeof transport.send;
+    transport.send = ((message: any, options?: any) => send(webSafeMessage(message, resultMode), options)) as typeof transport.send;
     res.on("close", () => { transport.close().catch(() => {}); mcp.close().catch(() => {}); });
     try {
       await mcp.connect(transport);
