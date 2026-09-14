@@ -17,6 +17,16 @@ while [ $# -gt 0 ]; do case "$1" in
   --repetitions) REPS="$2"; shift 2;;
   *) echo "unknown arg $1"; exit 2;;
 esac; done
+# gbrain embeds on write and falls back to keyword/tsvector search without a key. A D04 history is
+# small and lexically close to its own questions, so a keyword-only arm can look fine here while the
+# product's actual hybrid retrieval is untested — and a paid ours-vs-gbrain number taken that way is
+# not a comparison. Refuse rather than quietly handicap one arm.
+if [ -z "${OPENAI_API_KEY:-}" ] && [ "${LEDGER_EVAL_GBRAIN_KEYWORD_ONLY:-}" != "1" ]; then
+  echo "refusing: gbrain has no OPENAI_API_KEY, so its pages would not be embedded and only" >&2
+  echo "keyword search would be measured. Export a key, or set LEDGER_EVAL_GBRAIN_KEYWORD_ONLY=1" >&2
+  echo "to run a deliberately keyword-only gbrain arm and report it as such." >&2
+  exit 3
+fi
 OUT="eval/runs/$RUN"; SUITE="$OUT/suite"; mkdir -p "$OUT"
 export LEDGER_EVAL=1
 export LEDGER_EVAL_DB="${LEDGER_EVAL_DB:-postgresql://localhost:5432/ledger_eval}"
