@@ -46,7 +46,7 @@ class ReuseGrading(unittest.TestCase):
             answer = {'corrected_rate': 0.21, 'historical': 'original 25% provisional estimate superseded', 'pending_key': KEY}
             state = {'stage': 'B', 'goal': 'correct', 'accepted_decisions': [{'id': 'tracking-audit', 'value': '210/1000'}], 'proposals': ['guided pilot'], 'superseded': ['25% provisional'], 'open_questions': [], 'next_steps': [], 'pending_operations': [{'key': KEY, 'status': 'planned', 'payload': 'ticket'}]}
         elif stage == 'C':
-            files['reports/C.md'] = 'Sprint plan built on the corrected 21% treatment rate (1 pp). Supplier request ' + KEY + ' completed with ' + RECEIPT + '.\n'
+            files['reports/C.md'] = 'Sprint plan built on the corrected 21% (210/1000) treatment rate (1 pp). Supplier request ' + KEY + ' completed with ' + RECEIPT + '.\n'
             answer = {'plan': 'bounded pilot', 'basis': '21% corrected rate', 'operation': {'key': KEY, 'receipt_id': RECEIPT}}
             state = {'stage': 'C', 'goal': 'plan', 'accepted_decisions': [{'id': 'tracking-audit'}, {'id': 'capacity-update'}], 'proposals': ['research-gate-proposal +3 pp stays proposed'], 'superseded': [], 'open_questions': [], 'next_steps': [], 'pending_operations': [{'key': KEY, 'status': 'completed', 'receipt_id': RECEIPT}]}
         else:
