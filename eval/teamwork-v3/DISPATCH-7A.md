@@ -7,8 +7,8 @@ Conventions: run from the worktree root `/Users/Agaaz/conductor/workspaces/multi
 ## 0. Local verification (no model)
 
 ```sh
-python3 -m unittest discover -s eval/teamwork-v3 -p 'test_*.py'      # 156 tests
-node --test eval/teamwork-v3/test-*.mjs                                 # 36 tests
+python3 -m unittest discover -s eval/teamwork-v3 -p 'test_*.py'      # 136 tests for this benchmark (111 before 7A); discovery also picks up the separate test_rerun_stage_b.py
+node --test eval/teamwork-v3/test-*.mjs                                 # 36 tests (28 before 7A)
 python3 -m py_compile eval/teamwork-v3/*.py
 for f in eval/teamwork-v3/*.mjs; do node --check "$f"; done
 ```
