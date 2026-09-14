@@ -117,6 +117,7 @@ export async function startHttpMcp(opts: HttpMcpOpts): Promise<http.Server> {
   if (cfg.continuity) throw new Error("scratch HTTP server refuses to start with a continuity database configured");
   if (!opts.secret) log("WARNING: LEDGER_HTTP_SECRET is not set; the endpoint is /mcp and anyone who finds the URL can read and write this scratch ledger");
   const endpoint = mcpPath(opts.secret);
+  const resultMode = webResultMode();
 
   const server = http.createServer(async (req, res) => {
     const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
@@ -142,6 +143,6 @@ export async function startHttpMcp(opts: HttpMcpOpts): Promise<http.Server> {
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(opts.port, opts.host ?? "0.0.0.0", () => resolve()); });
   const addr = server.address();
   const port = typeof addr === "object" && addr ? addr.port : opts.port;
-  log(`ledger MCP over HTTP (scratch) on port ${port} at ${opts.secret ? "/mcp/<secret>" : "/mcp"}; ledger ${cfg.ledger_dir}; author ${cfg.author}`);
+  log(`ledger MCP over HTTP (scratch) on port ${port} at ${opts.secret ? "/mcp/<secret>" : "/mcp"}; ledger ${cfg.ledger_dir}; author ${cfg.author}; results ${resultMode}`);
   return server;
 }

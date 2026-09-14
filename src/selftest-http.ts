@@ -85,6 +85,23 @@ const brief = textOf(await client.callTool({ name: "ledger_brief", arguments: {}
 assert.ok(brief.includes("Keep the annual plan"), "the brief lists the new decision");
 ok(`ledger_record_decision over HTTP saved ${id} to the scratch ledger; ledger_search and ledger_brief return it`);
 
+// ---------- 4. rich mode keeps the evidence card's data; content items are still reduced to type and text ----------
+{
+  const { webSafeMessage, webResultMode } = await import("./http.js");
+  const call = { jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: "found", annotations: { audience: ["user"] } }], structuredContent: { schema: "ledger-evidence/v1" }, _meta: { "ledger/fullRecords": { a: "# A" } } } };
+  const rich = webSafeMessage(call, "rich");
+  assert.deepEqual(rich.result.content, [{ type: "text", text: "found" }]);
+  assert.deepEqual({ sc: rich.result.structuredContent, meta: rich.result._meta }, { sc: call.result.structuredContent, meta: call.result._meta }, "rich keeps the card data");
+  const text = webSafeMessage(call, "text");
+  assert.ok(!("structuredContent" in text.result) && !("_meta" in text.result));
+  const list = { jsonrpc: "2.0", id: 2, result: { tools: [{ name: "ledger_search", _meta: { ui: { resourceUri: "ui://ledger/evidence-v1.html" } } }] } };
+  assert.equal(webSafeMessage(list, "rich").result.tools[0]._meta.ui.resourceUri, "ui://ledger/evidence-v1.html", "rich keeps the card on the tool");
+  assert.equal(webSafeMessage(list, "text").result.tools[0]._meta, undefined);
+  assert.equal(webResultMode({ LEDGER_HTTP_RESULTS: "rich" } as any), "rich");
+  assert.equal(webResultMode({} as any), "text", "text-only is the default");
+  ok("LEDGER_HTTP_RESULTS=rich keeps the evidence card (tool _meta, structuredContent, result _meta) and reduces content items to type and text; text-only stays the default");
+}
+
 await client.close();
 await new Promise<void>((r) => server.close(() => r()));
 console.log(`selftest-http: ok (${step} checks) — tmp ${tmp}`);
