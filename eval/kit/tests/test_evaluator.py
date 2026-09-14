@@ -72,6 +72,21 @@ class ScorerTests(unittest.TestCase):
                 obs["answers"][key]["value"] = value
                 self.assertEqual(self.score("D04", obs)["status"], "pass")
 
+    def test_stem_admits_any_spelling_of_the_same_reason(self):
+        """Both spellings the live run actually produced, from the same retrieved sentence."""
+        for value in ("locked", "price_locked_for_quarter", "locked_pricing", "Store price locked"):
+            with self.subTest(value=value):
+                obs = self.observation("D04")
+                obs["answers"]["rejection_reason"]["value"] = value
+                self.assertEqual(self.score("D04", obs)["status"], "pass")
+
+    def test_stem_does_not_admit_a_different_reason(self):
+        for value in ("longer_trial_14d", "low_conversion", "distracting", None):
+            with self.subTest(value=value):
+                obs = self.observation("D04")
+                obs["answers"]["rejection_reason"]["value"] = value
+                self.assertEqual(self.score("D04", obs)["status"], "fail")
+
     def test_accept_does_not_admit_a_different_fact(self):
         obs = self.observation("D04")
         obs["answers"]["rejected_option"]["value"] = "longer_trial_14d"
