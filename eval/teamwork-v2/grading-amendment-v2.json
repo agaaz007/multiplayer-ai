@@ -1,0 +1,13 @@
+{
+  "schema": "engineering-grading-amendment/v2",
+  "amendment_id": "execute-response-contract-v2",
+  "original_grader_sha256": "7d3c08d770a14b9f90f674bf4f4a802407724bffd791a18c727fdd939b2d3421",
+  "public_stage_b_contract_sha256": "355804fc39ffdd6151636c414325b503b6c4f82a32c24173f2c5a7719a15c2bb",
+  "scope": "successful execute response shape; state/receipt verified through persisted job, receipt checked against provider oracle",
+  "validation": "10 tests passed, including all-stage reference, immutable Ledger B diagnostic, and receipt/state/effect mutants",
+  "files": {
+    "grade_engineering_contract_v2.py": "f6cb9652c5c916fa1dd7eaa303531121a070c5f3610b00a5ccc575888230dcd5",
+    "test_engineering_contract_v2.py": "b1880e77881abaf1fa59412480c38c8039e7ead0db9778c94f66a9a6beebcd26",
+    "GRADING-AMENDMENT-V2.md": "50477f090c59f285d9b84d3a72113bd025416678baa720e8faccbda2bbc69313"
+  }
+}

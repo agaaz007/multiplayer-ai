@@ -7,3 +7,4 @@ dist-*/
 eval/runs/
 Library/
 __pycache__/
+.env
