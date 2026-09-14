@@ -74,7 +74,7 @@ class SixArmPreparationTests(unittest.TestCase):
    launch=sequence.load(Path(entry['root'])/'launch.json');self.assertEqual(launch['authorization'],'test authorization')
    frozen=launch['frozen_files'];root=Path(entry['root']).resolve();self.assertIn(str(root/'native-guide.md'),frozen)
    if entry['arm'] in cohort_scope.CONTROL_ARMS:self.assertFalse(any(k.endswith('proxy.json') and k.startswith(str(root)) for k in frozen))
-   else:self.assertIn(str(root/'proxy.json'),frozen)
+   elif entry['arm']!='ledger':self.assertIn(str(root/'proxy.json'),frozen)  # Ledger has no paid provider path either
   seen=[]
   def dispatch(root,launch,disk_lease):seen.append(sequence.load(Path(root)/'sequence.json')['arm']);return {'status':'ended'}
   with patch.object(run_readiness.sequence,'run',side_effect=dispatch):result=run_readiness.run(config,self.root/'run')
