@@ -273,7 +273,7 @@ class ScorerTests(unittest.TestCase):
         directions = ["codex-to-claude", "claude-to-codex"]
         report = ev.report(suite, self.base / "full", 3, directions)
         self.assertEqual(report["pilot_level_demonstrated"], 0)
-        self.assertEqual(len(report["results"]), 72)
+        self.assertEqual(len(report["results"]), 78)  # 13 cases x 2 directions x 3 repetitions
         self.assertTrue(all(r["status"] == "not_run" for r in report["results"]))
         smoke = ev.report(suite, self.base / "smoke", 1, directions[:1])
         self.assertIsNone(smoke["pilot_level_demonstrated"])
@@ -281,7 +281,7 @@ class ScorerTests(unittest.TestCase):
     def test_cumulative_level_stops_at_first_gap(self):
         suite, output = self.base / "suite", self.base / "results"
         ev.prepare(suite, 4)
-        for id_ in ("D01", "D02", "D03", "R02"):
+        for id_ in ("D01", "D02", "D03", "D04", "R02"):
             obs = self.observation(id_)
             for direction in ("codex-to-claude", "claude-to-codex"):
                 obs["provenance"]["origin_harness"], obs["provenance"]["successor_harness"] = direction.split("-to-")

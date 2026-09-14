@@ -16,7 +16,7 @@ Individual case results remain visible even when a lower level blocks the total.
 
 | Level | The successor demonstrates | Cases |
 | --- | --- | --- |
-| 1: Decision continuity | Recovers constraints, rejection reasons and current decisions; preserves unresolved disagreements | D01–D03 |
+| 1: Decision continuity | Recovers constraints, rejection reasons and current decisions; preserves unresolved disagreements, including when the evidence is buried | D01–D04 |
 | 2: Selective continuity | Retrieves one topic from an interleaved session and joins relevant evidence across sessions | R01–R02 |
 | 3: Executable continuation | Recovers exact saved files, handles uncertain external outcomes and completes a small unfinished task | E01–E03 |
 | 4: Team coordination | Handles competing claims and stale uploads while a third agent keeps working | C01–C02 |
@@ -26,8 +26,8 @@ Individual case results remain visible even when a lower level blocks the total.
 never count as passes. A failed assertion means an observed mismatch; an adapter
 error means the test could not establish the result. Both block qualification.
 
-The pilot matrix is 12 cases × two handoff directions × three independent trials
-= **72 trials**. This is an acceptance gate, not a reliability estimate. Report
+The pilot matrix is 13 cases × two handoff directions × three independent trials
+= **78 trials**. This is an acceptance gate, not a reliability estimate. Report
 results for the tested model, harness versions, Ledger revision and fixture size.
 
 ## The cases
@@ -37,6 +37,7 @@ results for the tested model, harness versions, Ledger revision and fixture size
 | D01 | A standing ₹199 price instruction and rejected whole-card animation sit in the middle of a session | Correct values and reasons, with retrieved source evidence |
 | D02 | A newer confirmed metric definition supersedes an older accepted one | Current definition and explicit supersession |
 | D03 | Teammates report 8% and 100% on different dataset snapshots | No fabricated accepted rate; source-backed unresolved status and next check |
+| D04 | One history holds a corrected number, a rejected option, and a filter nobody called an assumption | The corrected number, not the first; the retired option with its reason; the population the number actually covers |
 | R01 | Paywall, hiring, attribution, copy and evaluation share one session | Paywall selected by topic; correct constraint and unfinished action |
 | R02 | Two people contribute to the same work across Codex and Claude | Both contributors' relevant setup and unfinished validation recovered |
 | E01 | Origin edits a tracked file, creates an included untracked file and deletes another | Exact hashes in the recovered worktree, deletion preserved, next action correct |
