@@ -444,6 +444,14 @@ for (const ev of Object.keys(HOOK_EVENTS)) {
 assert.ok(settings.hooks.Stop.some((e: any) => e.hooks[0].command === "someone-else"), "foreign hook kept");
 assert.ok(!settings.hooks.SessionStart.some((e: any) => e.hooks[0].command.startsWith("ledger brief")), "legacy brief hook replaced");
 
+// jsonb cannot hold U+0000: the escape is replaced, an escaped backslash before it is respected
+{
+  const { jsonbSafe } = await import("./continuity/store.js");
+  assert.equal(JSON.parse(jsonbSafe(JSON.stringify({ t: "a\u0000b" }))).t, "a\ufffdb", "NUL escape replaced");
+  assert.equal(jsonbSafe(JSON.stringify({ t: "literal \\u0000 text" })), JSON.stringify({ t: "literal \\u0000 text" }), "escaped backslash + u0000 is literal text, kept");
+  assert.equal(JSON.parse(jsonbSafe(JSON.stringify({ t: "\\\u0000" }))).t, "\\\ufffd", "backslash followed by NUL: NUL replaced, backslash kept");
+}
+
 // installer refuses a worktree source: a build in a Conductor workspace must not be a production deploy
 {
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "ledger-src-"));

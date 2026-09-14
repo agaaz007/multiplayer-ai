@@ -32,7 +32,7 @@ def disk_plan_summary(plan):
     retained=sum(s['retained_output_bytes'] for s in sequences)
     peaks={}
     for s in sequences:
-        key=(s.get('filesystem_device',''),s['arm']);peaks[key]=max(peaks.get(key,0),s['peak_working_capture_bytes'])
+        peaks[s['arm']]=max(peaks.get(s['arm'],0),s['peak_working_capture_bytes'])
     peak=sum(peaks.values());overhead=sum(x['overhead_bytes'] for x in shared);margin=sum(x['margin_bytes'] for x in shared)
     total=retained+peak+overhead+margin
     arms=sorted({s['arm'] for s in sequences})
