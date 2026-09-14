@@ -1,6 +1,6 @@
 # PM review preparation and launch
 
-This is a separate, uncalibrated decision-quality review of the sixteen immutable PM submissions. It does not replace recovery, timing, supplier, or native-use audits. It makes no pooled winner score.
+This is a separate, uncalibrated decision-quality review of the immutable PM submissions: sixteen for the four-product cohort, twenty-four for the declared six-arm cohort with the two baseline controls. It does not replace recovery, timing, supplier, or native-use audits. It makes no pooled winner score.
 
 After all primary sequences end, prepare the complete cohort with the same input configuration used by `grade-run.py`:
 
@@ -8,7 +8,7 @@ After all primary sequences end, prepare the complete cohort with the same input
 python3 eval/teamwork-v3/review-prepare.py --config GRADE_CONFIG.json --out NEW_PREPARATION --runtime ABS_RUNTIME
 ```
 
-The grading configuration supplies `sequences`, each with an absolute `root` and optional controller `provider_events` path. The preparer accepts all eight engineering/PM entries but requires all four PM arms and retains all sixteen expected cases. A timely, valid immutable answer and submission tree make a case eligible. Missing, invalid or late submissions remain explicitly `not_evaluated` with no model calls; eligible submissions are reviewed unchanged. These unavailable cases are never zero scores or silently omitted. It starts no model sessions. `review-config.json` is deliberately written with `execution_authorized: false`.
+The grading configuration supplies `sequences`, each with an absolute `root` and optional controller `provider_events` path. The preparer accepts every engineering/PM entry but requires the PM sequence of every declared arm (four products by default; six arms or one batch when `cohort_scope` declares it) and retains every expected case (16 or 24). A timely, valid immutable answer and submission tree make a case eligible. Missing, invalid or late submissions remain explicitly `not_evaluated` with no model calls; eligible submissions are reviewed unchanged. These unavailable cases are never zero scores or silently omitted. It starts no model sessions. `review-config.json` is deliberately written with `execution_authorized: false`.
 
 Inspect every neutral packet and its private `controller-map.json` before changing that gate. The private map records original file hashes, packet hashes, exact identity substitutions and source roles; never copy it to reviewers. Inspection must verify that substitutions preserve substantive claims, qualifications, authority, identifiers' distinctness and source binding. Automated identity scanning does not prove full blinding. Declare the cohort and freeze these artifacts before launch.
 
