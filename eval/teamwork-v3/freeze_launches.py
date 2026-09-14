@@ -13,6 +13,7 @@ def freeze(preparation,runtime,inventories):
     preparation=Path(preparation).resolve();plan=sequence.load(preparation);runtime=Path(runtime).resolve(strict=True)
     if plan.get('schema')!='teamwork-preparation/v3':raise ValueError('prepared cohort required')
     arms=expected_arms(plan)
+    if {e['arm'] for e in plan['entries']}!=set(arms):raise ValueError('preparation entries differ from the declared cohort; declare the batch explicitly')
     common={}
     def bind(p,expected=None):
         p=Path(p).resolve(strict=True);actual=sequence.digest(p)
@@ -69,7 +70,6 @@ def freeze(preparation,runtime,inventories):
     development=all(cfg['development_probe']for _,cfg in launches)
     if development:
         matrix={'schema':'teamwork-readiness-matrix/v3','entries':entries,'disk_plan':plan['disk_plan']}
-        if {e['arm'] for e in entries}!=set(arms):raise ValueError('readiness entries differ from the declared cohort')
     else:
         matrix={'schema':'teamwork-matrix/v3','arms':[{'arm':arm,'sequences':[{k:e[k]for k in ('root','launch')}for e in entries if e['arm']==arm]}for arm in arms],'disk_plan':plan['disk_plan']}
     if plan.get('cohort_scope') is not None:matrix['cohort_scope']=plan['cohort_scope']

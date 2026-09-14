@@ -97,7 +97,7 @@ class RunGrading(unittest.TestCase):
         self.assertEqual(sum(len(s['stages']) for s in result['sequences']), 48)
         with self.assertRaisesRegex(ValueError, 'complete six-arm'):
             run.preflight(entries[:-1], require_complete=True, cohort_scope=scope)
-        with self.assertRaisesRegex(ValueError, 'complete four-product'):
+        with self.assertRaisesRegex(ValueError, 'arm excluded'):
             run.preflight(entries, require_complete=True)
 
     def test_declared_control_batch_grades_four_sequences(self):
