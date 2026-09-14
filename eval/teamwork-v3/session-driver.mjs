@@ -17,6 +17,9 @@ const read=f=>JSON.parse(fs.readFileSync(f,'utf8'));
 const save=(f,v)=>fs.writeFileSync(f,JSON.stringify(v,null,2)+'\n',{mode:0o600,flag:'wx'});
 const hash=b=>crypto.createHash('sha256').update(b).digest('hex');
 const monotonic=()=>Number(process.hrtime.bigint()/1000000n);
+// Baseline controls: no MCP memory servers, no capture/recall hooks, no paid provider path (decision 7A).
+const BASELINE_CONTROLS=['fresh-agent','control-git','handoff-note'];
+const isControl=arm=>BASELINE_CONTROLS.includes(arm);
 
 export function snapshotTree(source,destination) {
   fs.mkdirSync(destination,{recursive:false,mode:0o700});const files={};
@@ -104,7 +107,7 @@ async function run(requestFile) {
   if(profile.arm!==req.arm)throw new Error('native profile arm mismatch');
   const developmentProbe=req.development_probe===true&&req.scored===false;
   if((profile.readiness_verified!==true&&!developmentProbe) || profile.paid_paths_gated!==true)throw new Error('native readiness or paid-path budget gate not verified');
-  if(req.arm==='fresh-agent'&&(profile.hooks||Object.keys(profile.hook_env??{}).length))throw new Error('control must not inherit capture/recall hooks');
+  if(isControl(req.arm)&&(profile.hooks||Object.keys(profile.hook_env??{}).length))throw new Error('control must not inherit capture/recall hooks');
   if(!profile.guide_file||!profile.guide_sha256)throw new Error('frozen native guide required');
   const guide=fs.readFileSync(profile.guide_file);
   if(hash(guide)!==profile.guide_sha256)throw new Error('native guide changed since freeze');
@@ -124,14 +127,14 @@ async function run(requestFile) {
   try {
     const permit=profile.budget_gate_module
       ?(await import(pathToFileURL(profile.budget_gate_module).href)).permitNativeCall:null;
-    if(req.arm!=='fresh-agent'&&typeof permit!=='function')throw new Error('native transport requires an executable budget gate');
+    if(!isControl(req.arm)&&typeof permit!=='function')throw new Error('native transport requires an executable budget gate');
     const operationCfg=path.join(output,'operations-config.json');
     const interruptFile=req.stress?.interrupt_after_supplier_effect?path.join(output,'interruption-trigger.json'):undefined;
     const nativeRoot=read(req.native_config).root;
     save(operationCfg,{root:path.join(nativeRoot,'external-operations'),stage:req.stage,interrupt_file:interruptFile});
     const servers={...(profile.mcp??{}),delivery:{command:process.execPath,args:[script,'serve',cfgFile],env:{PATH:process.env.PATH,HOME:output},cwd:output},
       operations:{command:process.execPath,args:[path.join(path.dirname(script),'operations.mjs'),operationCfg],env:{PATH:process.env.PATH,HOME:output},cwd:output}};
-    if(req.arm==='fresh-agent'&&Object.keys(profile.mcp??{}).length)throw new Error('control must not have memory servers');
+    if(isControl(req.arm)&&Object.keys(profile.mcp??{}).length)throw new Error('control must not have memory servers');
     for(const [name,server] of Object.entries(servers)) {
       if(!/^[a-zA-Z0-9_-]+$/.test(name)||typeof server.command!=='string'||!Array.isArray(server.args))throw new Error('invalid native server');
       const socket=path.join(sockets,name+'.sock');
@@ -148,7 +151,7 @@ async function run(requestFile) {
       fs.closeSync(log);
       captureProcess.on('error',error=>append('capture','error',{message:error.message}));
     }
-    const prompt=fs.readFileSync(req.prompt_file,'utf8')+`\nThis lane evaluates ${req.arm}; use its configured native tools and workflow. Your frozen product workflow guide is at ${guidePath}; read it before using native memory. `+'Deliver your answer with deliver_answer before final bookkeeping. The immutable submitted code/answer is scored. Finish native handoff within the same deadline. Never claim tests or memory saves that did not run.';
+    const prompt=fs.readFileSync(req.prompt_file,'utf8')+(isControl(req.arm)?`\nThis lane evaluates the ${req.arm} baseline control; no memory product is configured. Your frozen workflow guide is at ${guidePath}; read it before recovering or sharing work. `:`\nThis lane evaluates ${req.arm}; use its configured native tools and workflow. Your frozen product workflow guide is at ${guidePath}; read it before using native memory. `)+'Deliver your answer with deliver_answer before final bookkeeping. The immutable submitted code/answer is scored. Finish native handoff within the same deadline. Never claim tests or memory saves that did not run.';
     const remaining=cfg.deadline-monotonic();if(remaining<=0)throw new Error('native setup exhausted stage deadline');
     const result=await runSequenceCodex({home:req.fresh_home,worktree:req.workspace,runtime:req.runtime,prompt,
       model:req.model,reasoningEffort:req.reasoning_effort,timeoutMs:remaining,mcp,compactTokenLimit:req.stress?.compact_token_limit??req.compact_token_limit,interruptFile,
