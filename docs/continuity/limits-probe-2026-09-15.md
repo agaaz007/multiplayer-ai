@@ -1,8 +1,11 @@
 # D04: the limits probe — ours vs gbrain on one buried history
 
-Status as of 15 September 2026: **one scored trial has run (`d04-live-n2`). It did not discriminate.**
-Both arms recovered all three plants. See "The first live run" below before reading anything else here
-as a comparison.
+Status as of 15 September 2026: **two scored runs. The probe discriminates at `--noise 20` but the
+`ours` arm is not validly measured in either run.** GBrain missed the planted assumption in the larger
+history (3/4); the Ledger arm scored 4/4 from a boot brief that already contained the answer and from a
+previous trial's record leaked through a shared database. Read "The second live run" and
+[[fnd-20260914-d04-eval-harness-shared-eval-postgres-leaks-prio-s2ex]] before treating any of this as a
+comparison.
 
 ## The question
 
@@ -114,9 +117,80 @@ The next run must raise `--noise` far enough that neither a session page nor a r
 whole history, which is the only condition under which the three plants test retrieval rather than
 reading. Until then D04 has no comparative result.
 
+## The second live run (`d04-live-n20`, 14 September 2026)
+
+Same protocol at `--noise 20`: 66 fixture events, 43 on codex as rachit and 23 on claude-haiku as
+agaaz, with **43 turns between the `platform = android` filter and the corrected number it qualifies**.
+Capture scale: Ledger took 53 events from the codex session alone; GBrain wrote 147 event pages + 2
+session pages, 149 puts, 298 tags, 147 timeline entries, embeddings complete, in 219 s. Claude-reported
+cost $0.45 (codex/`gpt-6-astra` origin usage not priced).
+
+| Check | ours | gbrain |
+| --- | --- | --- |
+| `trial_start_cvr_pct` | 9.8 | 9.8 |
+| `rejected_option` | `price_cut` | `price_cut` |
+| `rejection_reason` | `price_locked_for_quarter` | `price_locked` |
+| `cvr_caveat` | `android_only` | **`preliminary_no_significance_conclusion` — fail** |
+
+**The size increase worked.** GBrain went from 3 tool calls and 24 s at `--noise 2` to 10 calls and 73 s,
+visibly hunting: `query` → `search` → `get_page` → `search "9.8 percent deduplicated CVR condition"` →
+`search "trial-start CVR caveat"` → `search "dedup"` → `search "saw the paywall twice"`. At this size the
+history no longer fits in one page, so retrieval is finally the thing being tested.
+
+**How it failed is the informative part.** GBrain's cited evidence *contains* the Android fact
+("Android-only measurement; iOS excluded (export still backfilling at pull time)"), so the information
+reached its context. It answered a different caveat anyway — the "preliminary result; no conclusion
+about lift or significance yet" status — and explained the choice in its notes: that status line "was
+dropped when the notes were rewritten with the sizing table". That is a defensible answer to the
+question as worded.
+
+Two design weaknesses follow, and they are the probe's, not the product's:
+
+1. **At high noise the origin agents manufacture their own caveats.** `experiment-notes.md`, written by
+   an origin agent, carries a preliminary/significance disclaimer that was genuinely dropped later. "The
+   condition nobody wrote down" stops being unique once agents write prose into the workspace, so the
+   check silently becomes "pick the caveat the grader had in mind".
+2. **The Android fact survived only in a derived artifact.** GBrain quoted the origin's own file, not
+   the human turn. The check requires the fixture text, so a successor reconstructing the right fact
+   from a summary cannot pass, while one that never saw the original also cannot. Those are different
+   failures and the current check cannot tell them apart.
+
+### Why the ours arm is not a result
+
+Its successor's boot brief, before any tool call, contained:
+
+    ## Open work (records) (this repo first), last 14 days
+    - investigation · Marriage-intent paywall trial-start CVR … · 7e2518ac-…
+      PROPOSED next: "Size the 14 day trial experiment from the deduplicated 9.8% trial-start CVR."
+
+and elsewhere quoted the origin back as "two options to lift the **Android-only 12.4% trial-start CVR**",
+fusing the hidden filter to the number. `trial_start_cvr_pct` was therefore never a retrieval test for
+this arm at any noise level. Supplying that brief is intended product behaviour, not cheating — but it
+means the two arms are not performing the same task, and D04 as written does not say so.
+
+Worse, the brief listed records from **other trials' repos** despite being labelled "this repo first".
+The `noise=20` successor's first two calls were `ledger_record_get` on its own record *and* on
+`c487f23e`, the `noise=2` record written 18 minutes earlier, whose PROPOSED line also stated the
+corrected 9.8% figure. All phase-1 `ours` trials share one `ledger_eval` Postgres database; GBrain gets
+a fresh PGLite brain per trial HOME, so the contamination is one-directional and favours `ours`.
+Details, evidence and assumptions: [[fnd-20260914-d04-eval-harness-shared-eval-postgres-leaks-prio-s2ex]].
+
+**Standing scoreboard: GBrain 3/4, measured cleanly. Ledger unmeasured.**
+
+Before the `ours` arm can be re-run for a comparative number:
+
+- give each trial its own database or schema, and scope the brief's record list to the trial repo;
+- decide explicitly whether the boot brief is part of what is being compared. If it is, say so and
+  measure both arms with whatever boot context each product actually provides. If it is not, the ours
+  successor must start without it. Either is defensible; leaving it undeclared is not;
+- make `cvr_caveat` robust to origin-authored caveats, or accept the Android fact from a derived
+  artifact and score the two failure modes separately.
+
 ## What this does not measure
 
-- **Retrieval, at low `--noise`.** Demonstrated above, not hypothesised.
+- **Retrieval, at low `--noise`.** Demonstrated in the first run, not hypothesised.
+- **Anything about Ledger, at either noise level.** Its arm booted with the answer and read another
+  trial's records; both runs are diagnostic-only for that arm.
 - **Whether a successor spontaneously suspects the assumption.** The resume prompt asks for "any
   condition attached to that CVR that the team never wrote down as a caveat". That wording avoids
   naming *which* condition, but it does tell the successor to go looking. D04 measures whether each
