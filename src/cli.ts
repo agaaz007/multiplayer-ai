@@ -2,7 +2,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { initLedger, loadConfig, loadAll, record, getById, pull, discardDraft, ledgerHome } from "./store.js";
+import { initLedger, loadConfig, loadAll, record, getById, pull, discardDraft, ledgerHome, saveConfig } from "./store.js";
 import { brief, search, renderFull, stats } from "./query.js";
 import { TYPES, type LedgerType, type LedgerObject } from "./schema.js";
 import { readReceipt, savedReceipt, renderReceiptBox, type LedgerReceipt } from "./receipts.js";

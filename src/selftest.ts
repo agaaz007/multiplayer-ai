@@ -451,7 +451,7 @@ assert.ok(!settings.hooks.SessionStart.some((e: any) => e.hooks[0].command.start
   const wtCli = path.join(wt, "dist", "cli.js"); fs.writeFileSync(wtCli, "");
   assert.equal(gitWorktreeOf(wtCli), wt, "nearest .git (file or dir) wins");
   const inWt = installSource(wtCli);
-  assert.ok(!inWt.stable && inWt.worktree === wt, "cli.js inside a worktree is unstable");
+  assert.ok(!inWt.stable && inWt.worktree === fs.realpathSync(wt), "cli.js inside a worktree is unstable");
   assert.throws(() => assertStableInstallSource("the helper", inWt), /refusing to install the helper from a git worktree[\s\S]*ledger deploy/, "refusal names the fix");
   const saved = process.env.LEDGER_ALLOW_WORKTREE_INSTALL; process.env.LEDGER_ALLOW_WORKTREE_INSTALL = "1";
   assert.equal(assertStableInstallSource("x", inWt), inWt, "explicit override passes");
