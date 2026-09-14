@@ -276,12 +276,23 @@ def cases(noise_events=1000, minimum_origin_tokens=100000, maximum_boot_tokens=1
     return items
 
 
-def prepare(root, noise_events, minimum_origin_tokens=100000, maximum_boot_tokens=12000):
+def prepare(root, noise_events, minimum_origin_tokens=100000, maximum_boot_tokens=12000,
+            limits_noise=2, only=None):
+    """`only` builds a focused suite: public/ and the private oracle contain just those cases, so a
+    report over it is self-consistent rather than mostly `not_run`. A level is then demonstrated only
+    over the cases present, which is why a focused report states its case list."""
     root = Path(root)
     if root.exists() and any(root.iterdir()):
         raise ValueError("prepare target must be absent or empty")
     manifest = []
-    for case in cases(noise_events, minimum_origin_tokens, maximum_boot_tokens):
+    selected = cases(noise_events, minimum_origin_tokens, maximum_boot_tokens, limits_noise)
+    if only:
+        known = {c["id"] for c in selected}
+        unknown = [c for c in only if c not in known]
+        if unknown:
+            raise ValueError("unknown case(s): " + ", ".join(unknown))
+        selected = [c for c in selected if c["id"] in set(only)]
+    for case in selected:
         public = {k: v for k, v in case.items() if k != "checks"}
         # Keys/types are a response schema, not answer values.
         public["answer_keys"] = [c["key"] for c in case["checks"] if c["type"] == "answer"]
@@ -551,6 +562,8 @@ def main():
     p.add_argument("--noise-events", type=int, default=1000)
     p.add_argument("--minimum-origin-tokens", type=int, default=100000)
     p.add_argument("--maximum-boot-tokens", type=int, default=12000)
+    p.add_argument("--limits-noise", type=int, default=2, help="D04: unrelated turns in each gap between planted facts")
+    p.add_argument("--cases", nargs="+", help="Build a focused suite containing only these case ids")
     for name in ("score", "run"):
         p = sub.add_parser(name)
         p.add_argument("--suite", required=True)
@@ -567,7 +580,10 @@ def main():
             parser.error("noise-events must be at least 2")
         if args.minimum_origin_tokens < 1 or args.maximum_boot_tokens < 1:
             parser.error("token limits must be positive")
-        prepare(args.out, args.noise_events, args.minimum_origin_tokens, args.maximum_boot_tokens)
+        if args.limits_noise < 0:
+            parser.error("limits-noise must not be negative")
+        prepare(args.out, args.noise_events, args.minimum_origin_tokens, args.maximum_boot_tokens,
+                args.limits_noise, args.cases)
     else:
         if args.repetitions < 1:
             parser.error("repetitions must be positive")
