@@ -269,10 +269,18 @@ def copy_ledger_dir(source, destination, cutoff):
         else:
             kept.append(path.stem)
     if removed:
+        counts = {kind: len([p for p in (destination / kind).glob('*.md') if p.name != 'index.md'])
+                  for kind in ('definitions', 'findings', 'changes', 'decisions') if (destination / kind).is_dir()}
+        singular = {kind: kind[:-1] for kind in counts}
         for view in [p for p in destination.rglob('*.md') if p.name in ('README.md', 'index.md', 'log.md')]:
             lines = view.read_text(errors='replace').split('\n')
             filtered = [line for line in lines if not any(identifier in line for identifier in removed)]
-            view.write_text('\n'.join(filtered))
+            text = '\n'.join(filtered)
+            for kind, count in counts.items():
+                text = re.sub(r'\d+ ' + singular[kind] + 's? in force', str(count) + ' ' + (singular[kind] if count == 1 else kind) + ' in force', text)
+                text = re.sub(r'\d+ ' + kind + r'( and|,)', str(count) + ' ' + kind + r'\1', text)
+                text = re.sub(r'(and )\d+ ' + kind, r'\g<1>' + str(count) + ' ' + kind, text)
+            view.write_text(text)
     for note in destination.rglob('*'):
         if note.is_symlink():
             raise ValueError('symlink in ledger object store: ' + str(note))
@@ -591,7 +599,7 @@ def prepare(source_root, out, sessions, arms=ARMS, authorize=None, runtime=None,
     return plan
 
 
-def authorize(out, text):
+def authorize_root(out, text):
     out = Path(out).resolve(strict=True)
     if not isinstance(text, str) or not text.strip():
         raise ValueError('authorization text required')
@@ -887,7 +895,7 @@ def main(argv=None):
                          args.runtime, args.driver_argv, args.cutoff)
         result = {k: v for k, v in result.items() if k not in ('source_a_tree_files',)}
     elif args.command == 'authorize':
-        result = authorize(args.out, args.authorize)
+        result = authorize_root(args.out, args.authorize)
     elif args.command == 'run':
         result = run(args.out, args.driver_argv, args.stage_profile_argv, args.capture, args.only)
     else:
