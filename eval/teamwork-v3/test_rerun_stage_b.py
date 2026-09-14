@@ -190,7 +190,7 @@ class SyntheticSource:
         self.write(tree / 'continuity/state.json', '{"stage":"A"}\n')
         answer = root / 'stages/A/controller/submission/answer.json'
         sequence.dump(answer, {'complete': True})
-        sequence.dump(root / 'stages/A/controller/delivery.json', {'schema': 'teamwork-delivery/v3', 'elapsed_ms': 340000,
+        sequence.dump(root / 'stages/A/controller/delivery.json', {'schema': 'teamwork-delivery/v3', 'elapsed_ms': 34000,
                       'answer_file_sha256': sequence.digest(answer), 'tree': {'files': sequence.inventory(tree)}})
         self.a_snapshot_repo = self.base / 'a-work'
         self.a_snapshot_repo.mkdir()
