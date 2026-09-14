@@ -33,6 +33,7 @@ const USAGE = `ledger — shared definitions, findings, changes, decisions for y
   ledger install claude|codex|all        wire the MCP server, hooks, guide, and reconciler into your agent
   ledger install guides                 update both agents' guides without rewiring MCP or hooks
   ledger mcp                             run the MCP server (stdio)
+  ledger mcp --http --scratch [--port N] serve MCP over HTTP from a scratch ledger at /mcp/$LEDGER_HTTP_SECRET (ChatGPT test endpoint; no login)
   ledger brief [--days N] [--tags a,b]   what an agent sees at session start
   ledger search <query> [--type T]       free-text search
   ledger get <id>                        show one object
@@ -161,6 +162,13 @@ async function main() {
         return;
       }
       case "mcp":
+        if (args.includes("--http")) {
+          // ChatGPT web and claude.ai reach MCP servers only over HTTPS. Until login exists this serves a scratch ledger only.
+          if (!args.includes("--scratch")) throw new Error("ledger mcp --http serves only a scratch ledger for now; add --scratch. Serving the team ledger over the internet needs login, which is not built yet.");
+          const { startHttpMcp } = await import("./http.js");
+          await startHttpMcp({ port: Number(flag(args, "--port") ?? process.env.PORT ?? 8787), secret: process.env.LEDGER_HTTP_SECRET || undefined, scratch: true });
+          return; // keeps running
+        }
         await startMcp();
         return; // keeps running
       case "brief": {
