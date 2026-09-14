@@ -152,3 +152,10 @@ class LedgerVsControlsScopeTests(unittest.TestCase):
         self.assertEqual(cohort_scope.cohort_label(cohort_scope.PRODUCT_ARMS),'four-product')
         self.assertIn('ledger-vs-controls',__import__('prepare_cohort').BATCHES)
 
+    def test_ledger_replay_scope_is_readiness_only_single_lane(self):
+        import cohort_scope
+        scope=cohort_scope.batch_scope('ledger-replay','replay authorization')
+        self.assertEqual(scope['included_arms'],['ledger'])
+        self.assertEqual(cohort_scope.expected_arms({'cohort_scope':scope}),('ledger',))
+        self.assertEqual(cohort_scope.cohort_label(('ledger',)),'ledger-replay')
+
