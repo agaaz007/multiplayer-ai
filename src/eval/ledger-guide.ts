@@ -32,10 +32,20 @@ export function freezeLedgerGuide(ctx: TrialContext, build: string): { path: str
   return { path: trialPath, retainedPath, provenancePath, sha256: digest };
 }
 
-/** Reject a selected build that ignored the optional guide path; no source text is rewritten. */
+/**
+ * Reject a selected build that ignored the optional guide path; no source text is rewritten.
+ *
+ * The invariant is about the POINTER, not the layout: the brief must carry a `Rules:` line whose guide
+ * pointer is the frozen trial guide, and must not carry the global one anywhere. The rules line is found
+ * by prefix rather than by index because the header grows — the analytical-scope work (3486dfe) added the
+ * activity-summary line, and conflict/authority warnings appear above the rules conditionally, so a
+ * fixed `lines[2]` check failed every `ours` trial on a brief that was in fact correctly pointed.
+ */
 export function assertLocalBriefGuide(rendered: string, guidePath: string): void {
   const lines = rendered.split("\n");
-  if (!lines[0]?.startsWith("# Ledger brief (") || lines[1] !== "" || !lines[2]?.startsWith("Rules: ") || !lines[2].endsWith(`Full format in \`${guidePath}\`.`)) {
+  const rules = lines.filter((l) => l.startsWith("Rules: "));
+  if (!lines[0]?.startsWith("# Ledger brief (") || lines[1] !== "" || rules.length !== 1
+      || !rules[0].endsWith(`Full format in \`${guidePath}\`.`) || rendered.includes(GLOBAL_GUIDE_POINTER)) {
     throw new Error("ours: unrecognized generated brief guide pointer; refusing a global-guide fallback");
   }
 }
