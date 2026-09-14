@@ -81,6 +81,17 @@ export async function updateSession(q: Q, id: string, patch: Partial<Record<stri
 
 // ---------- events ----------
 
+/**
+ * Postgres jsonb cannot hold U+0000: an insert with the escape `\u0000` anywhere in the text fails
+ * with "unsupported Unicode escape sequence", and because a batch is one transaction the whole
+ * session stalls with a capture gap that never heals (seen 2026-09-14 on a subagent transcript).
+ * Replace only the escape itself with U+FFFD; an escaped backslash before it (`\\u0000`, a literal
+ * backslash-u-0000 in the source text) is left alone.
+ */
+export function jsonbSafe(text: string): string {
+  return text.replace(/(?<!\\)((?:\\\\)*)\\u0000/g, "$1\\ufffd");
+}
+
 export async function appendEvents(pool: pg.Pool, sessionId: string, events: NormEvent[], threadId: string | null, generation: number | null): Promise<{ inserted: number; lastSeq: number }> {
   if (!events.length) {
     const r = await pool.query<{ m: number }>(`select coalesce(max(seq),0)::int as m from cont_events where session_id = $1`, [sessionId]);
@@ -100,7 +111,7 @@ export async function appendEvents(pool: pg.Pool, sessionId: string, events: Nor
       await c.query(
         `insert into cont_events (session_id, seq, producer_event_id, call_id, thread_id, kind, occurred_at, generation, payload)
          values ($1,$2,$3,$4,$5,$6,$7,$8,$9) on conflict (session_id, producer_event_id) do nothing`,
-        [sessionId, seq, e.producer_event_id, e.call_id ?? null, threadId, e.kind, e.occurred_at ?? null, generation, JSON.stringify(e.payload)]
+        [sessionId, seq, e.producer_event_id, e.call_id ?? null, threadId, e.kind, e.occurred_at ?? null, generation, jsonbSafe(JSON.stringify(e.payload))]
       );
     }
     await c.query(`update cont_sessions set last_acked_event_at = now() where id = $1`, [sessionId]);

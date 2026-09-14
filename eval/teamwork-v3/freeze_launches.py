@@ -6,7 +6,7 @@ inventories are checked against actual files, not just copied version strings.
 import argparse,json,shutil
 from pathlib import Path
 import sequence,mechanisms,integrity
-from cohort_scope import expected_arms
+from cohort_scope import expected_arms,CONTROL_ARMS
 HERE=Path(__file__).resolve().parent
 
 def freeze(preparation,runtime,inventories):
@@ -48,7 +48,8 @@ def freeze(preparation,runtime,inventories):
                 proof=ready.get('record_use_audit',{});mechanisms.verify_admission(proof.get('path',''),proof.get('sha256'),native.get('version'))
         frozen=dict(common)
         required=[native_file,Path(native['guide_file']),ready_file]
-        if entry['arm']!='ledger':required += [Path(native['proxy_config']),Path(native['proxy_ready_file'])]
+        # Ledger and the baseline controls have no paid provider path, so no proxy gate is required.
+        if entry['arm']!='ledger' and entry['arm'] not in CONTROL_ARMS:required += [Path(native['proxy_config']),Path(native['proxy_ready_file'])]
         if native.get('ca_file'):required.append(Path(native['ca_file']))
         for f in required:frozen[str(f.resolve())]=sequence.digest(f)
         if entry['arm']=='supermemory':
@@ -58,7 +59,7 @@ def freeze(preparation,runtime,inventories):
         if ready.get('record_use_audit'):
             proof=ready['record_use_audit'];frozen[proof['path']]=proof['sha256']
         stages=[s['id']for s in pack['stages']]
-        cfg={'schema':'teamwork-launch/v3','execution_authorized':True,'authorization':plan.get('cohort_scope',{}).get('authorization','Agaaz authorized the full native Ledger, Graphify, GBrain and Supermemory comparison in parallel; preserve the original shared USD30 ceiling.'),'paid_paths_gated':True,'maximum_approved_usd':30,'budget_file':plan['budget_file'],'runtime':str(runtime),'model':'gpt-5.6-sol','reasoning_effort':'medium','capture_timeout_ms':300000,'driver_argv':[node,str(HERE/'session-driver.mjs'),'run','{request}'],'native_config':str(native_file),'stage_profile_argv':[node,str(HERE/'native-lifecycle.mjs'),'stage','{request}'],'stage_profiles':{s:str(root/'stages'/s/'controller/native-profile.json')for s in stages},'capture_argv':{s:[node,str(HERE/'native-lifecycle.mjs'),'capture','{request}']for s in stages},'export_argv':[node,str(HERE/'native-lifecycle.mjs'),'export',str(native_file)],'frozen_files':frozen,'known_issues_file':str(HERE/'known-issues.json'),'development_probe':development,'scored':not development}
+        cfg={'schema':'teamwork-launch/v3','execution_authorized':True,'authorization':(plan.get('cohort_scope') or {}).get('authorization','Agaaz authorized the full native Ledger, Graphify, GBrain and Supermemory comparison in parallel; preserve the original shared USD30 ceiling.'),'paid_paths_gated':True,'maximum_approved_usd':30,'budget_file':plan['budget_file'],'runtime':str(runtime),'model':'gpt-5.6-sol','reasoning_effort':'medium','capture_timeout_ms':300000,'driver_argv':[node,str(HERE/'session-driver.mjs'),'run','{request}'],'native_config':str(native_file),'stage_profile_argv':[node,str(HERE/'native-lifecycle.mjs'),'stage','{request}'],'stage_profiles':{s:str(root/'stages'/s/'controller/native-profile.json')for s in stages},'capture_argv':{s:[node,str(HERE/'native-lifecycle.mjs'),'capture','{request}']for s in stages},'export_argv':[node,str(HERE/'native-lifecycle.mjs'),'export',str(native_file)],'frozen_files':frozen,'known_issues_file':str(HERE/'known-issues.json'),'development_probe':development,'scored':not development}
         if entry['arm']=='ledger':cfg['periodic_capture_argv']=[node,str(HERE/'native-lifecycle.mjs'),'periodic','{request}']
         integrity.verify_disclosures(cfg);launches.append((root/'launch.json',cfg))
     # Validate every lane before creating any launch. Never overwrite a previous freeze.
@@ -68,6 +69,7 @@ def freeze(preparation,runtime,inventories):
     development=all(cfg['development_probe']for _,cfg in launches)
     if development:
         matrix={'schema':'teamwork-readiness-matrix/v3','entries':entries,'disk_plan':plan['disk_plan']}
+        if {e['arm'] for e in entries}!=set(arms):raise ValueError('readiness entries differ from the declared cohort')
     else:
         matrix={'schema':'teamwork-matrix/v3','arms':[{'arm':arm,'sequences':[{k:e[k]for k in ('root','launch')}for e in entries if e['arm']==arm]}for arm in arms],'disk_plan':plan['disk_plan']}
     if plan.get('cohort_scope') is not None:matrix['cohort_scope']=plan['cohort_scope']
