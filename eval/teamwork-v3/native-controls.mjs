@@ -24,7 +24,7 @@ export const remotePath=root=>path.join(root,'shared-remote.git');
 export const notesPath=root=>path.join(root,'handoff-notes');
 
 export function git(cwd,...args){
- return execFileSync('git',['-c','core.hooksPath=/dev/null',...args],{cwd,encoding:'utf8',timeout:60000,maxBuffer:32<<20,
+ return execFileSync('git',['-c','core.hooksPath=/dev/null',...args],{cwd,encoding:'utf8',timeout:60000,maxBuffer:32<<20,stdio:['ignore','pipe','pipe'],
   env:{PATH:process.env.PATH,HOME:process.env.HOME??cwd,GIT_CONFIG_GLOBAL:'/dev/null',GIT_CONFIG_SYSTEM:'/dev/null',GIT_CONFIG_NOSYSTEM:'1',GIT_TERMINAL_PROMPT:'0',LANG:'en_US.UTF-8'}}).trim();
 }
 function tryGit(cwd,...args){try{return git(cwd,...args);}catch{return null;}}
