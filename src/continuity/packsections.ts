@@ -218,7 +218,7 @@ export function renderDecisionsInForce(refs: LedgerRefStatus[], captured: { resu
     if (notInForce.length && (!opts.lean || sorted.length > 3)) L.push(`NOT IN FORCE (${notInForce.length}): ${notInForce.map((r) => (r.status === "deprecated" && r.superseded_by ? `${r.id} → ${r.superseded_by}` : r.id)).join("; ")}. Do not act on these as decided.`);
     const explicit = refs.filter((r) => r.source === "explicit").length;
     L.push(opts.lean
-      ? `From ${plural(captured.results, "save result")} and ${plural(explicit, "explicit link")}; decisions only read are not listed.`
+      ? `From ${plural(captured.results, "save result")}, ${plural(explicit, "explicit link")}; decisions only read are not listed.`
       : `Captured from ${plural(captured.results, "Ledger save result")} in ${plural(captured.sessions, "session")} and ${plural(explicit, "explicit link")}. Decisions the work only read are not listed; search the Ledger before relying on one.`);
   }
   if (groups.length) {

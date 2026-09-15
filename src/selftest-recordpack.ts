@@ -209,7 +209,7 @@ for (const t of [lean.text, pack.text]) {
   // decisions in force, compact: tag + id + origin, no title; the omission names ledger_get
   assert.ok(t.includes(`- [SUPERSEDED by ${dec2.id}, which is in force] decision ${dec1.id} · linked explicitly\n`), "compact decision line");
   assert.ok(!t.includes(`decision ${dec1.id}: ClickHouse is the source of truth`), "no title in lean");
-  assert.ok(lean.omitted.some((o) => o.startsWith("Ledger object titles") && o.includes("ledger_get per id")), lean.omitted.join(" | "));
+  assert.ok(lean.omitted.some((o) => o.startsWith("Ledger object titles") && o.includes("ledger_get / ledger_impact per id")), lean.omitted.join(" | "));
   // pending: the same line as the evidence pack, shorter warning
   assert.ok(t.includes(`- session ${R8} seq 7 Bash: psql analytics -c 'select count(*) from events where distinct_id is null and ts > now() - interval 7 day'  ← outcome unknown; do not rerun blindly`));
   // no viewer: totals, not a delta
@@ -250,7 +250,7 @@ for (const t of [lean.text, pack.text]) {
   const sec = mine.text.slice(mine.text.indexOf("## Changed since"), mine.text.indexOf("## Bootstrap"));
   assert.ok(sec.includes(`Your last contributing session ${A8} was last seen ${fmt(T(15))}. Since then:`), sec);
   assert.ok(sec.includes(`- 6 new content events in session ${R8} (rachit, Codex) seq 1..7, last ${fmt(T(61))}: ledger_events(session_id: "${sidR}", after_seq: 0, limit: 7)`), sec);
-  assert.ok(sec.includes(`- state update added (5): decision ${d1.id.slice(0, 8)} [confirmed], hypothesis ${h1.id.slice(0, 8)} [PROPOSED], hypothesis ${h2.id.slice(0, 8)} [PROPOSED], contradiction ${c1.id.slice(0, 8)} [PROPOSED], next ${n1.id.slice(0, 8)} [PROPOSED]; full text via ledger_record_get(record_id: "${recAttr.id}", budget_tokens: 20000, detail: "evidence")`), sec);
+  assert.ok(sec.includes(`- state update added (5): decision ${d1.id.slice(0, 8)} [confirmed], next ${n1.id.slice(0, 8)} [PROPOSED], hypothesis ${h1.id.slice(0, 8)} [PROPOSED], hypothesis ${h2.id.slice(0, 8)} [PROPOSED], contradiction ${c1.id.slice(0, 8)} [PROPOSED]; full text via ledger_record_get(record_id: "${recAttr.id}", budget_tokens: 20000, detail: "evidence")`), sec);
   assert.ok(sec.includes(`- 1 new pending operation: session ${R8} seq 7 Bash`) && sec.includes(`- files touched (1): src/ingest/mixpanel.ts`), sec);
   assert.ok(!sec.includes("Attribution: compare") && !sec.includes("distinct_id guard"), "the delta references events and updates; it does not inline them");
   // rachit's last contributing session is 0199bbbb (his later session sidN contributes nothing); after T(70) only the updates were added

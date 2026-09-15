@@ -92,7 +92,7 @@ export const LEAN_PROPOSED_FULL = 3;
 /** A lean pack above min(budget, this) shrinks level by level (boilerplate, then proposed ids, then caps); each drop is named. */
 export const LEAN_TARGET_TOKENS = 1200;
 /** The decision rule as the lean pack states it (one sentence in the honesty block; the full DECISION_RULE is in the evidence pack's contract). */
-export const LEAN_DECISION_RULE = "Act only on [in force] Ledger objects and [accepted by <person>] record decisions; superseded, draft, conflicting, [PROPOSED] and agent-confirmed items were not decided by a person (a person accepts with `ledger record confirm <update_id>`).";
+export const LEAN_DECISION_RULE = "Act only on [in force] Ledger objects and [accepted by <person>] record decisions; superseded, draft, conflicting, [PROPOSED] and agent-confirmed items were not decided by a person.";
 
 export interface RecordPackOpts {
   author: string;
@@ -623,7 +623,7 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
     const sesShown = sessions.slice(0, sesMax);
     L.push(`Honesty: ${sessions.length ? `${sessions.length} contributing session${sessions.length === 1 ? "" : "s"}: ${sesShown.map((s) => `${short(s.session_id)} (${s.author}, ${harnessName(s.harness)}, last seen ${ago(s.last_seen_at, now)}${s.ended ? ", ended" : ""})`).join("; ")}${sessions.length > sesShown.length ? `; … ${sessions.length - sesShown.length} more` : ""}.` : "no span is linked to this record yet; link one with ledger_record_link."}`);
     if (sessions.length > sesMax) om.push(`${sessions.length - sesMax} contributing sessions not listed (for budget); ${evidenceFetch}`);
-    L.push(`${!rec.repo ? "Non-code record: no code snapshot applies." : vSnap ? `Code saved through ${fmt(vSnap.at)} (remote-verified; ${vSnap.from}).` : "No verified code snapshot among contributing sessions: treat the code state as unverified."} Claim advisory; nothing inlined, every reference below is an exact fetch.`);
+    L.push(`${!rec.repo ? "Non-code record: no code snapshot applies." : vSnap ? `Code saved through ${fmt(vSnap.at)} (remote-verified; ${vSnap.from}).` : "No verified code snapshot among contributing sessions: treat the code state as unverified."} Claim advisory; nothing inlined, references are exact fetches.`);
     L.push(LEAN_DECISION_RULE);
     const lag = lagStats.filter((s) => s.cap > s.cls);
     if (lag.length) L.push(`Classifier lag: ${lag.map((s) => `${short(s.session_id)} ${s.cap - s.cls}/${s.cap}`).join(", ")} events unclassified (ledger_unassigned).`);
@@ -668,10 +668,10 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
     for (const o of acceptedRefs) {
       const resolution = resolveAccepted(all, o.id);
       // one line per accepted source: pin, scope, and its review-impact flags with the reason clipped; ids are not repeated
-      const flags = reviewImpacts.flatMap((i) => [...i.affected.filter((a) => a.id === o.id).map((a) => `NEEDS REVIEW: ${clipTo(a.reason, level >= 1 ? 40 : 120)}`), ...i.incomplete.filter((a) => a.id === o.id).map((a) => `INCOMPLETE IMPACT: ${clipTo(a.reason, level >= 1 ? 40 : 120)}`)]);
+      const flags = reviewImpacts.flatMap((i) => [...i.affected.filter((a) => a.id === o.id).map((a) => `NEEDS REVIEW: ${clipTo(a.reason, level >= 1 ? 40 : 80)}`), ...i.incomplete.filter((a) => a.id === o.id).map((a) => `INCOMPLETE IMPACT: ${clipTo(a.reason, level >= 1 ? 40 : 80)}`)]);
       L.push(`${resolution.status === 'conflict' ? 'CONFLICTING ACCEPTED SOURCE — resolve before reuse' : 'Accepted source'}: ${o.type} ${o.id} @${objectVersion(o).slice(0, 8)}${o.fields.analysis_scope ? "" : " · SCOPE UNKNOWN (ledger_investigation before applying it)"}${flags.length ? ` · ${flags.join(" · ")}` : ""}`);
     }
-    if (ledgerRefs.length || acceptedRefs.length) om.push(`Ledger object titles${acceptedRefs.length ? ", accepted source formula/query text and review-impact paths" : ""}; ledger_get / ledger_impact per id`);
+    if (ledgerRefs.length || acceptedRefs.length) om.push(`Ledger object titles${acceptedRefs.length ? ", accepted-source formula/query and impact paths" : ""}; ledger_get / ledger_impact per id`);
     for (const impact of reviewImpacts) for (const item of [...impact.affected, ...impact.incomplete]) if (!acceptedRefs.some((o) => o.id === item.id)) L.push(`NEEDS REVIEW: ${item.id}; ${item.reason}`);
     L.push(``);
 
