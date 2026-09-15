@@ -2,7 +2,7 @@ import path from "node:path";
 import type pg from "pg";
 import { loadAll, type Config } from "../store.js";
 import { TYPES } from "../schema.js";
-import { claimThread, createThread, getClaim, getThread, headCheckpoint, latestCheckpointAny, pendingOperations, sessionEvents, threadEvents, getSession, summarizeThread, type ClaimRow, type SessionRow, type ThreadRow, type ThreadSummary } from "./store.js";
+import { claimThread, createThread, getClaim, getThread, headCheckpoint, latestCheckpointAny, pendingOperations, sessionEvents, threadEvents, getSession, summarizeThread, type CheckpointRow, type ClaimRow, type SessionRow, type ThreadRow, type ThreadSummary } from "./store.js";
 import { defaultRemoteBranch, diffStat, fetchQuiet, repoRoot, repoIdentity } from "./shadow.js";
 import { PREVIEW_MAX_CHARS, sourcesLine, threadSourceCounts, type SourceCounts } from "./evidence.js";
 import { readProgress } from "./classify.js";
@@ -380,16 +380,37 @@ export async function buildResumePack(cfg: Config, pool: pg.Pool, threadId: stri
     L.push(``);
     L.push(`## Last assistant messages`);
     if (level >= 1) { L.push(`(omitted for budget; ledger_events(thread_id: "${t.id}", kinds: ["assistant.message"]))`); om.push(`last assistant messages (omitted for budget; ledger_events(thread_id: "${t.id}", kinds: ["assistant.message"]))`); }
+    else if (detail === "lean") {
+      // lean: at most LEAN_SECTION_LINES short lines, each a reference to its event; the full text is one fetch away
+      for (const m of msgRows.slice(-LEAN_SECTION_LINES)) L.push(`- [${m.occurred_at ? m.occurred_at.toISOString().slice(11, 16) : "?"}] session ${m.session_id.slice(0, 8)} seq ${m.seq}: ${clipTo(String(m.payload?.text ?? "").replace(/\s+/g, " ").trim(), LEAN_MESSAGE_CLIP)}`);
+      L.push(`(${msgRows.length ? "clipped; " : "none captured; "}full text via ${msgFetch})`);
+      om.push(`assistant message text clipped to ${LEAN_MESSAGE_CLIP} chars in lean detail; ${msgFetch}`);
+    }
     else for (const m of msgRows) L.push(`- [${m.occurred_at ? m.occurred_at.toISOString().slice(11, 16) : "?"}] ${String(m.payload?.text ?? "").replace(/\n+/g, " ").slice(0, 600)}`);
     L.push(``);
     for (const line of renderDecisionsInForce(decisionRefs, saved, { compact: level >= 4, groups: recordDecisions, perGroup: level >= 3 ? 2 : 5 })) L.push(line);
     if (level >= 4 && decisionRefs.length) om.push(`Ledger object titles in Decisions in force (ids and status kept); ledger_get per id`);
     L.push(``);
     L.push(`## Since the checkpoint`);
-    L.push(gitDiff ? `git diff --stat ${gitDiff}` : `git: ${om.find((o) => o.startsWith("intervening")) ?? "no local checkout given; pass repoPath to compute"}`);
+    if (detail === "lean" && gitDiff) {
+      // lean: the diff header plus LEAN_SECTION_LINES stat lines; the rest is a git command away
+      const lines = gitDiff.split("\n");
+      const shown = lines.slice(0, LEAN_SECTION_LINES + 1);
+      L.push(`git diff --stat ${shown.join("\n")}`);
+      if (lines.length > shown.length) { L.push(`(${lines.length - shown.length} more lines; run git diff --stat ${lines[0].replace(/:$/, "")} in your checkout)`); om.push(`git diff --stat shortened to ${LEAN_SECTION_LINES} lines in lean detail; run git diff --stat ${lines[0].replace(/:$/, "")}`); }
+    } else L.push(gitDiff ? `git diff --stat ${gitDiff}` : `git: ${om.find((o) => o.startsWith("intervening")) ?? "no local checkout given; pass repoPath to compute"}`);
+    const ledgerCap = detail === "lean" ? LEAN_SECTION_LINES : ledgerSince.length;
     if (level >= 4 && ledgerSince.length) { L.push(`ledger: ${ledgerSince.length} object(s) mentioning ${repoTag} since ${fmt(since)} (list omitted for budget; ledger_search "${repoTag}")`); om.push("ledger objects since the checkpoint"); }
-    else L.push(ledgerSince.length ? `ledger objects mentioning ${repoTag} since ${fmt(since)}:\n${ledgerSince.map((s) => `- ${s}`).join("\n")}` : `ledger: nothing new mentioning ${repoTag} since ${fmt(since)}`);
+    else if (!ledgerSince.length) L.push(`ledger: nothing new mentioning ${repoTag} since ${fmt(since)}`);
+    else {
+      L.push(`ledger objects mentioning ${repoTag} since ${fmt(since)}:\n${ledgerSince.slice(0, ledgerCap).map((s) => `- ${s}`).join("\n")}`);
+      if (ledgerSince.length > ledgerCap) { L.push(`- … ${ledgerSince.length - ledgerCap} more; ledger_search "${repoTag}"`); om.push(`${ledgerSince.length - ledgerCap} ledger objects since the checkpoint (lean detail); ledger_search "${repoTag}"`); }
+    }
     L.push(``);
+    if (delta && !delta.first_visit) {
+      for (const line of renderVisitDelta(delta, { unit: "thread", created: t.created_at, level: level >= 3 ? 1 : 0 })) L.push(line);
+      L.push(``);
+    }
     L.push(`## Bootstrap`);
     L.push(bootstrap.length ? "```\n" + bootstrap.join("\n") + "\n```" : "(no snapshot to check out)");
     L.push(``);
@@ -417,6 +438,7 @@ export async function buildResumePack(cfg: Config, pool: pg.Pool, threadId: stri
     last_error: lastErr ? lastErr.payload : null, intervening: { git: gitDiff, ledger: ledgerSince },
     decisions: decisionRefs, record_decisions: recordDecisions,
     bootstrap, sources, omitted: out.omitted, text: out.text,
+    detail, as_of: asOf ? asOf.toISOString() : null, changed_since: delta,
   };
 }
 
