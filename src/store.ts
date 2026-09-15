@@ -41,6 +41,30 @@ export interface ContinuityConfig {
   exclude_paths?: string[];
   /** A helper pass running longer than this exits the process so launchd restarts it. Default 900. */
   pass_deadline_s?: number;
+  /**
+   * Optional event embeddings (pgvector). Absent = off: no extension, no tables, no provider calls.
+   * Embeddings are only a candidate generator behind the authority ranking; they never decide which
+   * version of a fact is true. Read from ~/.ledger/config.json (mode 600), like database_url; the API
+   * key is never printed by any command.
+   */
+  embeddings?: EmbeddingsConfig;
+}
+
+export interface EmbeddingsConfig {
+  /** Only OpenAI's embeddings REST endpoint is implemented (plain fetch, no SDK). */
+  provider: "openai";
+  /** Default "text-embedding-3-small". */
+  model?: string;
+  /** Vector width. Default 1536. Must be ≤ 2000 for the HNSW index; changing it means drop + backfill. */
+  dimensions?: number;
+  /** Literal key. Prefer api_key_env. */
+  api_key?: string;
+  /** Environment variable holding the key. Default "OPENAI_API_KEY". */
+  api_key_env?: string;
+  /** Event kinds that are embedded. Default ["instruction.added","assistant.message","compaction","tool.finished"]. */
+  kinds?: string[];
+  /** Event text is clipped to this many characters before embedding. Default 4000 (≈ 1000 tokens). */
+  max_chars?: number;
 }
 
 /**
