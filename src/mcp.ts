@@ -716,7 +716,7 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
           const res = await searchEvidence(pool(), q, { repo: sc.repo ?? undefined, record_id, session_id, author, kinds, sinceHours: hours, asOf: as_of, limit, cfg });
           const head = scopeLine(sc, { author, asOf: res.as_of, retrieval: res.retrieval + (res.retrieval_note ? ` (${res.retrieval_note})` : ""), extra: [...(record_id ? [`record ${record_id}`] : []), ...(session_id ? [`session ${session_id}`] : [])] });
           const lines = res.hits.length
-            ? res.hits.map((e) => `[tier ${e.tier}] [${e.similarity.toFixed(4)}${e.sources.includes("vector") ? " lex+vec" : ""}] ${e.session_id.slice(0, 8)} ${e.author}/${e.harness} · ${eventLine(e, undefined, { tier: e.tier, label: e.label })}`)
+            ? res.hits.map((e) => `[${e.similarity.toFixed(4)}${e.sources.includes("vector") ? (e.sources.includes("lexical") ? " lex+vec" : " vec") : ""}] ${e.session_id.slice(0, 8)} ${e.author}/${e.harness} · ${eventLine(e, undefined, { tier: e.tier, label: e.label })}`)
             : [`No events match "${q}"${record_id ? ` inside record ${record_id}` : ""}.`];
           const hits = res.hits.map((e) => ({ event_id: String(e.id), session_id: e.session_id, seq: e.seq, kind: e.kind, at: (e.occurred_at ?? e.received_at)?.toISOString?.() ?? null, author: e.author, tier: e.tier, label: e.label, similarity: e.similarity, rank: e.rank, sources: e.sources, citations: e.citations, ledger_write: e.ledger_write }));
           return { ...text([head, ...lines].join("\n")), structuredContent: { scope: head, scope_kind: sc.scope, repo: sc.repo, retrieval: res.retrieval, retrieval_note: res.retrieval_note, as_of: res.as_of, hits } };

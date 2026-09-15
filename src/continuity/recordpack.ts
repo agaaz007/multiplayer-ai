@@ -89,8 +89,8 @@ export type RecordPackMode = "continue" | "inspect";
 export type RecordPackDetail = PackDetail;
 /** In lean mode, a kind's proposed items are listed in full up to this many; more become a count plus ids. */
 export const LEAN_PROPOSED_FULL = 3;
-/** Lean packs above this size shrink (state caps, delta detail); each drop is named. */
-export const LEAN_DEFAULT_BUDGET = 1200;
+/** A lean pack above min(budget, this) shrinks level by level (boilerplate, then proposed ids, then caps); each drop is named. */
+export const LEAN_TARGET_TOKENS = 1200;
 
 export interface RecordPackOpts {
   author: string;
@@ -600,6 +600,11 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
   if (lastErrFetch) drill.push(lastErrFetch);
   if (summaryFetch) drill.push(summaryFetch);
   const errArtifacts = lastErr ? artifactIds(lastErr.payload) : [];
+  /**
+   * Lean levels (each drop named in Omitted): 0 full lean; 1 boilerplate trimmed (sources counts, contract detail,
+   * pending inputs, delta detail); 2 proposed items as ids, soft confirmed kinds capped at 3; 3 confirmed soft kinds
+   * capped at 1, span/pending lists cut to 3. Hard kinds (decisions, blockers) never lose confirmed items.
+   */
   const renderLean = (level: number): { text: string; omitted: string[]; evidence: RecordPack["evidence_summary"] } => {
     const om = [...omitted];
     const L: string[] = [];
@@ -608,10 +613,14 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
     L.push(`goal: ${rec.goal ? oneLine(rec.goal) : "(none recorded)"}`);
     if (asOfLine) L.push(asOfLine);
     L.push(`claim: ${claimInfo.note}`);
-    // honesty, compact: sessions; snapshot + sources; the standing rule; classifier lag in one line
-    const sesShown = sessions.slice(0, level >= 2 ? 2 : 6);
+    // honesty, compact: sessions; snapshot (+ sources at level 0); the standing rule; classifier lag in one line
+    const sesMax = level >= 2 ? 2 : 6;
+    const sesShown = sessions.slice(0, sesMax);
     L.push(`Honesty: ${sessions.length ? `${sessions.length} contributing session${sessions.length === 1 ? "" : "s"}: ${sesShown.map((s) => `${short(s.session_id)} (${s.author}, ${harnessName(s.harness)}, last seen ${fmt(s.last_seen_at)}${s.ended ? ", ended" : ""})`).join("; ")}${sessions.length > sesShown.length ? `; … ${sessions.length - sesShown.length} more` : ""}.` : "no span is linked to this record yet; link one with ledger_record_link."}`);
-    L.push(`${!rec.repo ? "Non-code record: no code snapshot applies." : vSnap ? `Code saved through ${fmt(vSnap.at)} (remote-verified; ${vSnap.from}).` : "No verified code snapshot among contributing sessions: treat the code state as unverified."} Sources: ${sources.instructions} instructions · ${sources.assistant_messages} assistant messages · ${sources.tool_calls} tool calls · ${sources.compaction_summaries} compaction summaries · ${sources.sessions} sessions / ${sources.spans} spans · ${sources.proposed_updates} proposed / ${sources.confirmed_updates} confirmed updates.`);
+    if (sessions.length > sesMax) om.push(`${sessions.length - sesMax} contributing sessions not listed (for budget); ${evidenceFetch}`);
+    const snapLine = !rec.repo ? "Non-code record: no code snapshot applies." : vSnap ? `Code saved through ${fmt(vSnap.at)} (remote-verified; ${vSnap.from}).` : "No verified code snapshot among contributing sessions: treat the code state as unverified.";
+    if (level >= 1) { L.push(snapLine); om.push(`sources counts (for budget); ${evidenceFetch}`); }
+    else L.push(`${snapLine} Sources: ${sources.instructions} instructions · ${sources.assistant_messages} assistant messages · ${sources.tool_calls} tool calls · ${sources.compaction_summaries} compaction summaries · ${sources.sessions} sessions / ${sources.spans} spans · ${sources.proposed_updates} proposed / ${sources.confirmed_updates} confirmed updates.`);
     L.push(`The claim is advisory. Proposed items are unaccepted. No event text is inlined; every reference below is an exact fetch.`);
     const lag = lagStats.filter((s) => s.cap > s.cls);
     if (lag.length) L.push(`Classifier lag: ${lag.map((s) => `${short(s.session_id)} ${s.cap - s.cls}/${s.cap} events`).join(", ")} unclassified; later work may be unassigned to any record yet (ledger_unassigned).`);
@@ -629,9 +638,9 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
       anyState = true;
       const accepted = items.filter((u) => u.status === "confirmed");
       const proposals = items.filter((u) => u.status === "proposed");
-      const accCap = k.hard ? stateCap : level >= 2 ? 1 : level >= 1 ? 3 : stateCap;
+      const accCap = k.hard ? stateCap : level >= 3 ? 1 : level >= 2 ? 3 : stateCap;
       const accShown = accepted.slice(-accCap);
-      const propFull = level >= 1 ? 0 : LEAN_PROPOSED_FULL;
+      const propFull = level >= 2 ? 0 : LEAN_PROPOSED_FULL;
       L.push(`### ${k.label} (${items.length})`);
       for (const u of accShown) L.push(stateLine(u));
       if (accepted.length > accShown.length) { L.push(`… ${accepted.length - accShown.length} older confirmed ${k.key}, see below`); olderConfirmed.push(`${accepted.length - accShown.length} ${k.key}`); }
@@ -646,7 +655,7 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
     if (!anyState) L.push(`(no state updates yet; propose one with ledger_record_update(record_id: ${q(rec.id)}, action: "propose", …))`);
     if (idsOnly.length || olderConfirmed.length) {
       L.push(`Full text of ${[...(idsOnly.length ? [`proposed ${idsOnly.join(", ")}`] : []), ...(olderConfirmed.length ? [`older confirmed ${olderConfirmed.join(", ")}`] : [])].join(" and ")}: ${stateFetch}`);
-      if (idsOnly.length) om.push(`proposed state items shown as ids only (${idsOnly.join(", ")})${level >= 1 ? " for budget" : ""}; ${stateFetch}`);
+      if (idsOnly.length) om.push(`proposed state items shown as ids only (${idsOnly.join(", ")})${level >= 2 ? " for budget" : ""}; ${stateFetch}`);
       if (olderConfirmed.length) om.push(`older confirmed state items (${olderConfirmed.join(", ")}) shortened for budget; ${stateFetch}`);
     }
     L.push(``);
@@ -665,9 +674,9 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
     L.push(``);
 
     // pending / unknown
+    const pendMax = level >= 3 ? 3 : 10;
     L.push(`## Pending / unknown operations (${pend.length}) — all contributing sessions, inside linked spans`);
-    for (const p of pend.slice(0, level >= 2 ? 3 : 10)) L.push(`- session ${short(p.session_id)} seq ${p.seq} ${p.tool}: ${clipTo(oneLine(p.input), level >= 1 ? 80 : 160)}  ← outcome unknown; do not blindly rerun if it mutates anything`);
-    const pendMax = level >= 2 ? 3 : 10;
+    for (const p of pend.slice(0, pendMax)) L.push(`- session ${short(p.session_id)} seq ${p.seq} ${p.tool}: ${clipTo(oneLine(p.input), level >= 1 ? 80 : 160)}  ← outcome unknown; do not blindly rerun if it mutates anything`);
     if (pend.length > pendMax) { L.push(`… ${pend.length - pendMax} more; ${evidenceFetch}`); om.push(`${pend.length - pendMax} pending operations (list shortened for budget); ${evidenceFetch}`); }
     L.push(``);
 
@@ -685,12 +694,15 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
     // drill down: references only
     L.push(`## Drill down (references only)`);
     L.push(`Evidence: ${evidenceTotal} content events in ${sources.spans} span${sources.spans === 1 ? "" : "s"}; one call per linked span, in time order:`);
-    const spanMax = level >= 2 ? 3 : 8;
+    const spanMax = level >= 3 ? 3 : 8;
     spanRefs.slice(0, spanMax).forEach((l) => { const s = sessions.find((x) => x.session_id === l.session_id); L.push(`- ${spanFetch(l)}  · ${s ? `${s.author}/${harnessName(s.harness)}` : short(l.session_id)}`); });
     if (spanRefs.length > spanMax) { L.push(`- … ${spanRefs.length - spanMax} more spans; ${evidenceFetch}`); om.push(`${spanRefs.length - spanMax} span fetches (list shortened for budget); ${evidenceFetch}`); }
     if (lastErr) L.push(`- last error: session ${short(lastErr.session_id)} seq ${lastErr.seq} ${String(lastErr.payload?.tool ?? "")}${errArtifacts.length ? ` [artifacts ${errArtifacts.join(", ")}; ledger_artifact_get(id)]` : ""} → ${lastErrFetch}`);
-    if (sessionSummary) L.push(`- session summary written by ${sessionSummary.harness} at compaction (${num(sessionSummary.chars)} chars; evidence, not memory) → ${summaryFetch}`);
-    if (unassignedTotal) L.push(`- ${unassignedTotal} unassigned span${unassignedTotal === 1 ? "" : "s"} in contributing sessions may belong here → ledger_unassigned(session_id: ${q(unassigned[0]?.session_id ?? sessions[0]?.session_id ?? "")})`);
+    if (sessionSummary) L.push(`- compaction summary by ${sessionSummary.harness} (${num(sessionSummary.chars)} chars; evidence, not memory) → ${summaryFetch}`);
+    if (unassignedTotal) {
+      if (level >= 1) om.push(`${unassignedTotal} unassigned span${unassignedTotal === 1 ? "" : "s"} in contributing sessions may belong here; ledger_unassigned(session_id: ${q(unassigned[0]?.session_id ?? sessions[0]?.session_id ?? "")})`);
+      else L.push(`- ${unassignedTotal} unassigned span${unassignedTotal === 1 ? "" : "s"} in contributing sessions may belong here → ledger_unassigned(session_id: ${q(unassigned[0]?.session_id ?? sessions[0]?.session_id ?? "")})`);
+    }
     L.push(`- search: ledger_evidence_search(q: "…", record_id: ${q(rec.id)})`);
     om.push(`evidence lines, session summary text, files touched (${files.length}) and unassigned spans: references only in lean detail; ${evidenceFetch}`);
     L.push(``);
@@ -698,8 +710,11 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
     // contract, compact
     L.push(`## First turn contract`);
     L.push(`1. ${DECISION_RULE} Contradictions stay open until a person resolves them.`);
-    L.push(rec.repo ? `2. Check out the snapshot into a fresh worktree; state confirmed (verified snapshot, linked evidence) vs uncertain (unverified edits, pending operations); never rerun a pending operation that mutates anything until its outcome is known.` : `2. Non-code work, no worktree: state confirmed (linked evidence, confirmed updates) vs uncertain (proposed updates, unassigned spans); never rerun a pending operation that mutates anything until its outcome is known.`);
-    L.push(`3. Drill down only where the state leaves a question. Propose updates with ledger_record_update(record_id, action: "propose", …) citing exact evidence (session_id, seq); link your spans with ledger_record_link.`);
+    if (level >= 1) L.push(`2. ${rec.repo ? "Inspect the Bootstrap worktree before trusting the branch tip; " : ""}state confirmed vs uncertain; never rerun a pending operation that mutates anything until its outcome is known. Propose updates with ledger_record_update citing exact evidence (session_id, seq); link your spans with ledger_record_link.`);
+    else {
+      L.push(rec.repo ? `2. Check out the snapshot into a fresh worktree; state confirmed (verified snapshot, linked evidence) vs uncertain (unverified edits, pending operations); never rerun a pending operation that mutates anything until its outcome is known.` : `2. Non-code work, no worktree: state confirmed (linked evidence, confirmed updates) vs uncertain (proposed updates, unassigned spans); never rerun a pending operation that mutates anything until its outcome is known.`);
+      L.push(`3. Drill down only where the state leaves a question. Propose updates with ledger_record_update(record_id, action: "propose", …) citing exact evidence (session_id, seq); link your spans with ledger_record_link.`);
+    }
     L.push(``); L.push(`## Omitted for budget or unavailable`); for (const o of om) L.push(`- ${o}`);
     return { text: L.join("\n"), omitted: om, evidence: { total: evidenceTotal, shown: [], omitted: evidenceTotal ? { count: evidenceTotal, fetch: spanFetches } : null } };
   };
@@ -707,7 +722,7 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
   // shrink the softest sections first: evidence tail and file list, then the summary, then soft state kinds, then details
   let level = 0;
   let out = detail === "lean" ? renderLean(level) : render(level);
-  if (detail === "lean") { while (approxTokens(out.text) > Math.min(budget, LEAN_DEFAULT_BUDGET) && level < 2) out = renderLean(++level); }
+  if (detail === "lean") { while (approxTokens(out.text) > Math.min(budget, LEAN_TARGET_TOKENS) && level < 3) out = renderLean(++level); }
   else { while (approxTokens(out.text) > budget && level < 5) out = render(++level); }
 
   return {
