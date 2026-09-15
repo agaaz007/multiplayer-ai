@@ -2,13 +2,35 @@ import path from "node:path";
 import type pg from "pg";
 import { loadAll, type Config } from "../store.js";
 import { TYPES } from "../schema.js";
-import { claimThread, createThread, getClaim, getThread, headCheckpoint, latestCheckpointAny, pendingOperations, sessionEvents, threadEvents, getSession, summarizeThread, type ClaimRow, type SessionRow, type ThreadRow, type ThreadSummary } from "./store.js";
+import { claimThread, createThread, getClaim, getThread, headCheckpoint, latestCheckpointAny, pendingOperations, sessionEvents, threadEvents, getSession, summarizeThread, type CheckpointRow, type ClaimRow, type SessionRow, type ThreadRow, type ThreadSummary } from "./store.js";
 import { defaultRemoteBranch, diffStat, fetchQuiet, repoRoot, repoIdentity } from "./shadow.js";
 import { PREVIEW_MAX_CHARS, sourcesLine, threadSourceCounts, type SourceCounts } from "./evidence.js";
 import { readProgress } from "./classify.js";
 import { DECISION_RULE, ledgerRefStatuses, renderDecisionsInForce, threadRecordDecisions, writtenLedgerIds, type LedgerRefStatus, type RecordDecisionGroup } from "./packsections.js";
+import { parseAsOf, pendingOperationsAsOf, renderVisitDelta, threadVisitDelta, type PackDetail, type VisitDelta } from "./packlean.js";
+export { type PackDetail, type VisitDelta } from "./packlean.js";
 
 /**
+ * SIGNATURE (for mcp.ts / cli.ts):
+ *
+ *   buildResumePack(cfg: Config, pool: pg.Pool, threadId: string, opts: ResumeOpts): Promise<ResumePack>
+ *
+ *   ResumeOpts = {
+ *     mode: "continue" | "fork" | "inspect";
+ *     author: string;                    // the resuming author (claim holder)
+ *     sessionId?: string;                // the resuming session; synthesized if absent
+ *     repoPath?: string;                 // local checkout of the same repo, for the intervening diff and bootstrap
+ *     budgetTokens?: number;             // default 6000; shrinks sections, never switches detail
+ *     detail?: "lean" | "evidence";      // default "lean": "Last assistant messages" and "Since the checkpoint" are capped at
+ *                                        // 3 lines each plus the fetch that restores them; "evidence": the pre-2026-09-15 pack
+ *     asOf?: string;                     // ISO time: events, checkpoints and pending operations only up to that instant
+ *     viewer?: string;                   // the requesting author (mcp passes cfg.author): "Changed since your last visit"
+ *                                        // is rendered when the viewer has an earlier session on the thread
+ *     now?: Date;
+ *   }
+ *
+ *   MCP wiring: ledger_resume(thread_id) / ledger_thread_get pass { detail, asOf: as_of, viewer: cfg.author }.
+ *
  * The resume pack (spec §7). Built mechanically from the store and git; the
  * reader is an LLM and gets evidence, not a summary. Budgeted, and anything
  * dropped for budget is named so it can be fetched.
@@ -34,6 +56,10 @@ const INSTRUCTION_CLIP_MIN = 120;
 const INSTRUCTIONS_BUDGET_SHARE = 0.35;
 
 export type ResumeMode = "continue" | "fork" | "inspect";
+export type ResumeDetail = PackDetail;
+/** Lean detail keeps at most this many lines in "Last assistant messages" and in each part of "Since the checkpoint". */
+export const LEAN_SECTION_LINES = 3;
+const LEAN_MESSAGE_CLIP = 200;
 
 export interface ResumeOpts {
   mode: ResumeMode;
@@ -44,6 +70,12 @@ export interface ResumeOpts {
   repoPath?: string;
   budgetTokens?: number;
   now?: Date;
+  /** "lean" (default): messages and since-checkpoint capped at LEAN_SECTION_LINES plus references. "evidence": full lines. */
+  detail?: ResumeDetail;
+  /** ISO time; events, checkpoints and pending operations after this instant are hidden */
+  asOf?: string;
+  /** the requesting author; "Changed since your last visit" is rendered when they have an earlier session on the thread */
+  viewer?: string;
 }
 
 export interface ResumePack {
@@ -75,6 +107,12 @@ export interface ResumePack {
   sources: SourceCounts;
   omitted: string[];
   text: string;
+  /** which shape was rendered */
+  detail: ResumeDetail;
+  /** the as-of instant applied, ISO; null when current */
+  as_of: string | null;
+  /** what happened after the viewer's last session on the thread; null without a viewer */
+  changed_since: VisitDelta | null;
 }
 
 const approxTokens = (s: string) => Math.ceil(s.length / 4);
@@ -95,7 +133,11 @@ export function clipSummary(text: string, maxChars: number): { text: string; cli
 
 export async function buildResumePack(cfg: Config, pool: pg.Pool, threadId: string, opts: ResumeOpts): Promise<ResumePack> {
   const now = opts.now ?? new Date();
+  const detail: ResumeDetail = opts.detail ?? "lean";
   const budget = opts.budgetTokens ?? 6000;
+  const asOf = parseAsOf(opts.asOf);
+  const upTo = (d: Date | null | undefined) => !asOf || (d != null && new Date(d).getTime() <= asOf.getTime());
+  const evTime = (e: { occurred_at: Date | null; received_at: Date }) => e.occurred_at ?? e.received_at;
   const omitted: string[] = [];
   let t = await getThread(pool, threadId);
   if (!t) throw new Error(`thread not found: ${threadId}`);
@@ -119,23 +161,33 @@ export async function buildResumePack(cfg: Config, pool: pg.Pool, threadId: stri
   }
 
   // ----- checkpoint & sessions -----
-  const head = await headCheckpoint(pool, t.id);
-  const latest = head ?? (await latestCheckpointAny(pool, t.id));
-  if (!head && latest) omitted.push(`thread has no head checkpoint; showing latest non-head checkpoint ${latest.id} (${latest.kind}, did not advance: claim/generation mismatch at publish)`);
+  let head = await headCheckpoint(pool, t.id);
+  if (head && !upTo(head.created_at)) head = null;
+  let latest = head ?? (asOf
+    ? (await pool.query<CheckpointRow>(`select * from cont_checkpoints where thread_id = $1 and created_at <= $2 order by created_at desc limit 1`, [t.id, asOf])).rows[0] ?? null
+    : await latestCheckpointAny(pool, t.id));
+  if (!head && latest) omitted.push(asOf ? `showing the latest checkpoint at or before the as-of instant, ${latest.id} (${latest.kind})` : `thread has no head checkpoint; showing latest non-head checkpoint ${latest.id} (${latest.kind}, did not advance: claim/generation mismatch at publish)`);
   const summary = await summarizeThread(pool, t);
   // the source session: the checkpoint's, else the thread's most recently seen session
   const srcSession: SessionRow | null = latest ? await getSession(pool, latest.session_id) : summary.last_session ? await getSession(pool, summary.last_session.id) : null;
 
-  // ----- evidence -----
-  const instrRows = await threadEvents(pool, t.id, { kinds: ["instruction.added"] });
-  const msgRows = await threadEvents(pool, t.id, { kinds: ["assistant.message"], limit: 3 });
-  const fileRows = await threadEvents(pool, t.id, { kinds: ["file.changed"] });
-  const gapRows = await threadEvents(pool, t.id, { kinds: ["capture.gap"], limit: 20 });
-  const compRows = await threadEvents(pool, t.id, { kinds: ["compaction"] });
+  // ----- evidence (as-of: rows after the instant are dropped before shaping) -----
+  const instrRows = (await threadEvents(pool, t.id, { kinds: ["instruction.added"] })).filter((e) => upTo(evTime(e)));
+  const msgRows = asOf
+    ? (await threadEvents(pool, t.id, { kinds: ["assistant.message"] })).filter((e) => upTo(evTime(e))).slice(-3)
+    : await threadEvents(pool, t.id, { kinds: ["assistant.message"], limit: 3 });
+  const fileRows = (await threadEvents(pool, t.id, { kinds: ["file.changed"] })).filter((e) => upTo(evTime(e)));
+  const gapRows = (await threadEvents(pool, t.id, { kinds: ["capture.gap"], limit: 20 })).filter((e) => upTo(evTime(e)));
+  const compRows = (await threadEvents(pool, t.id, { kinds: ["compaction"] })).filter((e) => upTo(evTime(e)));
   const sources = await threadSourceCounts(pool, t.id);
-  const pend = srcSession ? await pendingOperations(pool, srcSession.id) : [];
-  const errRows = srcSession ? await sessionEvents(pool, srcSession.id, { kinds: ["tool.finished"] }) : [];
+  const pend = srcSession ? (asOf ? await pendingOperationsAsOf(pool, srcSession.id, asOf) : await pendingOperations(pool, srcSession.id)) : [];
+  const errRows = srcSession ? (await sessionEvents(pool, srcSession.id, { kinds: ["tool.finished"] })).filter((e) => upTo(evTime(e))) : [];
   const lastErr = [...errRows].reverse().find((e) => e.payload?.is_error || (typeof e.payload?.stderr_preview === "string" && e.payload.stderr_preview));
+  const msgFetch = `ledger_events(thread_id: ${JSON.stringify(t.id)}, kinds: ["assistant.message"], preview_chars: 2000)`;
+  const asOfLine = asOf ? `as of ${fmt(asOf)}: events, checkpoints and pending operations after this instant are hidden.` : null;
+
+  // ----- changed since the viewer's last session on this thread -----
+  const delta: VisitDelta | null = opts.viewer ? await threadVisitDelta(pool, t.id, pend.map((p) => ({ ...p, session_id: srcSession?.id })), { viewer: opts.viewer, excludeSessionId: opts.sessionId ?? null, asOf, kinds: ["instruction.added", "assistant.message", "tool.requested", "file.changed", "compaction"] }) : null;
 
   const fileCounts = new Map<string, number>();
   for (const f of fileRows) { const p = String(f.payload?.path ?? ""); if (p) fileCounts.set(p, (fileCounts.get(p) ?? 0) + 1); }
@@ -265,6 +317,7 @@ export async function buildResumePack(cfg: Config, pool: pg.Pool, threadId: stri
     L.push(`thread ${t.id} · repo ${t.repo}${t.branch ? ` · branch ${t.branch}` : ""} · created by ${t.created_by} ${fmt(t.created_at)} · status ${t.status} · generation ${t.generation}`);
     if (fork) L.push(`FORK: you are on ${fork.id} ("${fork.title}"), forked from the thread above.`);
     L.push(`claim: ${claimInfo.note}`);
+    if (asOfLine) L.push(asOfLine);
     L.push(``);
     L.push(`## Honesty`);
     L.push(`Code saved through ${fmt(vSnap)} (remote-verified). Events acknowledged through ${fmt(vEv)}. Source session last seen ${fmt(lastSeen)}${srcSession?.ended_at ? ", ended" : ", not marked ended"}.`);
@@ -327,16 +380,37 @@ export async function buildResumePack(cfg: Config, pool: pg.Pool, threadId: stri
     L.push(``);
     L.push(`## Last assistant messages`);
     if (level >= 1) { L.push(`(omitted for budget; ledger_events(thread_id: "${t.id}", kinds: ["assistant.message"]))`); om.push(`last assistant messages (omitted for budget; ledger_events(thread_id: "${t.id}", kinds: ["assistant.message"]))`); }
+    else if (detail === "lean") {
+      // lean: at most LEAN_SECTION_LINES short lines, each a reference to its event; the full text is one fetch away
+      for (const m of msgRows.slice(-LEAN_SECTION_LINES)) L.push(`- [${m.occurred_at ? m.occurred_at.toISOString().slice(11, 16) : "?"}] session ${m.session_id.slice(0, 8)} seq ${m.seq}: ${clipTo(String(m.payload?.text ?? "").replace(/\s+/g, " ").trim(), LEAN_MESSAGE_CLIP)}`);
+      L.push(`(${msgRows.length ? "clipped; " : "none captured; "}full text via ${msgFetch})`);
+      om.push(`assistant message text clipped to ${LEAN_MESSAGE_CLIP} chars in lean detail; ${msgFetch}`);
+    }
     else for (const m of msgRows) L.push(`- [${m.occurred_at ? m.occurred_at.toISOString().slice(11, 16) : "?"}] ${String(m.payload?.text ?? "").replace(/\n+/g, " ").slice(0, 600)}`);
     L.push(``);
     for (const line of renderDecisionsInForce(decisionRefs, saved, { compact: level >= 4, groups: recordDecisions, perGroup: level >= 3 ? 2 : 5 })) L.push(line);
     if (level >= 4 && decisionRefs.length) om.push(`Ledger object titles in Decisions in force (ids and status kept); ledger_get per id`);
     L.push(``);
     L.push(`## Since the checkpoint`);
-    L.push(gitDiff ? `git diff --stat ${gitDiff}` : `git: ${om.find((o) => o.startsWith("intervening")) ?? "no local checkout given; pass repoPath to compute"}`);
+    if (detail === "lean" && gitDiff) {
+      // lean: the diff header plus LEAN_SECTION_LINES stat lines; the rest is a git command away
+      const lines = gitDiff.split("\n");
+      const shown = lines.slice(0, LEAN_SECTION_LINES + 1);
+      L.push(`git diff --stat ${shown.join("\n")}`);
+      if (lines.length > shown.length) { L.push(`(${lines.length - shown.length} more lines; run git diff --stat ${lines[0].replace(/:$/, "")} in your checkout)`); om.push(`git diff --stat shortened to ${LEAN_SECTION_LINES} lines in lean detail; run git diff --stat ${lines[0].replace(/:$/, "")}`); }
+    } else L.push(gitDiff ? `git diff --stat ${gitDiff}` : `git: ${om.find((o) => o.startsWith("intervening")) ?? "no local checkout given; pass repoPath to compute"}`);
+    const ledgerCap = detail === "lean" ? LEAN_SECTION_LINES : ledgerSince.length;
     if (level >= 4 && ledgerSince.length) { L.push(`ledger: ${ledgerSince.length} object(s) mentioning ${repoTag} since ${fmt(since)} (list omitted for budget; ledger_search "${repoTag}")`); om.push("ledger objects since the checkpoint"); }
-    else L.push(ledgerSince.length ? `ledger objects mentioning ${repoTag} since ${fmt(since)}:\n${ledgerSince.map((s) => `- ${s}`).join("\n")}` : `ledger: nothing new mentioning ${repoTag} since ${fmt(since)}`);
+    else if (!ledgerSince.length) L.push(`ledger: nothing new mentioning ${repoTag} since ${fmt(since)}`);
+    else {
+      L.push(`ledger objects mentioning ${repoTag} since ${fmt(since)}:\n${ledgerSince.slice(0, ledgerCap).map((s) => `- ${s}`).join("\n")}`);
+      if (ledgerSince.length > ledgerCap) { L.push(`- … ${ledgerSince.length - ledgerCap} more; ledger_search "${repoTag}"`); om.push(`${ledgerSince.length - ledgerCap} ledger objects since the checkpoint (lean detail); ledger_search "${repoTag}"`); }
+    }
     L.push(``);
+    if (delta && !delta.first_visit) {
+      for (const line of renderVisitDelta(delta, { unit: "thread", created: t.created_at, level: level >= 3 ? 1 : 0 })) L.push(line);
+      L.push(``);
+    }
     L.push(`## Bootstrap`);
     L.push(bootstrap.length ? "```\n" + bootstrap.join("\n") + "\n```" : "(no snapshot to check out)");
     L.push(``);
@@ -364,6 +438,7 @@ export async function buildResumePack(cfg: Config, pool: pg.Pool, threadId: stri
     last_error: lastErr ? lastErr.payload : null, intervening: { git: gitDiff, ledger: ledgerSince },
     decisions: decisionRefs, record_decisions: recordDecisions,
     bootstrap, sources, omitted: out.omitted, text: out.text,
+    detail, as_of: asOf ? asOf.toISOString() : null, changed_since: delta,
   };
 }
 

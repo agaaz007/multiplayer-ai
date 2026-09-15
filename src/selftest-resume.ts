@@ -11,7 +11,9 @@ import path from "node:path";
  * buildResumePack tolerates a missing repoPath, and checkpoints carry fake
  * wip refs so the bootstrap block renders.
  *
- * Covers: first-3/last-8 instruction shaping with the gap named; the latest
+ * Covers: lean detail (default: at most 3 clipped assistant-message references
+ * plus the fetch that restores them, viewer-based "Changed since your last
+ * visit", as_of) and evidence detail; first-3/last-8 instruction shaping with the gap named; the latest
  * compaction summary as a clipped "Session summary" section; files touched in
  * the last hour of the source session; the Sources honesty line; queryEvents
  * filters, ordering, and the truncation trailer; artifact slices by id and
@@ -35,6 +37,7 @@ type NormEvent = import("./continuity/events.js").NormEvent;
 type EventKind = import("./continuity/events.js").EventKind;
 
 const T = (min: number) => new Date(Date.UTC(2026, 8, 8, 2, min, 0));
+const fmt = (d: Date) => d.toISOString().slice(0, 19).replace("T", " ") + "Z";
 let step = 0;
 const ok = (msg: string) => console.log(`  ok ${++step}. ${msg}`);
 const ev = (id: string, kind: EventKind, min: number, payload: Record<string, unknown>, call_id?: string): NormEvent => ({ producer_event_id: id, kind, occurred_at: T(min).toISOString(), payload, ...(call_id ? { call_id } : {}) });
@@ -457,6 +460,59 @@ const packB = await buildResumePack(cfg, pool, B.t.id, { mode: "inspect", author
   const warnLines = renderDecisionsInForce(legacyWarned, { results: 2, sessions: 1 }).filter((l) => l.startsWith("WARNING"));
   assert.deepEqual(warnLines, ["WARNING: only mine", "WARNING (2 objects above): analytical scope unknown (legacy record)"], "a warning shared by several objects prints once");
   ok("decisions in force: ids the thread saved (receipt, Codex-escaped receipt, Recorded line; not search hits or clipped ids) resolve to in force / DRAFT / SUPERSEDED with the save event; record decisions carry how they were accepted (person, self-confirming agent, proposed); the contract states the rule; compact under budget");
+}
+
+// ---------- 9. lean detail (default): messages and since-checkpoint capped to references + 3 lines; evidence detail restores; viewer delta; as_of ----------
+{
+  const { LEAN_SECTION_LINES } = await import("./continuity/resume.js");
+  assert.equal(packB.detail, "lean", "lean is the default detail");
+  assert.deepEqual({ as_of: packB.as_of, changed: packB.changed_since }, { as_of: null, changed: null }, "no as_of, no viewer: no delta");
+  const msgs = packB.text.slice(packB.text.indexOf("## Last assistant messages"), packB.text.indexOf("## Decisions in force"));
+  const bullets = msgs.split("\n").filter((l) => l.startsWith("- ["));
+  assert.equal(bullets.length, LEAN_SECTION_LINES, `at most ${LEAN_SECTION_LINES} message lines: ${bullets.length}`);
+  assert.ok(bullets.every((l) => l.length <= 260 && /^- \[\d\d:\d\d\] session [a-z0-9-]{8} seq \d+: /.test(l)), `each line is a clipped reference to its event:\n${bullets.join("\n")}`);
+  assert.ok(bullets[2].includes("Third message: build is next.") && bullets[2].endsWith("…"), "the latest message, clipped");
+  const msgFetch = `ledger_events(thread_id: "${B.t.id}", kinds: ["assistant.message"], preview_chars: 2000)`;
+  assert.ok(msgs.includes(`(clipped; full text via ${msgFetch})`), msgs);
+  assert.ok(packB.omitted.some((o) => o.startsWith("assistant message text clipped to 200 chars in lean detail") && o.includes(msgFetch)), packB.omitted.join(" | "));
+  assert.equal(packB.last_messages.length, 3, "JSON keeps the full messages");
+  assert.ok(packB.text.includes("## Since the checkpoint\ngit: no local checkout given; pass repoPath to compute\nledger: nothing new mentioning demo since"), "since-the-checkpoint keeps its lines when there is nothing to cap");
+  // evidence detail: the pre-2026-09-15 shape, 600-char message lines and no clip note
+  const packBEv = await buildResumePack(cfg, pool, B.t.id, { mode: "inspect", author: "agaaz", now: T(200), detail: "evidence" });
+  assert.equal(packBEv.detail, "evidence");
+  assert.ok(packBEv.text.includes(`- [04:06] ${longMsg("Third message: build is next.").slice(0, 600)}`), "evidence detail inlines the 600-char message");
+  assert.ok(!packBEv.text.includes("(clipped; full text via") && !packBEv.omitted.some((o) => o.startsWith("assistant message text clipped")), "no lean clip in evidence detail");
+  for (const must of ["## Session summary (written by Claude Code at compaction; evidence, not memory)", "## Human instructions (4, in order)", "## Pending / unknown operations (1)", "## Bootstrap", "## First turn contract"]) assert.ok(packB.text.includes(must) && packBEv.text.includes(must), `both details keep: ${must}`);
+  ok(`lean thread pack: ${LEAN_SECTION_LINES} clipped message references plus the fetch that restores them (${Math.ceil(packB.text.length / 4)} tokens vs ${Math.ceil(packBEv.text.length / 4)} in evidence detail); every other section kept; detail "evidence" inlines the full lines`);
+
+  // viewer: rachit's session on thread B was last seen T(130); agaaz's Codex session added one instruction at T(145) and the fixture checkpoint was published after
+  const rv = await buildResumePack(cfg, pool, B.t.id, { mode: "inspect", author: "rachit", now: T(200), viewer: "rachit" });
+  const d = rv.changed_since!;
+  assert.deepEqual({ first: d.first_visit, last: d.last_session?.session_id, since: d.since?.toISOString(), events: d.events.map((e) => [e.session_id, e.author, e.harness, e.count, e.from_seq, e.to_seq]), checkpoints: d.checkpoints, pending: d.pending, files: d.files },
+    { first: false, last: B.sid, since: T(130).toISOString(), events: [["sess-compact-2", "agaaz", "codex", 1, 1, 1]], checkpoints: 1, pending: [], files: [] });
+  const sec = rv.text.slice(rv.text.indexOf("## Changed since your last visit"), rv.text.indexOf("## Bootstrap"));
+  assert.ok(sec.startsWith(`## Changed since your last visit\nYour last contributing session ${B.sid.slice(0, 8)} was last seen ${fmt(T(130))}. Since then:\n- 1 new content event in session sess-com (agaaz, Codex) seq 1..1, last ${fmt(T(145))}: ledger_events(session_id: "sess-compact-2", after_seq: 0, limit: 1)\n- 1 checkpoint published`), sec);
+  assert.ok(rv.text.indexOf("## Since the checkpoint") < rv.text.indexOf("## Changed since your last visit") && rv.text.indexOf("## Changed since your last visit") < rv.text.indexOf("## Bootstrap"), "delta sits after Since the checkpoint, before Bootstrap");
+  assert.ok(!sec.includes("From Codex: also check the footer."), "the delta references the event; it does not inline it");
+  const av = await buildResumePack(cfg, pool, B.t.id, { mode: "inspect", author: "agaaz", now: T(200), viewer: "agaaz" });
+  assert.deepEqual({ last: av.changed_since?.last_session?.session_id, events: av.changed_since?.events, checkpoints: av.changed_since?.checkpoints }, { last: "sess-compact-2", events: [], checkpoints: 1 });
+  assert.ok(av.text.includes("## Changed since your last visit") && av.text.includes("- 1 checkpoint published") && !av.text.includes("new content event"), "agaaz sees only the checkpoint");
+  const nv = await buildResumePack(cfg, pool, B.t.id, { mode: "inspect", author: "agaaz", now: T(200), viewer: "nobody" });
+  assert.equal(nv.changed_since?.first_visit, true);
+  assert.ok(!nv.text.includes("## Changed since your last visit"), "a first visit to a thread renders no delta section");
+  ok("thread delta: rachit sees agaaz's one new instruction as an exact ledger_events call plus the checkpoint; agaaz sees only the checkpoint; a first visit renders nothing");
+
+  // as_of T(100): the footer instruction (T145), m3 (T126), the pricing edits (T110+), the pending build (T128) and the checkpoint (real clock) are hidden
+  const ao = await buildResumePack(cfg, pool, B.t.id, { mode: "inspect", author: "agaaz", now: T(200), asOf: T(100).toISOString() });
+  assert.equal(ao.as_of, T(100).toISOString());
+  assert.ok(ao.text.includes(`as of ${fmt(T(100))}: events, checkpoints and pending operations after this instant are hidden.`), ao.text.split("\n").slice(0, 6).join("\n"));
+  assert.deepEqual({ instr: ao.instructions.map((i) => i.seq), msgs: ao.last_messages.length, pending: ao.pending_operations, pricing: ao.files_touched.some((f) => f.path === "src/pricing.tsx"), files: ao.files_touched.length, checkpoint: ao.checkpoint, summary: ao.session_summary?.seq },
+    { instr: [B.seqOf("i1"), B.seqOf("i2"), B.seqOf("i3")], msgs: 2, pending: [], pricing: false, files: 20, checkpoint: null, summary: B.seqOf("c2") }, "as of T(100): three instructions, two messages, no pending call, no pricing edits, no checkpoint yet, the T(50) summary");
+  assert.ok(!ao.text.includes("From Codex: also check the footer.") && !ao.text.includes("Third message") && ao.text.includes("## Checkpoint (none)"), "hidden material is absent from the text");
+  const ao2 = await buildResumePack(cfg, pool, B.t.id, { mode: "inspect", author: "agaaz", now: T(200), asOf: T(15).toISOString() });
+  assert.equal(ao2.session_summary, null, "before the first summary with text, there is no session summary");
+  await assert.rejects(buildResumePack(cfg, pool, B.t.id, { mode: "inspect", author: "agaaz", asOf: "yesterday-ish" }), /as_of is not a time/);
+  ok("as_of on a thread hides later instructions, messages, file changes, pending calls, checkpoints and summaries; an invalid time is an error");
 }
 
 await closePools();

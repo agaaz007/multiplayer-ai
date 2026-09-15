@@ -166,8 +166,19 @@ export async function queryEvents(q: Q, f: EventFilters): Promise<EventQueryResu
   return { events, total, truncated, next_after_seq, session_id: session_id ?? null, lines, text: lines.join("\n") };
 }
 
-/** `seq · HH:MM · kind · <preview>`; tool.finished adds `[artifact <id>]` when one was stored. */
-export function eventLine(e: EventLineRow, previewChars = PREVIEW_CHARS): string {
+/**
+ * Authority annotation an evidence-search hit carries; `eventLine` prints it as a trailing
+ * `[tier N · <label>]` so a reader never has to infer whether an event backs a confirmed state.
+ */
+export interface EventAuthority { tier: number; label: string }
+
+/** `[tier 3 · current]`, `[tier 2 · PROPOSED]`, `[tier 0 · superseded by <id>]` … */
+export function authoritySuffix(a: EventAuthority): string {
+  return `[tier ${a.tier} · ${a.label}]`;
+}
+
+/** `seq · HH:MM · kind · <preview>`; tool.finished adds `[artifact <id>]` when one was stored; `authority` appends `[tier N · label]`. */
+export function eventLine(e: EventLineRow, previewChars = PREVIEW_CHARS, authority?: EventAuthority | null): string {
   const at = e.occurred_at ?? e.received_at;
   const hhmm = at ? new Date(at).toISOString().slice(11, 16) : "--:--";
   const p = e.payload ?? {};
@@ -205,7 +216,62 @@ export function eventLine(e: EventLineRow, previewChars = PREVIEW_CHARS): string
     if (p.input_complete === false) line += ' [input incomplete: do not claim this preview is the original query]';
     if (Array.isArray(p.evidence_ids) && p.evidence_ids.length) line += ` [capture evidence ${p.evidence_ids.join(', ')}]`;
   }
+  if (authority) line += ` ${authoritySuffix(authority)}`;
   return line;
+}
+
+// ---------- scope: repo or all, decided before any matching happens ----------
+
+export type SearchScope = "repo" | "all";
+
+export interface ResolvedScope {
+  scope: SearchScope;
+  /** canonical repo identity when scope is repo */
+  repo: string | null;
+  /** the directory the repo was resolved from */
+  cwd: string | null;
+  /** set when scope "repo" was requested and no repo could be resolved; callers must not widen */
+  error: string | null;
+}
+
+/**
+ * Decide the scope of a continuity query before it runs. Default: "repo" whenever a cwd is given,
+ * "all" otherwise. An explicit scope "repo" without a resolvable repo is an error, never a silent
+ * fallback to every repo. `fns` are injectable so the rule can be tested without git.
+ */
+export function resolveSearchScope(
+  input: { cwd?: string | null; scope?: SearchScope | null; fallbackCwd?: string | null },
+  fns: { repoRoot: (cwd: string) => string | null; repoIdentity: (root: string) => string }
+): ResolvedScope {
+  const requested = input.scope ?? null;
+  if (requested === "all") return { scope: "all", repo: null, cwd: input.cwd ?? null, error: null };
+  const dir = input.cwd ?? (requested === "repo" ? input.fallbackCwd ?? null : null);
+  if (!dir) return requested === "repo"
+    ? { scope: "repo", repo: null, cwd: null, error: 'scope "repo" requested but no cwd was given and none could be inferred; pass cwd or scope "all"' }
+    : { scope: "all", repo: null, cwd: null, error: null };
+  const root = fns.repoRoot(dir);
+  if (!root) return requested === "repo" || input.cwd
+    ? { scope: "repo", repo: null, cwd: dir, error: `scope "repo" but ${dir} is not inside a git repo; pass a cwd inside one or scope "all"` }
+    : { scope: "all", repo: null, cwd: dir, error: null };
+  return { scope: "repo", repo: fns.repoIdentity(root), cwd: dir, error: null };
+}
+
+/** `github.com/org/repo` → `org/repo`; other identities keep their host or path. */
+export function repoDisplay(repo: string): string {
+  const stripped = repo.replace(/^[a-z]+:\/\//i, "");
+  return stripped.startsWith("github.com/") ? stripped.slice("github.com/".length) : stripped;
+}
+
+/** The first line of every continuity result: `scope: repo org/repo · author any · as of now · lexical only`. */
+export function scopeLine(s: ResolvedScope, opts: { author?: string | null; asOf?: string | null; retrieval?: string | null; extra?: string[] } = {}): string {
+  const parts = [
+    `scope: ${s.scope === "repo" && s.repo ? `repo ${repoDisplay(s.repo)}` : "all repos"}`,
+    `author ${opts.author ?? "any"}`,
+    `as of ${opts.asOf ?? "now"}`,
+    ...(opts.extra ?? []),
+    ...(opts.retrieval ? [opts.retrieval] : []),
+  ];
+  return parts.join(" · ");
 }
 
 export interface ArtifactSlice {

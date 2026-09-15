@@ -1,5 +1,6 @@
 import pg from "pg";
 import type { Config } from "../store.js";
+import { embeddingsConfigured, ensureEmbeddingSchema } from "./embeddings.js";
 
 /**
  * Shared Postgres for execution continuity. One pool per URL, created lazily.
@@ -226,9 +227,15 @@ create index if not exists cont_events_fts_idx on cont_events using gin (
 );
 `;
 
-export async function migrate(pool: pg.Pool): Promise<string[]> {
+/**
+ * Idempotent. Without `cfg`, or with a config that has no `continuity.embeddings`, this runs the base
+ * SCHEMA only. With embeddings configured it also installs pgvector and the cont_event_embeddings /
+ * cont_embedding_failures tables, refusing a width or model mismatch with stored vectors (embeddings.ts).
+ */
+export async function migrate(pool: pg.Pool, cfg?: Config): Promise<string[]> {
   const before = await tableList(pool);
   await pool.query(SCHEMA);
+  if (cfg && embeddingsConfigured(cfg)) await ensureEmbeddingSchema(pool, cfg);
   const after = await tableList(pool);
   return after.filter((t) => !before.includes(t));
 }

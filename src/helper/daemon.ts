@@ -15,6 +15,7 @@ import { classifySession, classifyAllowed, unclassifiedCount } from "../continui
 import { addDecisionObligations } from "../hooks.js";
 import { autoBindEligible, forbiddenSnapshotRoot, threadTitleFor, transcriptRoots } from "../continuity/safety.js";
 import { writeHeartbeat, withDeadline, type HelperHeartbeat } from "./heartbeat.js";
+import { embeddingsConfigured, embedPendingEvents } from "../continuity/embeddings.js";
 const putArtifact = S.putArtifact;
 
 /**
@@ -99,6 +100,10 @@ export interface HelperLoopOpts extends HelperOpts {
 
 /** Detached classifications by session id; a pass never blocks on them, and a session never runs two. */
 const classifyInFlight = new Map<string, Promise<void>>();
+
+/** Embeddings per pass (optional feature): at most this many newly uploaded events, and no new provider batch after this long. */
+export const EMBED_PASS_MAX_EVENTS = 256;
+export const EMBED_PASS_MAX_MS = 60_000;
 
 export interface PassSummary {
   at: string;
@@ -327,6 +332,8 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
   const roots = { ...transcriptRoots(), ...(opts.roots ?? {}) };
   const st = loadState();
   let lastSave = Date.now();
+  /** sessions that had events inserted this pass; only their new events are embedded (backfill is the CLI's job) */
+  const uploadedSessions = new Set<string>();
 
   // ---- discover ----
   const files = [...walk(roots.claude, 3), ...walk(roots.codex, 5)];
@@ -451,6 +458,7 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
         await materializeArtifacts(pool, sid, batch.events);
         const res = await S.appendEvents(pool, sid, batch.events, routing.thread_id, routing.generation);
         sum.events_uploaded += res.inserted;
+        if (res.inserted) uploadedSessions.add(sid);
         acked++;
         spoolAck(sid, acked);
       }
@@ -559,6 +567,19 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
     if (Date.now() - lastSave > STATE_SAVE_EVERY_MS) {
       try { saveState(st); } catch { /* the end-of-pass save retries */ }
       lastSave = Date.now();
+    }
+  }
+
+  // ---- embeddings (optional): one batched step for the events this pass uploaded ----
+  // Off unless continuity.embeddings is set. Bounded by count and time so a slow provider cannot push a pass past its
+  // deadline; anything left over is picked up by the next pass or `ledger continuity embed --backfill`. Failures are
+  // logged once per reason and never count as pass errors: capture does not depend on embeddings.
+  if (uploadedSessions.size && embeddingsConfigured(cfg)) {
+    try {
+      const r = await embedPendingEvents(pool, cfg, { sessionIds: [...uploadedSessions], limit: EMBED_PASS_MAX_EVENTS, deadlineMs: EMBED_PASS_MAX_MS, log });
+      if (r.embedded || r.failed) log(`embedded ${r.embedded} events${r.failed ? ` (${r.failed} recorded as failed)` : ""}${r.stopped_early ? " (stopped early; the rest next pass)" : ""}`);
+    } catch (e: any) {
+      log(`embeddings step failed: ${String(e?.message ?? e).slice(0, 200)}`);
     }
   }
 
