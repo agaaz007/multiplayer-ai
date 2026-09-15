@@ -7,8 +7,30 @@ import { defaultRemoteBranch, diffStat, fetchQuiet, repoRoot, repoIdentity } fro
 import { PREVIEW_MAX_CHARS, sourcesLine, threadSourceCounts, type SourceCounts } from "./evidence.js";
 import { readProgress } from "./classify.js";
 import { DECISION_RULE, ledgerRefStatuses, renderDecisionsInForce, threadRecordDecisions, writtenLedgerIds, type LedgerRefStatus, type RecordDecisionGroup } from "./packsections.js";
+import { parseAsOf, pendingOperationsAsOf, renderVisitDelta, threadVisitDelta, type PackDetail, type VisitDelta } from "./packlean.js";
+export { type PackDetail, type VisitDelta } from "./packlean.js";
 
 /**
+ * SIGNATURE (for mcp.ts / cli.ts):
+ *
+ *   buildResumePack(cfg: Config, pool: pg.Pool, threadId: string, opts: ResumeOpts): Promise<ResumePack>
+ *
+ *   ResumeOpts = {
+ *     mode: "continue" | "fork" | "inspect";
+ *     author: string;                    // the resuming author (claim holder)
+ *     sessionId?: string;                // the resuming session; synthesized if absent
+ *     repoPath?: string;                 // local checkout of the same repo, for the intervening diff and bootstrap
+ *     budgetTokens?: number;             // default 6000; shrinks sections, never switches detail
+ *     detail?: "lean" | "evidence";      // default "lean": "Last assistant messages" and "Since the checkpoint" are capped at
+ *                                        // 3 lines each plus the fetch that restores them; "evidence": the pre-2026-09-15 pack
+ *     asOf?: string;                     // ISO time: events, checkpoints and pending operations only up to that instant
+ *     viewer?: string;                   // the requesting author (mcp passes cfg.author): "Changed since your last visit"
+ *                                        // is rendered when the viewer has an earlier session on the thread
+ *     now?: Date;
+ *   }
+ *
+ *   MCP wiring: ledger_resume(thread_id) / ledger_thread_get pass { detail, asOf: as_of, viewer: cfg.author }.
+ *
  * The resume pack (spec §7). Built mechanically from the store and git; the
  * reader is an LLM and gets evidence, not a summary. Budgeted, and anything
  * dropped for budget is named so it can be fetched.
@@ -34,6 +56,10 @@ const INSTRUCTION_CLIP_MIN = 120;
 const INSTRUCTIONS_BUDGET_SHARE = 0.35;
 
 export type ResumeMode = "continue" | "fork" | "inspect";
+export type ResumeDetail = PackDetail;
+/** Lean detail keeps at most this many lines in "Last assistant messages" and in each part of "Since the checkpoint". */
+export const LEAN_SECTION_LINES = 3;
+const LEAN_MESSAGE_CLIP = 200;
 
 export interface ResumeOpts {
   mode: ResumeMode;
@@ -44,6 +70,12 @@ export interface ResumeOpts {
   repoPath?: string;
   budgetTokens?: number;
   now?: Date;
+  /** "lean" (default): messages and since-checkpoint capped at LEAN_SECTION_LINES plus references. "evidence": full lines. */
+  detail?: ResumeDetail;
+  /** ISO time; events, checkpoints and pending operations after this instant are hidden */
+  asOf?: string;
+  /** the requesting author; "Changed since your last visit" is rendered when they have an earlier session on the thread */
+  viewer?: string;
 }
 
 export interface ResumePack {
@@ -75,6 +107,12 @@ export interface ResumePack {
   sources: SourceCounts;
   omitted: string[];
   text: string;
+  /** which shape was rendered */
+  detail: ResumeDetail;
+  /** the as-of instant applied, ISO; null when current */
+  as_of: string | null;
+  /** what happened after the viewer's last session on the thread; null without a viewer */
+  changed_since: VisitDelta | null;
 }
 
 const approxTokens = (s: string) => Math.ceil(s.length / 4);
@@ -95,7 +133,11 @@ export function clipSummary(text: string, maxChars: number): { text: string; cli
 
 export async function buildResumePack(cfg: Config, pool: pg.Pool, threadId: string, opts: ResumeOpts): Promise<ResumePack> {
   const now = opts.now ?? new Date();
+  const detail: ResumeDetail = opts.detail ?? "lean";
   const budget = opts.budgetTokens ?? 6000;
+  const asOf = parseAsOf(opts.asOf);
+  const upTo = (d: Date | null | undefined) => !asOf || (d != null && new Date(d).getTime() <= asOf.getTime());
+  const evTime = (e: { occurred_at: Date | null; received_at: Date }) => e.occurred_at ?? e.received_at;
   const omitted: string[] = [];
   let t = await getThread(pool, threadId);
   if (!t) throw new Error(`thread not found: ${threadId}`);
