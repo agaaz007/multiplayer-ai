@@ -16,9 +16,12 @@ import path from "node:path";
  * after the reference was made; a non-code writing record; an unlinked span in
  * rachit's session; a third session with nothing assignable.
  *
- * Covers the record pack (header, state with PROPOSED flags, cross-session
- * evidence, session summary, pending ops inside spans, superseded refs,
- * unassigned spans, bootstrap, claim modes, budget shrinking), the record tools
+ * Covers the record pack in both details: lean (the default: state, decisions,
+ * pending, changed-since-your-last-visit, bootstrap, drill-down references, no
+ * event lines, under LEAN_TARGET_TOKENS; viewer first-visit vs delta; as_of)
+ * and evidence (header, state with PROPOSED flags, cross-session evidence,
+ * session summary, pending ops inside spans, superseded refs, unassigned spans,
+ * bootstrap, claim modes, budget shrinking), the record tools
  * over an in-process MCP client, listRecordSummaries, the brief sections, and
  * acceptance tests 28, 29, 30, 32, 33. Pass --show to print the pack.
  */
@@ -33,7 +36,7 @@ process.env.LEDGER_GIT_SYNC = "0";
 const { getPool, migrate, closePools, tableList } = await import("./continuity/db.js");
 const S = await import("./continuity/store.js");
 const R = await import("./continuity/records.js");
-const { buildRecordPack, listRecordSummaries, recordLine, unassignedLine, stateLine, EVIDENCE_HEAD, EVIDENCE_TAIL } = await import("./continuity/recordpack.js");
+const { buildRecordPack, listRecordSummaries, recordLine, unassignedLine, stateLine, EVIDENCE_HEAD, EVIDENCE_TAIL, LEAN_TARGET_TOKENS, LEAN_PROPOSED_FULL } = await import("./continuity/recordpack.js");
 const { openWorkText, openThreadsText } = await import("./continuity/brief.js");
 const { initLedger, record, getById } = await import("./store.js");
 const { objectVersion } = await import('./authority.js');
@@ -157,11 +160,14 @@ assert.equal(dec2.superseded, dec1.id);
 assert.equal(getById(cfg, dec1.id)!.status, "deprecated");
 ok(`fixture: sessions ${A8} (agaaz, claude, ended) and ${R8} (rachit, codex, thread ${thread.id.slice(0, 8)} + checkpoint + wip), record "Attribution investigation" with 5 updates, "Landing copy" (non-code), decision ${dec1.id} superseded by ${dec2.id}`);
 
-// ---------- 1. header and state ----------
-const pack = await buildRecordPack(cfg, pool, recAttr.id, { mode: "inspect", author: "agaaz", now: T(120) });
-if (process.argv.includes("--show")) console.log(pack.text.split("\n").map((l) => `    | ${l}`).join("\n"));
-{
-  const t = pack.text;
+// ---------- 1. header and state (both details) ----------
+// `lean` is the default pack a successor reads; `pack` asks for the evidence detail, the pre-2026-09-15 shape, which the evidence assertions below inspect
+const lean = await buildRecordPack(cfg, pool, recAttr.id, { mode: "inspect", author: "agaaz", now: T(120) });
+const pack = await buildRecordPack(cfg, pool, recAttr.id, { mode: "inspect", author: "agaaz", now: T(120), detail: "evidence" });
+if (process.argv.includes("--show")) console.log(lean.text.split("\n").map((l) => `    | ${l}`).join("\n"));
+assert.equal(lean.detail, "lean", "lean is the default detail");
+assert.equal(pack.detail, "evidence");
+for (const t of [lean.text, pack.text]) {
   assert.ok(t.startsWith(`# Record pack: Attribution investigation\nrecord ${recAttr.id} · investigation · repo ${REPO} · status open · created by agaaz `), t.split("\n").slice(0, 2).join("\n"));
   assert.ok(t.includes(" · state v1 · updated "), "header carries state_version");
   assert.ok(t.includes("goal: Explain why Mixpanel and ClickHouse disagree"), "goal line");
@@ -173,11 +179,118 @@ if (process.argv.includes("--show")) console.log(pack.text.split("\n").map((l) =
   const order = ["### Decisions (1)", "### Next (1)", "### Hypotheses (2)", "### Contradictions (both sides kept; never resolved by timestamp) (1)"].map((h) => t.indexOf(h));
   assert.ok(order.every((i) => i > 0) && order.every((v, i) => i === 0 || v > order[i - 1]), `state kinds in order: ${order.join(",")}`);
   assert.ok(!t.includes("### Blockers") && !t.includes("### Progress") && !t.includes("### Notes"), "empty kinds are not rendered");
+}
+{
   assert.equal(pack.state.hypotheses.length, 2);
   assert.ok(pack.state.hypotheses.every((u) => u.status === "proposed"));
   assert.ok(stateLine(d1).startsWith("- [confirmed by agaaz;"), stateLine(d1));
   assert.equal(stateLine(h2).slice(0, 12), "- [PROPOSED]");
-  ok("pack header (id, kind, repo, status, creator, state version) and state: confirmed decision, both contradicting hypotheses flagged PROPOSED, contradiction with both sides, kinds in order, empty kinds skipped");
+  ok("pack header (id, kind, repo, status, creator, state version) and state, in both details: confirmed decision, both contradicting hypotheses flagged PROPOSED (≤ LEAN_PROPOSED_FULL per kind stay in full), contradiction with both sides, kinds in order, empty kinds skipped");
+}
+
+// ---------- 1b. lean detail: the default; five sections in order, references only, under the token target ----------
+{
+  const t = lean.text;
+  const heads = ["## State (v1 · 4 proposed · 1 confirmed)", "## Decisions in force for this work (1)", "## Pending / unknown operations (1)", "## Changed since your last visit", "## Bootstrap", "## Drill down (13 content events in 2 spans; references only)", "## Omitted for budget or unavailable"];
+  const at = heads.map((h) => t.indexOf(h));
+  assert.ok(at.every((i) => i > 0) && at.every((v, i) => i === 0 || v > at[i - 1]), `lean sections in order: ${heads.map((h, i) => `${h.slice(0, 20)}@${at[i]}`).join(", ")}`);
+  assert.ok(!t.includes("## Evidence across sessions") && !t.includes("### Session summary") && !t.includes("### Files touched") && !t.includes("## Unassigned spans") && !t.includes("## First turn contract"), "evidence-detail sections absent");
+  assert.ok(!/ · \d+ · \d\d:\d\d · (instruction\.added|assistant\.message|tool\.requested|tool\.finished|file\.changed|compaction) · /.test(t), "no evidence line is inlined");
+  assert.ok(!t.includes(codexSummary) && !t.includes("Attribution: compare Mixpanel") && !t.includes("Draft headline") && !t.includes("FATAL"), "no event text (instructions, summary, error output) is inlined");
+  assert.ok(approxTokens(t) < LEAN_TARGET_TOKENS, `lean pack under ${LEAN_TARGET_TOKENS} tokens: ${approxTokens(t)}`);
+  assert.ok(t.length < pack.text.length / 1.5, `lean is much smaller than evidence: ${t.length} vs ${pack.text.length}`);
+  assert.deepEqual(lean.evidence_summary, { total: 13, shown: [], omitted: { count: 13, fetch: [`ledger_events(session_id: "${sidA}", after_seq: 0, before_seq: 11)`, `ledger_events(session_id: "${sidR}", after_seq: 0, before_seq: 8)`] } }, "lean shows no evidence and names the per-span fetches");
+  // honesty, compact: sessions on one line, the snapshot, the decision rule, no full contract
+  assert.ok(t.includes(`Honesty: 2 contributing sessions: ${R8} (rachit, Codex, last seen 50m ago); ${A8} (agaaz, Claude Code, last seen 2h ago, ended).`), t.split("\n")[4]);
+  assert.ok(t.includes(`Code saved through ${fmt(T(69))} (remote-verified; session ${R8}).`) && t.includes("Act only on [in force] Ledger objects and [accepted by <person>] record decisions"), "snapshot and decision rule in the honesty block");
+  // state: the confirmed decision first, the ≤3 proposed items per kind in full with the acceptance labels
+  assert.ok(t.includes(`- [confirmed by agaaz; how it was accepted was not recorded] Use ClickHouse paywall_resolved`) && t.includes(`- [PROPOSED] The Mixpanel gap comes from the 7-day attribution window, not distinct_id (by rachit, ${TODAY}; evidence: seq 4 of ${R8})`));
+  assert.equal(LEAN_PROPOSED_FULL, 3);
+  // decisions in force, compact: tag + id + origin, no title; the omission names ledger_get
+  assert.ok(t.includes(`- [SUPERSEDED by ${dec2.id}, which is in force] decision ${dec1.id} · linked explicitly\n`), "compact decision line");
+  assert.ok(!t.includes(`decision ${dec1.id}: ClickHouse is the source of truth`), "no title in lean");
+  assert.ok(lean.omitted.some((o) => o.startsWith("Ledger object titles") && o.includes("ledger_get per id")), lean.omitted.join(" | "));
+  // pending: the same line as the evidence pack, shorter warning
+  assert.ok(t.includes(`- session ${R8} seq 7 Bash: psql analytics -c 'select count(*) from events where distinct_id is null and ts > now() - interval 7 day'  ← outcome unknown; do not rerun blindly`));
+  // no viewer: totals, not a delta
+  assert.ok(t.includes(`## Changed since your last visit\nNo viewer given, so no delta. Totals since creation: 13 content events in 2 sessions, 5 state updates (4 proposed, 1 confirmed), 1 pending operation, 2 files touched.\n- files: src/ingest/mixpanel.ts, queries/attribution.sql`), t.slice(t.indexOf("## Changed since"), t.indexOf("## Bootstrap")));
+  assert.equal(lean.changed_since?.viewer, null);
+  // bootstrap: the existing block
+  assert.ok(t.includes(`## Bootstrap\nsnapshot from session ${R8} (rachit, Codex)\n\`\`\`\ngit fetch origin ${WIP_REF}:${WIP_REF}\n`));
+  // drill down: one exact ledger_events call per span, the last error, the compaction summary, unassigned, search; nothing inline
+  const drill = t.slice(t.indexOf("## Drill down"), t.indexOf("## Omitted"));
+  assert.ok(drill.includes(`- ledger_events(session_id: "${sidA}", after_seq: 0, limit: 10)  · agaaz/Claude Code\n- ledger_events(session_id: "${sidR}", after_seq: 0, limit: 7)  · rachit/Codex\n`), drill);
+  assert.ok(drill.includes(`- last error (${A8} seq 7 Bash): ledger_events(session_id: "${sidA}", after_seq: 6, limit: 1, preview_chars: 2000)`), drill);
+  assert.ok(drill.includes(`- compaction summary by Codex (${codexSummary.length} chars, evidence not memory): ledger_events(session_id: "${sidR}", after_seq: 4, limit: 1, preview_chars: ${codexSummary.length})`), drill);
+  assert.ok(drill.includes(`- 1 unassigned span may belong here: ledger_unassigned(session_id: "${sidR}")`) && drill.includes(`- search: ledger_evidence_search(q: "…", record_id: "${recAttr.id}")`), drill);
+  assert.deepEqual(lean.drill_down.slice(0, 2), [`ledger_events(session_id: "${sidA}", after_seq: 0, limit: 10)`, `ledger_events(session_id: "${sidR}", after_seq: 0, limit: 7)`]);
+  // every omission names its fetch; the evidence pack is one call away
+  assert.ok(lean.omitted.every((o) => /ledger_/.test(o)), lean.omitted.join(" | "));
+  assert.ok(t.includes(`## Omitted for budget or unavailable\n`) && t.includes(`ledger_record_get(record_id: "${recAttr.id}", detail: "evidence")`), "the evidence pack is named as the restoring fetch");
+  // a wide budget alone never switches to evidence; the evidence detail must be asked for
+  const wide = await buildRecordPack(cfg, pool, recAttr.id, { mode: "inspect", author: "agaaz", now: T(120), budgetTokens: 20000 });
+  assert.equal(wide.detail, "lean");
+  assert.ok(!wide.text.includes("## Evidence across sessions") && wide.text.includes("## Drill down"), "budget_tokens >= STATE_WIDE_BUDGET stays lean");
+  assert.ok(wide.text.includes(`ledger_record_get(record_id: "${recAttr.id}", detail: "evidence")`), "the wide lean pack still points at the evidence detail");
+  // the evidence detail is the previous shape
+  assert.ok(pack.text.includes("## Evidence across sessions (13 events in 2 spans, time order") && pack.text.includes("### Session summary") && pack.text.includes("## First turn contract") && pack.text.includes(codexSummary), "detail: evidence reproduces the inline pack");
+  ok(`lean detail is the default: State → Decisions in force → Pending → Changed since your last visit → Bootstrap → Drill down, references only, ${approxTokens(t)} tokens (evidence detail: ${approxTokens(pack.text)}); a 20000 budget stays lean; detail "evidence" reproduces the inline shape`);
+}
+
+// ---------- 1c. changed since your last visit: first visit vs delta, two authors; own session excluded ----------
+{
+  const nobody = await buildRecordPack(cfg, pool, recAttr.id, { mode: "inspect", author: "agaaz", now: T(120), viewer: "nobody" });
+  assert.deepEqual({ first: nobody.changed_since?.first_visit, viewer: nobody.changed_since?.viewer, since: nobody.changed_since?.since, events: nobody.changed_since?.events.map((e) => [e.session_id, e.count]) }, { first: true, viewer: "nobody", since: null, events: [[sidR, 6], [sidA, 7]] }, "first visit: totals per session, most recent first");
+  assert.ok(nobody.text.includes(`## Changed since your last visit\nFirst visit for nobody: no earlier session of yours contributes to this record. Totals since creation (${TODAY}): 13 content events in 2 sessions, 5 state updates (4 proposed, 1 confirmed), 1 pending operation, 2 files touched.`), nobody.text.slice(nobody.text.indexOf("## Changed since"), nobody.text.indexOf("## Bootstrap")));
+  // agaaz's last contributing session ended at T(15); rachit's whole span, the pending call, the file and every update came after
+  const mine = await buildRecordPack(cfg, pool, recAttr.id, { mode: "inspect", author: "agaaz", now: T(120), viewer: "agaaz" });
+  const d = mine.changed_since!;
+  assert.deepEqual({ first: d.first_visit, last: d.last_session?.session_id, since: d.since?.toISOString(), events: d.events.map((e) => [e.session_id, e.author, e.count, e.from_seq, e.to_seq]), added: d.state_updates.added.length, confirmed: d.state_updates.confirmed.length, pending: d.pending, files: d.files.map((f) => f.path) },
+    { first: false, last: sidA, since: T(15).toISOString(), events: [[sidR, "rachit", 6, 1, 7]], added: 5, confirmed: 0, pending: [{ session_id: sidR, seq: 7, tool: "Bash" }], files: ["src/ingest/mixpanel.ts"] });
+  const sec = mine.text.slice(mine.text.indexOf("## Changed since"), mine.text.indexOf("## Bootstrap"));
+  assert.ok(sec.includes(`Your last contributing session ${A8} was last seen ${fmt(T(15))}. Since then:`), sec);
+  assert.ok(sec.includes(`- 6 new content events in session ${R8} (rachit, Codex) seq 1..7, last ${fmt(T(61))}: ledger_events(session_id: "${sidR}", after_seq: 0, limit: 7)`), sec);
+  assert.ok(sec.includes(`- state update added (5): decision ${d1.id.slice(0, 8)} [confirmed], hypothesis ${h1.id.slice(0, 8)} [PROPOSED], hypothesis ${h2.id.slice(0, 8)} [PROPOSED], contradiction ${c1.id.slice(0, 8)} [PROPOSED], next ${n1.id.slice(0, 8)} [PROPOSED]; full text via ledger_record_get(record_id: "${recAttr.id}", budget_tokens: 20000, detail: "evidence")`), sec);
+  assert.ok(sec.includes(`- 1 new pending operation: session ${R8} seq 7 Bash`) && sec.includes(`- files touched (1): src/ingest/mixpanel.ts`), sec);
+  assert.ok(!sec.includes("Attribution: compare") && !sec.includes("distinct_id guard"), "the delta references events and updates; it does not inline them");
+  // rachit's last contributing session is 0199bbbb (his later session sidN contributes nothing); after T(70) only the updates were added
+  const his = await buildRecordPack(cfg, pool, recAttr.id, { mode: "inspect", author: "rachit", now: T(120), viewer: "rachit" });
+  assert.deepEqual({ last: his.changed_since?.last_session?.session_id, events: his.changed_since?.events, added: his.changed_since?.state_updates.added.length, pending: his.changed_since?.pending, files: his.changed_since?.files }, { last: sidR, events: [], added: 5, pending: [], files: [] });
+  assert.ok(his.text.includes(`Your last contributing session ${R8} was last seen ${fmt(T(70))}. Since then:\n- state update added (5):`) && !his.text.includes("new content event"), his.text.slice(his.text.indexOf("## Changed since"), his.text.indexOf("## Bootstrap")));
+  // the reading session is never its own last visit
+  const self = await buildRecordPack(cfg, pool, recAttr.id, { mode: "inspect", author: "agaaz", now: T(120), viewer: "agaaz", sessionId: sidA });
+  assert.equal(self.changed_since?.first_visit, true, "with only its own session on the record, the viewer is on a first visit");
+  ok("changed since your last visit: first visit reports totals; agaaz sees rachit's 6 content events (one exact ledger_events call), the 5 updates by id, the new pending op and the file; rachit sees only the updates; the reading session is excluded");
+}
+
+// ---------- 1d. as_of: state updates and events after the instant are hidden ----------
+{
+  // at T(20) only agaaz's events exist; every state update was created later (real clock), and rachit's pending call is in the future
+  const early = await buildRecordPack(cfg, pool, recAttr.id, { mode: "inspect", author: "agaaz", now: T(120), asOf: T(20).toISOString(), detail: "evidence" });
+  assert.equal(early.as_of, T(20).toISOString());
+  assert.ok(early.text.includes(`as of ${fmt(T(20))}: state updates and events after this instant are hidden (links and contributing sessions are not filtered).`), early.text.split("\n").slice(0, 5).join("\n"));
+  assert.deepEqual({ total: early.evidence_summary.total, sessions: [...new Set(early.evidence_summary.shown.map((e) => e.session_id))], proposed: early.state.proposed_count, confirmed: early.state.confirmed_count, pending: early.pending_operations, files: early.files.map((f) => f.path), err: early.last_error?.seq, summary: early.session_summary },
+    { total: 7, sessions: [sidA], proposed: 0, confirmed: 0, pending: [], files: ["queries/attribution.sql"], err: 7, summary: null }, "as of T(20): agaaz's 7 content events, no updates, no pending call, one file, agaaz's error, no compaction yet");
+  assert.ok(early.text.includes("## State (v1 · 0 proposed · 0 confirmed)\n(no state updates yet") && !early.text.includes("[PROPOSED]"), "no update existed yet");
+  assert.deepEqual(early.contributing_sessions.map((s) => s.session_id), [sidR, sidA], "links are organisation, not evidence: both sessions stay listed");
+  const earlyLean = await buildRecordPack(cfg, pool, recAttr.id, { mode: "inspect", author: "agaaz", now: T(120), asOf: T(20).toISOString(), viewer: "agaaz" });
+  assert.ok(earlyLean.text.includes("## Drill down (7 content events in 2 spans; references only)") && !earlyLean.text.includes("compaction summary"), "lean counts and pointers are as-of too");
+  assert.ok(earlyLean.changed_since?.first_visit === false && earlyLean.changed_since?.events.length === 0, "the delta is bounded by as_of as well");
+  // a later update is hidden by an as_of before it, and a confirmation after as_of shows the update as it was then: proposed
+  const late = await R.addStateUpdate(pool, { record_id: recAttr.id, kind: "note", text: "LATER NOTE that as_of must hide", evidence: [{ session_id: sidR, seq: 4 }], created_by: "rachit" });
+  await pool.query(`update cont_state_updates set created_at = now() + interval '1 hour' where id = $1`, [late.id]);
+  await pool.query(`update cont_state_updates set confirmed_at = now() + interval '1 hour' where id = $1`, [d1.id]);
+  const cut = new Date(Date.now() + 30 * 60_000).toISOString();
+  const now2 = await buildRecordPack(cfg, pool, recAttr.id, { mode: "inspect", author: "agaaz", now: T(120) });
+  const asOf = await buildRecordPack(cfg, pool, recAttr.id, { mode: "inspect", author: "agaaz", now: T(120), asOf: cut });
+  assert.ok(now2.text.includes("LATER NOTE that as_of must hide") && now2.state.notes.length === 1, "without as_of the future-dated note is live");
+  assert.ok(!asOf.text.includes("LATER NOTE") && asOf.state.notes.length === 0, "as_of hides the update created after it");
+  assert.ok(now2.text.includes("- [confirmed by agaaz; how it was accepted was not recorded] Use ClickHouse") && asOf.text.includes("- [PROPOSED] Use ClickHouse paywall_resolved as the source of truth"), "a confirmation after as_of is undone: the decision shows as proposed");
+  assert.deepEqual({ p: asOf.state.proposed_count, c: asOf.state.confirmed_count }, { p: 5, c: 0 });
+  await assert.rejects(buildRecordPack(cfg, pool, recAttr.id, { mode: "inspect", author: "agaaz", asOf: "not-a-time" }), /as_of is not a time/);
+  await pool.query(`update cont_state_updates set confirmed_at = created_at where id = $1`, [d1.id]);
+  await pool.query(`delete from cont_state_updates where id = $1`, [late.id]);
+  ok("as_of: at T(20) the pack has agaaz's 7 events, no state, no pending call, one file; a future-dated update is hidden and a later confirmation is undone; an invalid time is an error");
 }
 
 // ---------- 2. evidence from both sessions, attributed, ordered ----------
