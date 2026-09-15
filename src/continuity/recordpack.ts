@@ -91,6 +91,8 @@ export type RecordPackDetail = PackDetail;
 export const LEAN_PROPOSED_FULL = 3;
 /** A lean pack above min(budget, this) shrinks level by level (boilerplate, then proposed ids, then caps); each drop is named. */
 export const LEAN_TARGET_TOKENS = 1200;
+/** The decision rule as the lean pack states it (one sentence in the honesty block; the full DECISION_RULE is in the evidence pack's contract). */
+export const LEAN_DECISION_RULE = "Act only on [in force] Ledger objects and record decisions marked [accepted by <person>]; superseded, draft, conflicting, [PROPOSED] and agent-confirmed items were not decided by a person, and contradictions stay open until a person resolves them (`ledger record confirm <update_id>`).";
 
 export interface RecordPackOpts {
   author: string;
@@ -618,9 +620,10 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
     const sesShown = sessions.slice(0, sesMax);
     L.push(`Honesty: ${sessions.length ? `${sessions.length} contributing session${sessions.length === 1 ? "" : "s"}: ${sesShown.map((s) => `${short(s.session_id)} (${s.author}, ${harnessName(s.harness)}, last seen ${ago(s.last_seen_at, now)}${s.ended ? ", ended" : ""})`).join("; ")}${sessions.length > sesShown.length ? `; … ${sessions.length - sesShown.length} more` : ""}.` : "no span is linked to this record yet; link one with ledger_record_link."}`);
     if (sessions.length > sesMax) om.push(`${sessions.length - sesMax} contributing sessions not listed (for budget); ${evidenceFetch}`);
-    L.push(`${!rec.repo ? "Non-code record: no code snapshot applies." : vSnap ? `Code saved through ${fmt(vSnap.at)} (remote-verified; ${vSnap.from}).` : "No verified code snapshot among contributing sessions: treat the code state as unverified."} The claim is advisory. Proposed items are unaccepted. No event text is inlined; every reference below is an exact fetch.`);
+    L.push(`${!rec.repo ? "Non-code record: no code snapshot applies." : vSnap ? `Code saved through ${fmt(vSnap.at)} (remote-verified; ${vSnap.from}).` : "No verified code snapshot among contributing sessions: treat the code state as unverified."} The claim is advisory. No event text is inlined; every reference below is an exact fetch.`);
+    L.push(LEAN_DECISION_RULE);
     const lag = lagStats.filter((s) => s.cap > s.cls);
-    if (lag.length) L.push(`Classifier lag: ${lag.map((s) => `${short(s.session_id)} ${s.cap - s.cls}/${s.cap}`).join(", ")} events unclassified; later work may be unassigned to any record yet (ledger_unassigned).`);
+    if (lag.length) L.push(`Classifier lag: ${lag.map((s) => `${short(s.session_id)} ${s.cap - s.cls}/${s.cap}`).join(", ")} events unclassified, so later work may be unassigned to any record yet (ledger_unassigned).`);
     L.push(``);
 
     // state: confirmed first within each kind; proposed in full up to LEAN_PROPOSED_FULL, else count + ids
@@ -661,10 +664,13 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
     for (const line of renderDecisionsInForce(ledgerRefs, saved, { compact: true, lean: true })) L.push(line);
     for (const o of acceptedRefs) {
       const resolution = resolveAccepted(all, o.id);
-      L.push(`${resolution.status === 'conflict' ? 'CONFLICTING ACCEPTED SOURCE — resolve before reuse' : 'Accepted source'}: ${o.type} ${o.id} @${objectVersion(o).slice(0, 8)}${o.fields.analysis_scope ? "" : " · SCOPE UNKNOWN (ledger_investigation before applying it)"}`);
+      const impact = reviewImpacts.find((i) => i.affected.some((a) => a.id === o.id) || i.incomplete.some((a) => a.id === o.id));
+      if (level >= 1) L.push(`${resolution.status === 'conflict' ? 'CONFLICTING ACCEPTED SOURCE' : 'Accepted source'} ${o.type} ${o.id} @${objectVersion(o).slice(0, 8)}${o.fields.analysis_scope ? "" : "; SCOPE UNKNOWN"}${impact ? "; review impact flagged" : ""} (ledger_get, ledger_investigation before applying it)`);
+      else L.push(`${resolution.status === 'conflict' ? 'CONFLICTING ACCEPTED SOURCE — resolve before reuse' : 'Accepted source'}: ${o.type} ${o.id} @${objectVersion(o).slice(0, 8)}${o.fields.analysis_scope ? "" : " · SCOPE UNKNOWN (ledger_investigation before applying it)"}`);
     }
     if (ledgerRefs.length || acceptedRefs.length) om.push(`Ledger object titles${acceptedRefs.length ? " and accepted source formula/query text" : ""}; ledger_get per id`);
-    for (const impact of reviewImpacts) {
+    if (level >= 1 && reviewImpacts.some((i) => i.affected.length || i.incomplete.length)) om.push(`review-impact detail for accepted sources (for budget); ledger_impact per id`);
+    else for (const impact of reviewImpacts) {
       for (const item of impact.affected) L.push(`NEEDS REVIEW: ${item.id}; ${item.reason}; ${item.path.join(' -> ')}`);
       for (const item of impact.incomplete) L.push(`INCOMPLETE IMPACT: ${item.id}; ${item.reason}`);
     }
@@ -690,8 +696,7 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
     L.push(``);
 
     // drill down: references only
-    L.push(`## Drill down (references only)`);
-    L.push(`Evidence: ${evidenceTotal} content events in ${sources.spans} span${sources.spans === 1 ? "" : "s"}; one call per linked span, in time order:`);
+    L.push(`## Drill down (references only; ${evidenceTotal} content events in ${sources.spans} span${sources.spans === 1 ? "" : "s"}, one call per linked span, time order)`);
     const spanMax = level >= 3 ? 3 : 8;
     spanRefs.slice(0, spanMax).forEach((l) => { const s = sessions.find((x) => x.session_id === l.session_id); L.push(`- ${spanFetch(l)}  · ${s ? `${s.author}/${harnessName(s.harness)}` : short(l.session_id)}`); });
     if (spanRefs.length > spanMax) { L.push(`- … ${spanRefs.length - spanMax} more spans; ${evidenceFetch}`); om.push(`${spanRefs.length - spanMax} span fetches (list shortened for budget); ${evidenceFetch}`); }
@@ -702,13 +707,8 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
       else L.push(`- ${unassignedTotal} unassigned span${unassignedTotal === 1 ? "" : "s"} in contributing sessions may belong here → ledger_unassigned(session_id: ${q(unassigned[0]?.session_id ?? sessions[0]?.session_id ?? "")})`);
     }
     L.push(`- search: ledger_evidence_search(q: "…", record_id: ${q(rec.id)})`);
-    om.push(`lean detail: evidence lines, summary text, files touched (${files.length}), unassigned spans and source counts are references only; ${evidenceFetch}`);
-    L.push(``);
-
-    // contract, compact
-    L.push(`## First turn contract`);
-    L.push(`1. ${DECISION_RULE} Contradictions stay open until a person resolves them.`);
-    L.push(`2. ${rec.repo ? "Check out the Bootstrap snapshot into a fresh worktree before trusting the branch tip; " : "Non-code work, no worktree; "}state confirmed vs uncertain. Drill down only where the state leaves a question. Propose updates with ledger_record_update citing exact evidence (session_id, seq); link your spans with ledger_record_link.`);
+    L.push(`- write back: ledger_record_update(record_id, action: "propose", …) citing exact evidence (session_id, seq); ledger_record_link for your spans. Drill down only where the state leaves a question.`);
+    om.push(`lean detail: evidence lines, summary text, files touched (${files.length}), unassigned spans, source counts and the full first-turn contract are references only; ${evidenceFetch}`);
     L.push(``); L.push(`## Omitted for budget or unavailable`); for (const o of om) L.push(`- ${o}`);
     return { text: L.join("\n"), omitted: om, evidence: { total: evidenceTotal, shown: [], omitted: evidenceTotal ? { count: evidenceTotal, fetch: spanFetches } : null } };
   };
