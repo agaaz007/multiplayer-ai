@@ -502,7 +502,7 @@ const byT = (hits: Awaited<ReturnType<typeof R.searchEvents>>) => Object.fromEnt
   assert.deepEqual(seqOf(recent.hits), [8, 4, 1, 6, 9, 2, 5, 3], "half an hour ago every confirmation had happened");
   const early = await R.searchEvidence(pool, "token bucket", { session_id: sidT, candidates: null, asOf: iso(201) });
   assert.deepEqual(seqOf(early.hits).sort(), [1, 3], "as_of also bounds the events themselves");
-  assert.equal(early.hits.find((e) => e.seq === 1)?.label, "PROPOSED", "no update existed at that instant, but the citing update's creation is what as_of hides; created 3h ago > 2026-09-08, so none apply");
+  assert.deepEqual(early.hits.map((e) => [e.seq, e.tier, e.label]).sort(), [[1, 1, "uncited"], [3, 1, "uncited"]], "no update existed at that instant (all were created today), so nothing is cited");
   await assert.rejects(R.searchEvidence(pool, "token bucket", { asOf: "not-a-date" }), /invalid asOf/);
   ok("as_of: a confirmation, rejection or supersession after the instant is evaluated as proposed / not yet happened; events after the instant are excluded");
 }
@@ -541,7 +541,7 @@ const byT = (hits: Awaited<ReturnType<typeof R.searchEvents>>) => Object.fromEnt
   assert.ok(Math.abs(h[10].similarity - 1 / 61) < 1e-9, `RRF for vector rank 1 only: ${h[10].similarity}`);
   assert.deepEqual(h[2].sources, ["lexical", "vector"]);
   assert.ok(h[2].similarity > h[10].similarity && h[2].similarity > h[9].similarity, "an event on both lists fuses higher than one on a single list");
-  assert.ok(Math.abs(h[9].similarity - (1 / (60 + 3) + 1 / (60 + res.hits.filter((e) => e.sources.includes("lexical")).length + 0))) > -1, "sanity");
+  assert.deepEqual(h[9].sources, ["lexical", "vector"]);
   assert.deepEqual(seqOf(res.hits), [8, 4, 1, 6, 9, 2, 10, 5, 3], `fusion changes similarity, not tier or recency: the vector top-1 (t10, oldest, uncited) lands at the end of tier 1: ${seqOf(res.hits).join(",")}`);
   // a candidate outside the scope is dropped, never shown
   const other = await R.searchEvidence(pool, "token bucket", { repo: SITE, candidates: fake });

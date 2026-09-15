@@ -152,7 +152,11 @@ interface DeltaOpts {
   /** the session reading the pack: never its own "last visit" */
   excludeSessionId?: string | null;
   asOf?: Date | null;
+  /** count only these event kinds (the packs pass their content kinds so the numbers match "Sources") */
+  kinds?: string[];
 }
+
+const kindFilter = (kinds: string[] | undefined, params: unknown[]) => { if (!kinds?.length) return ""; params.push(kinds); return ` and e.kind = any($${params.length})`; };
 
 const upper = (asOf: Date | null | undefined, col: string, params: unknown[]) => { if (!asOf) return ""; params.push(asOf); return ` and ${col} <= $${params.length}`; };
 
@@ -180,12 +184,13 @@ export async function recordVisitDelta(qq: Q, recordId: string, state: RecordSta
   if (since) { p.push(since); win += ` and coalesce(e.occurred_at, e.received_at) > $${p.length}`; }
   win += upper(o.asOf, "coalesce(e.occurred_at, e.received_at)", p);
   const inSpans = `exists (select 1 from cont_record_links l where l.record_id = $1 and l.session_id = e.session_id and e.seq between l.from_seq and l.to_seq and l.source <> 'unassigned')`;
+  const evParams = [...p];
   const ev = await qq.query<DeltaEvents>(
     `select e.session_id, s.author, s.harness, count(*)::int as count, min(e.seq)::int as from_seq, max(e.seq)::int as to_seq, max(coalesce(e.occurred_at, e.received_at)) as last_at
        from cont_events e join cont_sessions s on s.id = e.session_id
-      where ${inSpans}${win}
+      where ${inSpans}${win}${kindFilter(o.kinds, evParams)}
       group by e.session_id, s.author, s.harness order by last_at desc nulls last, e.session_id`,
-    p
+    evParams
   );
   const files = await qq.query<{ path: string; count: number }>(
     `select e.payload->>'path' as path, count(*)::int as count from cont_events e
@@ -228,12 +233,13 @@ export async function threadVisitDelta(qq: Q, threadId: string, pend: { seq: num
   let win = "";
   if (since) { p.push(since); win += ` and coalesce(e.occurred_at, e.received_at) > $${p.length}`; }
   win += upper(o.asOf, "coalesce(e.occurred_at, e.received_at)", p);
+  const evParams = [...p];
   const ev = await qq.query<DeltaEvents>(
     `select e.session_id, s.author, s.harness, count(*)::int as count, min(e.seq)::int as from_seq, max(e.seq)::int as to_seq, max(coalesce(e.occurred_at, e.received_at)) as last_at
        from cont_events e join cont_sessions s on s.id = e.session_id
-      where e.thread_id = $1${win}
+      where e.thread_id = $1${win}${kindFilter(o.kinds, evParams)}
       group by e.session_id, s.author, s.harness order by last_at desc nulls last, e.session_id`,
-    p
+    evParams
   );
   const files = await qq.query<{ path: string; count: number }>(
     `select e.payload->>'path' as path, count(*)::int as count from cont_events e
@@ -271,7 +277,7 @@ export function renderVisitDelta(d: VisitDelta, o: { unit: "record" | "thread"; 
   const events = d.events.reduce((n, e) => n + e.count, 0);
   L.push(`## Changed since your last visit`);
   const totals = () => {
-    const parts = [`${plural(events, "event")} in ${plural(d.events.length, "session")}`];
+    const parts = [`${plural(events, "content event")} in ${plural(d.events.length, "session")}`];
     if (o.unit === "record") parts.push(`${plural(d.state_updates.added.length, "state update")} (${d.state_updates.added.filter((u) => u.status === "proposed").length} proposed, ${d.state_updates.added.filter((u) => u.status === "confirmed").length} confirmed)`);
     else parts.push(plural(d.checkpoints, "checkpoint"));
     parts.push(plural(d.pending.length, "pending operation"), `${plural(d.files.length, "file")} touched`);
@@ -290,7 +296,7 @@ export function renderVisitDelta(d: VisitDelta, o: { unit: "record" | "thread"; 
   L.push(`Your last contributing session ${short(d.last_session!.session_id)} was last seen ${fmt(d.since)}. Since then:`);
   const nothing = !d.events.length && !d.state_updates.added.length && !d.state_updates.confirmed.length && !d.pending.length && !d.files.length && !d.checkpoints;
   if (nothing) { L.push(`- nothing new: no events, ${o.unit === "record" ? "state updates" : "checkpoints"}, pending operations or file changes after that instant`); return L; }
-  for (const e of d.events.slice(0, DELTA_SESSIONS_MAX)) L.push(`- ${plural(e.count, "new event")} in session ${short(e.session_id)} (${e.author}, ${harnessName(e.harness)}) seq ${e.from_seq}..${e.to_seq}${e.last_at ? `, last ${fmt(e.last_at)}` : ""}: ${spanFetch({ session_id: e.session_id, from_seq: e.from_seq, to_seq: e.to_seq })}`);
+  for (const e of d.events.slice(0, DELTA_SESSIONS_MAX)) L.push(`- ${plural(e.count, "new content event")} in session ${short(e.session_id)} (${e.author}, ${harnessName(e.harness)}) seq ${e.from_seq}..${e.to_seq}${e.last_at ? `, last ${fmt(e.last_at)}` : ""}: ${spanFetch({ session_id: e.session_id, from_seq: e.from_seq, to_seq: e.to_seq })}`);
   if (d.events.length > DELTA_SESSIONS_MAX) L.push(`- … ${d.events.length - DELTA_SESSIONS_MAX} more sessions with new events`);
   if (o.unit === "record") {
     const ups = (label: string, list: StateUpdate[]) => {

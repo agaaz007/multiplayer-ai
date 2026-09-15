@@ -49,6 +49,7 @@ const SYN: Record<string, string> = {
   slow: "latency", slowness: "latency", sluggish: "latency", delay: "latency", delays: "latency", lag: "latency",
   spiked: "spike", spikes: "spike", jump: "spike", jumped: "spike", increase: "spike",
   greeting: "banner", header: "banner", welcome: "banner",
+  grow: "grew", growth: "grew", growing: "grew",
 };
 const STOP = new Set(["the", "and", "why", "did", "get", "got", "for", "with", "that", "this", "was", "were", "have", "has", "not", "now", "yesterday", "please", "message", "assistant", "instruction", "added", "tool", "finished", "compaction"]);
 const tokVec = new Map<string, number[]>();
@@ -341,13 +342,14 @@ ok("fixtures: 16 events in 3 sessions across 2 repos, including a whitespace-onl
   providerCalls.length = 0;
   const sum = await helperOnce(cfgE, { roots, now: T(123), push: false, log: (l) => lines.push(l) });
   assert.equal(sum.errors.length, 0, sum.errors.join(" | "));
-  assert.equal(sum.events_uploaded, 2);
+  assert.equal(sum.events_uploaded, 3, "session.started + instruction + assistant message");
   assert.ok(lines.some((l) => /^embedded 2 events/.test(l)), `helper logs the embed step: ${lines.join(" | ")}`);
   assert.equal(providerCalls.length, 1, "one batched provider call per pass");
   const n = (await pool.query<{ n: number }>(`select count(*)::int as n from cont_event_embeddings e join cont_events ev on ev.id = e.event_id where ev.session_id = $1`, [sidH])).rows[0].n;
   assert.equal(n, 2, "both uploaded events of the configured kinds have vectors");
-  const found = await E.vectorCandidates(pool, cfgE, "how much did revenue grow", { session_id: sidH }, 1);
-  assert.equal(found[0]?.event_id, await idOf(sidH, `L${at(122)}`));
+  const found = await E.vectorCandidates(pool, cfgE, "revenue growth quarter over quarter", { session_id: sidH }, 1);
+  const idRevenue = Number((await pool.query<{ id: string }>(`select id::text as id from cont_events where session_id = $1 and kind = 'assistant.message'`, [sidH])).rows[0].id);
+  assert.equal(found[0]?.event_id, idRevenue, "the helper-embedded assistant message is found by a paraphrase");
   // a pass with nothing new does not call the provider; a helper without embeddings config never does
   providerCalls.length = 0; lines.length = 0;
   await helperOnce(cfgE, { roots, now: T(124), push: false, log: (l) => lines.push(l) });
