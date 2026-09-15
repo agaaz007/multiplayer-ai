@@ -284,12 +284,12 @@ export function renderVisitDelta(d: VisitDelta, o: { unit: "record" | "thread"; 
     return parts.join(", ");
   };
   if (!d.viewer) {
-    L.push(`No viewer given (pass viewer for your delta). Totals since creation (${fmt(o.created)}): ${totals()}.`);
+    L.push(`No viewer given, so no delta. Totals since creation: ${totals()}.`);
     if (d.files.length && level < 1) L.push(`- files: ${d.files.slice(0, DELTA_FILES_MAX).map((f) => f.path).join(", ")}${d.files.length > DELTA_FILES_MAX ? ` … ${d.files.length - DELTA_FILES_MAX} more` : ""}`);
     return L;
   }
   if (d.first_visit) {
-    L.push(`First visit for ${d.viewer}: no earlier session of yours contributes to this ${o.unit}. Totals since creation (${fmt(o.created)}): ${totals()}.`);
+    L.push(`First visit for ${d.viewer}: no earlier session of yours contributes to this ${o.unit}. Totals since creation (${fmt(o.created).slice(0, 10)}): ${totals()}.`);
     if (d.files.length && level < 1) L.push(`- files: ${d.files.slice(0, DELTA_FILES_MAX).map((f) => f.path).join(", ")}${d.files.length > DELTA_FILES_MAX ? ` … ${d.files.length - DELTA_FILES_MAX} more` : ""}`);
     return L;
   }
