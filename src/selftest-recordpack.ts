@@ -271,7 +271,7 @@ for (const t of [lean.text, pack.text]) {
   assert.ok(early.text.includes(`as of ${fmt(T(20))}: state updates and events after this instant are hidden (links and contributing sessions are not filtered).`), early.text.split("\n").slice(0, 5).join("\n"));
   assert.deepEqual({ total: early.evidence_summary.total, sessions: [...new Set(early.evidence_summary.shown.map((e) => e.session_id))], proposed: early.state.proposed_count, confirmed: early.state.confirmed_count, pending: early.pending_operations, files: early.files.map((f) => f.path), err: early.last_error?.seq, summary: early.session_summary },
     { total: 7, sessions: [sidA], proposed: 0, confirmed: 0, pending: [], files: ["queries/attribution.sql"], err: 7, summary: null }, "as of T(20): agaaz's 7 content events, no updates, no pending call, one file, agaaz's error, no compaction yet");
-  assert.ok(early.text.includes("## State (v1 · 0 proposed · 0 confirmed)\n(no state updates yet") && !early.text.includes("[PROPOSED]"), "no update existed yet");
+  assert.ok(early.text.includes("## State (v1 · 0 proposed · 0 confirmed)\n(no state updates yet") && !early.text.includes("- [PROPOSED]"), "no update existed yet");
   assert.deepEqual(early.contributing_sessions.map((s) => s.session_id), [sidR, sidA], "links are organisation, not evidence: both sessions stay listed");
   const earlyLean = await buildRecordPack(cfg, pool, recAttr.id, { mode: "inspect", author: "agaaz", now: T(120), asOf: T(20).toISOString(), viewer: "agaaz" });
   assert.ok(earlyLean.text.includes("## Drill down (7 content events in 2 spans; references only)") && !earlyLean.text.includes("compaction summary"), "lean counts and pointers are as-of too");
