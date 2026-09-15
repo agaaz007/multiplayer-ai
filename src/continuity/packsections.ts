@@ -121,20 +121,23 @@ export function savedLedgerIds(output: string): string[] {
 
 export interface SavedLedgerIds { refs: LedgerRefInput[]; results: number; sessions: number }
 
-/** Ledger objects saved by tool calls inside a thread's events, or inside a work record's linked spans. */
-export async function writtenLedgerIds(q: Q, scope: { threadId: string } | { recordId: string }): Promise<SavedLedgerIds> {
+/** Ledger objects saved by tool calls inside a thread's events, or inside a work record's linked spans. `asOf` ignores save results after that instant. */
+export async function writtenLedgerIds(q: Q, scope: { threadId: string } | { recordId: string }, opts: { asOf?: Date | null } = {}): Promise<SavedLedgerIds> {
   const mentionsSave = `(e.payload->>'output_preview' like '%record_id%' or e.payload->>'output_preview' like '%Recorded %')`;
+  const upTo = opts.asOf ? ` and coalesce(e.occurred_at, e.received_at) <= $2` : "";
+  const params: unknown[] = ["threadId" in scope ? scope.threadId : scope.recordId];
+  if (opts.asOf) params.push(opts.asOf);
   const r = "threadId" in scope
     ? await q.query<{ session_id: string; seq: number; out: string | null }>(
         `select e.session_id, e.seq, e.payload->>'output_preview' as out from cont_events e
-          where e.thread_id = $1 and e.kind = 'tool.finished' and ${mentionsSave}
-          order by coalesce(e.occurred_at, e.received_at), e.id`, [scope.threadId])
+          where e.thread_id = $1 and e.kind = 'tool.finished' and ${mentionsSave}${upTo}
+          order by coalesce(e.occurred_at, e.received_at), e.id`, params)
     : await q.query<{ session_id: string; seq: number; out: string | null }>(
         `select distinct on (e.id) e.session_id, e.seq, e.payload->>'output_preview' as out, e.id, coalesce(e.occurred_at, e.received_at) as at
            from cont_record_links l
            join cont_events e on e.session_id = l.session_id and e.seq between l.from_seq and l.to_seq
-          where l.record_id = $1 and l.source <> 'unassigned' and e.kind = 'tool.finished' and ${mentionsSave}
-          order by e.id`, [scope.recordId]);
+          where l.record_id = $1 and l.source <> 'unassigned' and e.kind = 'tool.finished' and ${mentionsSave}${upTo}
+          order by e.id`, params);
   const refs: LedgerRefInput[] = [];
   const seen = new Set<string>();
   const sessions = new Set<string>();

@@ -582,35 +582,277 @@ export async function recordEvidenceCount(q: Q, record_id: string, kinds: string
   return r.rows[0]?.n ?? 0;
 }
 
-/** Full-text search over event text (instructions, assistant messages, tool inputs, output previews, compaction summaries). */
-export async function searchEvents(q: Q, query: string, f: { repo?: string | null; session_id?: string; record_id?: string; kinds?: string[]; sinceHours?: number; limit?: number } = {}): Promise<(EventRow & { author: string; harness: string; rank: number })[]> {
+// ---------- evidence search: lexical (+ optional vector) candidates, ranked by authority → recency → similarity ----------
+
+/**
+ * Authority tier of an evidence hit, the first sort key of `searchEvidence`.
+ *   3 = cited as evidence by a CONFIRMED state update, or the tool.finished of a successful ledger_record_* call
+ *   2 = cited by a PROPOSED update (and by no confirmed one)
+ *   1 = plain event: nobody cites it
+ *   0 = cited only by superseded or rejected updates
+ */
+export type EvidenceTier = 3 | 2 | 1 | 0;
+
+/** `current` (tier 3) · `PROPOSED` (tier 2) · `uncited` (tier 1) · `superseded by <update id>` · `rejected` (tier 0). */
+export type EvidenceLabel = "current" | "PROPOSED" | "uncited" | `superseded by ${string}` | "rejected";
+
+export interface EvidenceCitation {
+  update_id: string;
+  record_id: string;
+  /** status as of the search instant: an update confirmed after asOf counts as proposed */
+  status: UpdateStatus;
+  /** the confirmed update that replaced this one as of the search instant, if any */
+  superseded_by: string | null;
+}
+
+export type EvidenceHit = EventRow & {
+  author: string;
+  harness: string;
+  /** Postgres ts_rank of the lexical match; 0 when the event came from the vector list only */
+  rank: number;
+  /** reciprocal-rank-fusion score over the lexical and vector candidate lists; the third sort key */
+  similarity: number;
+  sources: ("lexical" | "vector")[];
+  tier: EvidenceTier;
+  label: EvidenceLabel;
+  citations: EvidenceCitation[];
+  /** the tool.finished of a successful ledger_record_finding/decision/definition/change call */
+  ledger_write: boolean;
+};
+
+export type CandidateFn = (query: string, filters: { repo?: string | null; record_id?: string; session_id?: string; kinds?: string[]; sinceHours?: number; asOf?: string }, k: number) => Promise<{ event_id: number | string; score: number }[]>;
+
+export interface EvidenceSearchFilters {
+  repo?: string | null;
+  session_id?: string;
+  record_id?: string;
+  kinds?: string[];
+  sinceHours?: number;
+  limit?: number;
+  /** only events at or before this instant; update statuses are evaluated as of it too */
+  asOf?: string | Date | null;
+  /** session author */
+  author?: string;
+  /** vector candidate generator; default imports ./embeddings.js; null disables the vector list */
+  candidates?: CandidateFn | null;
+  /** passed through to the default candidate generator */
+  cfg?: unknown;
+}
+
+export interface EvidenceSearchResult {
+  hits: EvidenceHit[];
+  /** what produced the candidates; the scope line prints it verbatim */
+  retrieval: "lexical + vector" | "lexical only";
+  /** why the vector list was not used, when it was not */
+  retrieval_note: string | null;
+  as_of: string | null;
+}
+
+/** RRF constant; the usual 60 keeps a rank-1 lexical hit and a rank-1 vector hit interchangeable. */
+const RRF_K = 60;
+/** Each candidate list is this many times the requested limit deep before fusion. */
+const CANDIDATE_FACTOR = 3;
+const LEDGER_WRITE_TOOL = /ledger_record_(finding|decision|definition|change)$/;
+
+function asOfDate(v: string | Date | null | undefined): Date | null {
+  if (v == null || v === "") return null;
+  const d = v instanceof Date ? v : new Date(v);
+  if (Number.isNaN(d.getTime())) throw new Error(`invalid asOf: ${String(v)} (expected an ISO instant)`);
+  return d;
+}
+
+/**
+ * Default vector candidates: `vectorCandidates` from ./embeddings.js, imported lazily so a missing or
+ * misconfigured module degrades to lexical retrieval instead of failing the search.
+ */
+async function defaultCandidates(q: Q, cfg: unknown): Promise<{ fn: CandidateFn | null; note: string | null }> {
+  const spec = "./embeddings.js";
+  try {
+    const mod = (await import(spec)) as { vectorCandidates?: (pool: Q, cfg: unknown, query: string, filters: unknown, k: number) => Promise<{ event_id: number | string; score: number }[]> };
+    if (typeof mod.vectorCandidates !== "function") return { fn: null, note: "embeddings module exports no vectorCandidates" };
+    const vc = mod.vectorCandidates;
+    return { fn: (query, filters, k) => vc(q, cfg, query, filters, k), note: null };
+  } catch (e: any) {
+    return { fn: null, note: `embeddings module unavailable (${clip(String(e?.message ?? e), 80)})` };
+  }
+}
+
+/**
+ * Search captured events. Candidates: the lexical top-K (Postgres FTS over the GIN index) and, when
+ * available, the vector top-K, fused by reciprocal rank fusion into `similarity`. Ranking: authority
+ * tier desc, then recency desc, then similarity desc; similarity never overrides tier or recency.
+ * Tiers come from one join of the candidate set against cont_state_updates.evidence (jsonb containment).
+ *
+ * As-of: events at or before `asOf` only; an update created after `asOf` does not exist, one confirmed
+ * or rejected after it counts as proposed, and a superseder confirmed after it has not yet superseded.
+ * This mirrors investigation.ts's as-of over the git ledger, which resolves object supersession at a
+ * date; here the instant also bounds the events themselves, and there is no analytical scope filter.
+ */
+export async function searchEvidence(q: Q, query: string, f: EvidenceSearchFilters = {}): Promise<EvidenceSearchResult> {
   const text = String(query ?? "").trim();
-  if (!text) return [];
+  const asOf = asOfDate(f.asOf);
+  const empty = (retrieval: EvidenceSearchResult["retrieval"], note: string | null): EvidenceSearchResult => ({ hits: [], retrieval, retrieval_note: note, as_of: asOf ? asOf.toISOString() : null });
+  if (!text) return empty("lexical only", null);
+  const limit = lim(f.limit, 20, 200);
+  const k = limit * CANDIDATE_FACTOR;
+
+  // ----- filters shared by the lexical query and the vector-row fetch: scope is never widened by either list -----
   const params: unknown[] = [text];
-  const tsq = `plainto_tsquery('english', $1)`;
-  const where: string[] = [`${fts("e")} @@ ${tsq}`];
+  const where: string[] = [];
   if (f.repo === null) where.push(`s.repo is null`);
   else if (f.repo) { params.push(f.repo); where.push(`s.repo = $${params.length}`); }
+  if (f.author) { params.push(f.author); where.push(`s.author = $${params.length}`); }
   // a rendered session id is always an 8-char prefix; resolve it, and let an unknown id be an error rather than an empty search
   if (f.session_id) { params.push((await resolveSessionId(q, f.session_id)).id); where.push(`e.session_id = $${params.length}`); }
   if (f.record_id) {
-    if (!isUuid(f.record_id)) return [];
+    if (!isUuid(f.record_id)) return empty("lexical only", null);
     params.push(f.record_id);
     where.push(`exists (select 1 from cont_record_links l where l.record_id = $${params.length} and l.session_id = e.session_id and e.seq between l.from_seq and l.to_seq)`);
   }
   if (f.kinds?.length) { params.push(f.kinds); where.push(`e.kind = any($${params.length})`); }
   if (f.sinceHours != null) { params.push(hours(f.sinceHours)); where.push(`coalesce(e.occurred_at, e.received_at) > now() - ($${params.length}::float8 * interval '1 hour')`); }
-  const limit = lim(f.limit, 20, 200);
-  const r = await q.query<EventRow & { author: string; harness: string; rank: number }>(
-    `select e.*, s.author, s.harness, ts_rank(${fts("e")}, ${tsq})::float8 as rank
+  if (asOf) { params.push(asOf); where.push(`coalesce(e.occurred_at, e.received_at) <= $${params.length}`); }
+  const tsq = `plainto_tsquery('english', $1)`;
+  type Row = EventRow & { author: string; harness: string; rank: number; tool_name: string | null };
+  // a Codex tool.finished carries only call_id: borrow the tool name from its request so ledger writes are recognised
+  const select = `select e.*, s.author, s.harness, ts_rank(${fts("e")}, ${tsq})::float8 as rank,
+            case when e.kind = 'tool.finished' and e.payload->>'tool' is null and e.call_id is not null
+                 then (select r.payload->>'tool' from cont_events r where r.session_id = e.session_id and r.call_id = e.call_id and r.kind = 'tool.requested' order by r.seq desc limit 1) end as tool_name
        from cont_events e
-       join cont_sessions s on s.id = e.session_id
-      where ${where.join(" and ")}
-      order by rank desc, e.id desc
-      limit ${limit}`,
-    params
+       join cont_sessions s on s.id = e.session_id`;
+
+  // ----- lexical candidates -----
+  const lex = await q.query<Row>(`${select} where ${[`${fts("e")} @@ ${tsq}`, ...where].join(" and ")} order by rank desc, e.id desc limit ${k}`, params);
+  const rows = new Map<string, Row>();
+  const lexRank = new Map<string, number>();
+  lex.rows.forEach((r, i) => { rows.set(String(r.id), r); lexRank.set(String(r.id), i + 1); });
+
+  // ----- vector candidates (optional) -----
+  let retrieval: EvidenceSearchResult["retrieval"] = "lexical only";
+  let note: string | null = null;
+  const vecRank = new Map<string, number>();
+  let candidates: CandidateFn | null | undefined = f.candidates;
+  if (candidates === undefined) { const d = await defaultCandidates(q, f.cfg); candidates = d.fn; note = d.note; }
+  else if (candidates === null) note = "vector list disabled";
+  if (candidates) {
+    try {
+      const vc = await candidates(text, { repo: f.repo, record_id: f.record_id, session_id: f.session_id, kinds: f.kinds, sinceHours: f.sinceHours, asOf: asOf ? asOf.toISOString() : undefined }, k);
+      const ids = [...new Set(vc.filter((c) => c && c.event_id != null).map((c) => String(c.event_id)))];
+      if (!ids.length) note = "embeddings returned no candidates (not configured, or nothing near the query)";
+      else {
+        // the same filters apply to vector rows; a candidate outside the scope is dropped, never shown
+        const vparams = [...params, ids];
+        const vr = await q.query<Row>(`${select} where ${[`e.id = any($${vparams.length}::bigint[])`, ...where].join(" and ")}`, vparams);
+        const present = new Set(vr.rows.map((r) => String(r.id)));
+        for (const r of vr.rows) if (!rows.has(String(r.id))) rows.set(String(r.id), { ...r, rank: 0 });
+        let pos = 0;
+        for (const c of [...vc].sort((a, b) => b.score - a.score)) { const id = String(c.event_id); if (present.has(id) && !vecRank.has(id)) vecRank.set(id, ++pos); }
+        retrieval = "lexical + vector";
+        note = null;
+      }
+    } catch (e: any) {
+      note = `vector search failed (${clip(String(e?.message ?? e), 80)}); lexical only`;
+    }
+  }
+  if (!rows.size) return empty(retrieval, note);
+
+  // ----- authority: one join of the candidate (session_id, seq) pairs against update evidence -----
+  const cand = [...rows.values()];
+  const cparams: unknown[] = [cand.map((r) => r.session_id), cand.map((r) => r.seq), asOf];
+  type Cite = { session_id: string; seq: number; update_id: string; record_id: string; status: string; superseded_by: string | null };
+  const cites = await q.query<Cite>(
+    `with c as (select * from unnest($1::text[], $2::int[]) as t(session_id, seq))
+     select c.session_id, c.seq, u.id as update_id, u.record_id,
+            case when $3::timestamptz is null then u.status
+                 when u.status = 'confirmed' and coalesce(u.confirmed_at, u.created_at) > $3::timestamptz then 'proposed'
+                 when u.status = 'rejected' and coalesce(u.rejected_at, u.created_at) > $3::timestamptz then 'proposed'
+                 else u.status end as status,
+            (select v.id from cont_state_updates v
+              where v.supersedes = u.id and v.status = 'confirmed' and ($3::timestamptz is null or coalesce(v.confirmed_at, v.created_at) <= $3::timestamptz)
+              order by v.confirmed_at, v.id limit 1) as superseded_by
+       from c
+       join cont_state_updates u on u.evidence @> jsonb_build_array(jsonb_build_object('session_id', c.session_id, 'seq', c.seq))
+      where $3::timestamptz is null or u.created_at <= $3::timestamptz`,
+    cparams
   );
-  return r.rows;
+  const byKey = new Map<string, EvidenceCitation[]>();
+  for (const c of cites.rows) {
+    const key = `${c.session_id}:${c.seq}`;
+    const arr = byKey.get(key) ?? [];
+    arr.push({ update_id: c.update_id, record_id: c.record_id, status: c.status as UpdateStatus, superseded_by: c.superseded_by });
+    byKey.set(key, arr);
+  }
+
+  const hits: EvidenceHit[] = cand.map((r) => {
+    const id = String(r.id);
+    const citations = byKey.get(`${r.session_id}:${r.seq}`) ?? [];
+    const tool = String(r.payload?.tool ?? r.tool_name ?? "");
+    const ledger_write = r.kind === "tool.finished" && LEDGER_WRITE_TOOL.test(tool) && String(r.payload?.is_error ?? "false") !== "true";
+    const live = citations.filter((c) => !c.superseded_by && c.status !== "rejected");
+    let tier: EvidenceTier;
+    let label: EvidenceLabel;
+    if (ledger_write || live.some((c) => c.status === "confirmed")) { tier = 3; label = "current"; }
+    else if (live.some((c) => c.status === "proposed")) { tier = 2; label = "PROPOSED"; }
+    else if (citations.length) {
+      tier = 0;
+      const sup = citations.find((c) => c.superseded_by);
+      label = sup ? `superseded by ${sup.superseded_by}` : "rejected";
+    } else { tier = 1; label = "uncited"; }
+    const lr = lexRank.get(id);
+    const vr = vecRank.get(id);
+    const similarity = (lr ? 1 / (RRF_K + lr) : 0) + (vr ? 1 / (RRF_K + vr) : 0);
+    const sources: EvidenceHit["sources"] = [...(lr ? ["lexical" as const] : []), ...(vr ? ["vector" as const] : [])];
+    const { tool_name: _t, ...ev } = r;
+    return { ...ev, similarity, sources, tier, label, citations, ledger_write };
+  });
+  const at = (e: EventRow) => new Date(e.occurred_at ?? e.received_at).getTime();
+  hits.sort((a, b) => b.tier - a.tier || at(b) - at(a) || b.similarity - a.similarity || Number(b.id) - Number(a.id));
+  return { hits: hits.slice(0, limit), retrieval, retrieval_note: note, as_of: asOf ? asOf.toISOString() : null };
+}
+
+/** Full-text search over event text; `searchEvidence` without the retrieval metadata. */
+export async function searchEvents(q: Q, query: string, f: EvidenceSearchFilters = {}): Promise<EvidenceHit[]> {
+  return (await searchEvidence(q, query, f)).hits;
+}
+
+// ---------- as-of view of record summaries ----------
+
+/**
+ * Re-evaluate a record listing as of an instant: records created after it disappear; proposed/confirmed
+ * counts follow the same as-of status rules as `searchEvidence` (confirmed after asOf → proposed;
+ * rejected after asOf → proposed; a superseder confirmed after asOf has not yet hidden its predecessor);
+ * state_version is the current version minus the confirmations after asOf, an approximation because a
+ * person's interactive re-acceptance moves confirmed_at and bumps the version once more.
+ * Differs from investigation.ts's as-of, which never hides objects and evaluates only supersession.
+ */
+export async function asOfRecordSummaries<T extends { id: string; state_version: number; proposed: number; confirmed: number; created_at: Date }>(q: Q, rows: T[], asOf: string | Date): Promise<(T & { as_of: string })[]> {
+  const at = asOfDate(asOf);
+  if (!at) return rows.map((r) => ({ ...r, as_of: "" }));
+  const kept = rows.filter((r) => new Date(r.created_at).getTime() <= at.getTime());
+  if (!kept.length) return [];
+  type C = { id: string; proposed: number; confirmed: number; after: number };
+  const r = await q.query<C>(
+    `with u as (
+       select u.record_id, u.id, u.confirmed_at,
+              case when u.status = 'confirmed' and coalesce(u.confirmed_at, u.created_at) > $2::timestamptz then 'proposed'
+                   when u.status = 'rejected' and coalesce(u.rejected_at, u.created_at) > $2::timestamptz then 'proposed'
+                   else u.status end as status,
+              exists (select 1 from cont_state_updates v where v.supersedes = u.id and v.status = 'confirmed' and coalesce(v.confirmed_at, v.created_at) <= $2::timestamptz) as superseded
+         from cont_state_updates u
+        where u.record_id = any($1::uuid[]) and u.created_at <= $2::timestamptz
+     )
+     select r.id,
+            (select count(*) from u where u.record_id = r.id and u.status = 'proposed' and not u.superseded)::int as proposed,
+            (select count(*) from u where u.record_id = r.id and u.status = 'confirmed' and not u.superseded)::int as confirmed,
+            (select count(*) from cont_state_updates x where x.record_id = r.id and x.status = 'confirmed' and x.confirmed_at > $2::timestamptz)::int as after
+       from cont_records r where r.id = any($1::uuid[])`,
+    [kept.map((x) => x.id), at]
+  );
+  const by = new Map(r.rows.map((x) => [x.id, x]));
+  return kept.map((row) => {
+    const c = by.get(row.id);
+    return { ...row, proposed: c?.proposed ?? 0, confirmed: c?.confirmed ?? 0, state_version: Math.max(0, row.state_version - (c?.after ?? 0)), as_of: at.toISOString() };
+  });
 }
 
 /** Records whose linked spans overlap a given session, for "what did this session contribute to". */
