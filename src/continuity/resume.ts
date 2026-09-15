@@ -161,23 +161,33 @@ export async function buildResumePack(cfg: Config, pool: pg.Pool, threadId: stri
   }
 
   // ----- checkpoint & sessions -----
-  const head = await headCheckpoint(pool, t.id);
-  const latest = head ?? (await latestCheckpointAny(pool, t.id));
-  if (!head && latest) omitted.push(`thread has no head checkpoint; showing latest non-head checkpoint ${latest.id} (${latest.kind}, did not advance: claim/generation mismatch at publish)`);
+  let head = await headCheckpoint(pool, t.id);
+  if (head && !upTo(head.created_at)) head = null;
+  let latest = head ?? (asOf
+    ? (await pool.query<CheckpointRow>(`select * from cont_checkpoints where thread_id = $1 and created_at <= $2 order by created_at desc limit 1`, [t.id, asOf])).rows[0] ?? null
+    : await latestCheckpointAny(pool, t.id));
+  if (!head && latest) omitted.push(asOf ? `showing the latest checkpoint at or before the as-of instant, ${latest.id} (${latest.kind})` : `thread has no head checkpoint; showing latest non-head checkpoint ${latest.id} (${latest.kind}, did not advance: claim/generation mismatch at publish)`);
   const summary = await summarizeThread(pool, t);
   // the source session: the checkpoint's, else the thread's most recently seen session
   const srcSession: SessionRow | null = latest ? await getSession(pool, latest.session_id) : summary.last_session ? await getSession(pool, summary.last_session.id) : null;
 
-  // ----- evidence -----
-  const instrRows = await threadEvents(pool, t.id, { kinds: ["instruction.added"] });
-  const msgRows = await threadEvents(pool, t.id, { kinds: ["assistant.message"], limit: 3 });
-  const fileRows = await threadEvents(pool, t.id, { kinds: ["file.changed"] });
-  const gapRows = await threadEvents(pool, t.id, { kinds: ["capture.gap"], limit: 20 });
-  const compRows = await threadEvents(pool, t.id, { kinds: ["compaction"] });
+  // ----- evidence (as-of: rows after the instant are dropped before shaping) -----
+  const instrRows = (await threadEvents(pool, t.id, { kinds: ["instruction.added"] })).filter((e) => upTo(evTime(e)));
+  const msgRows = asOf
+    ? (await threadEvents(pool, t.id, { kinds: ["assistant.message"] })).filter((e) => upTo(evTime(e))).slice(-3)
+    : await threadEvents(pool, t.id, { kinds: ["assistant.message"], limit: 3 });
+  const fileRows = (await threadEvents(pool, t.id, { kinds: ["file.changed"] })).filter((e) => upTo(evTime(e)));
+  const gapRows = (await threadEvents(pool, t.id, { kinds: ["capture.gap"], limit: 20 })).filter((e) => upTo(evTime(e)));
+  const compRows = (await threadEvents(pool, t.id, { kinds: ["compaction"] })).filter((e) => upTo(evTime(e)));
   const sources = await threadSourceCounts(pool, t.id);
-  const pend = srcSession ? await pendingOperations(pool, srcSession.id) : [];
-  const errRows = srcSession ? await sessionEvents(pool, srcSession.id, { kinds: ["tool.finished"] }) : [];
+  const pend = srcSession ? (asOf ? await pendingOperationsAsOf(pool, srcSession.id, asOf) : await pendingOperations(pool, srcSession.id)) : [];
+  const errRows = srcSession ? (await sessionEvents(pool, srcSession.id, { kinds: ["tool.finished"] })).filter((e) => upTo(evTime(e))) : [];
   const lastErr = [...errRows].reverse().find((e) => e.payload?.is_error || (typeof e.payload?.stderr_preview === "string" && e.payload.stderr_preview));
+  const msgFetch = `ledger_events(thread_id: ${JSON.stringify(t.id)}, kinds: ["assistant.message"], preview_chars: 2000)`;
+  const asOfLine = asOf ? `as of ${fmt(asOf)}: events, checkpoints and pending operations after this instant are hidden.` : null;
+
+  // ----- changed since the viewer's last session on this thread -----
+  const delta: VisitDelta | null = opts.viewer ? await threadVisitDelta(pool, t.id, pend.map((p) => ({ ...p, session_id: srcSession?.id })), { viewer: opts.viewer, excludeSessionId: opts.sessionId ?? null, asOf }) : null;
 
   const fileCounts = new Map<string, number>();
   for (const f of fileRows) { const p = String(f.payload?.path ?? ""); if (p) fileCounts.set(p, (fileCounts.get(p) ?? 0) + 1); }
@@ -307,6 +317,7 @@ export async function buildResumePack(cfg: Config, pool: pg.Pool, threadId: stri
     L.push(`thread ${t.id} · repo ${t.repo}${t.branch ? ` · branch ${t.branch}` : ""} · created by ${t.created_by} ${fmt(t.created_at)} · status ${t.status} · generation ${t.generation}`);
     if (fork) L.push(`FORK: you are on ${fork.id} ("${fork.title}"), forked from the thread above.`);
     L.push(`claim: ${claimInfo.note}`);
+    if (asOfLine) L.push(asOfLine);
     L.push(``);
     L.push(`## Honesty`);
     L.push(`Code saved through ${fmt(vSnap)} (remote-verified). Events acknowledged through ${fmt(vEv)}. Source session last seen ${fmt(lastSeen)}${srcSession?.ended_at ? ", ended" : ", not marked ended"}.`);
