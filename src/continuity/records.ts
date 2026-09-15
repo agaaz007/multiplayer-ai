@@ -748,7 +748,7 @@ export async function searchEvidence(q: Q, query: string, f: EvidenceSearchFilte
         let pos = 0;
         for (const c of [...vc].sort((a, b) => b.score - a.score)) { const id = String(c.event_id); if (present.has(id) && !vecRank.has(id)) vecRank.set(id, ++pos); }
         retrieval = "lexical + vector";
-        note = null;
+        note = present.size ? null : `${ids.length} vector candidate${ids.length === 1 ? "" : "s"} fell outside the scope and were dropped`;
       }
     } catch (e: any) {
       note = `vector search failed (${clip(String(e?.message ?? e), 80)}); lexical only`;

@@ -554,7 +554,8 @@ const byT = (hits: Awaited<ReturnType<typeof R.searchEvents>>) => Object.fromEnt
   // a candidate outside the scope is dropped, never shown
   const other = await R.searchEvidence(pool, "token bucket", { repo: SITE, candidates: fake });
   assert.equal(other.hits.length, 0, "vector candidates from another repo do not leak into a repo-scoped search");
-  assert.equal(other.retrieval, "lexical only", "nothing survived the scope, so no vector list was used");
+  assert.equal(other.retrieval, "lexical + vector", "the vector list was consulted; the scope line says so");
+  assert.match(other.retrieval_note ?? "", /3 vector candidates fell outside the scope/, "and says every candidate was dropped by the scope");
   // a failing generator degrades to lexical and says so
   const broken = await R.searchEvidence(pool, "token bucket", { session_id: sidT, candidates: async () => { throw new Error("pgvector missing"); } });
   assert.equal(broken.retrieval, "lexical only");
@@ -620,7 +621,7 @@ const byT = (hits: Awaited<ReturnType<typeof R.searchEvents>>) => Object.fromEnt
   assert.equal(await R.confirmStateUpdate(pool, "not-a-uuid", "rachit"), null);
   assert.equal(await R.rejectStateUpdate(pool, randomUUID(), "rachit", "x"), null);
   const before = (await pool.query<{ n: number }>(`select count(*)::int as n from cont_record_links`)).rows[0].n;
-  assert.equal(before, 6, "no invalid link was written");
+  assert.equal(before, 7, "no invalid link was written (6 from steps 3–4 plus the rate-limiter span from 7b)");
   ok("invalid inputs: reversed/negative spans, unknown session/record/source/kind, out-of-range confidence, malformed evidence all throw; confirm/reject on a missing id return null");
 }
 

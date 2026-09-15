@@ -611,10 +611,10 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
     // honesty, compact: sessions; snapshot + sources; the standing rule; classifier lag in one line
     const sesShown = sessions.slice(0, level >= 2 ? 2 : 6);
     L.push(`Honesty: ${sessions.length ? `${sessions.length} contributing session${sessions.length === 1 ? "" : "s"}: ${sesShown.map((s) => `${short(s.session_id)} (${s.author}, ${harnessName(s.harness)}, last seen ${fmt(s.last_seen_at)}${s.ended ? ", ended" : ""})`).join("; ")}${sessions.length > sesShown.length ? `; … ${sessions.length - sesShown.length} more` : ""}.` : "no span is linked to this record yet; link one with ledger_record_link."}`);
-    L.push(`${!rec.repo ? "Non-code record: no code snapshot applies." : vSnap ? `Code saved through ${fmt(vSnap.at)} (remote-verified; ${vSnap.from}).` : "No verified code snapshot among contributing sessions: treat the code state as unverified."} Sources: ${sources.instructions} instructions, ${sources.assistant_messages} assistant messages, ${sources.tool_calls} tool calls, ${sources.compaction_summaries} compaction summaries across ${sources.sessions} sessions in ${sources.spans} spans; ${sources.proposed_updates} proposed and ${sources.confirmed_updates} confirmed state updates.`);
-    L.push(`The claim is advisory. Proposed items are unconfirmed: nobody has accepted them. Narrative-free: no event text is inlined here; every reference below is an exact fetch.`);
+    L.push(`${!rec.repo ? "Non-code record: no code snapshot applies." : vSnap ? `Code saved through ${fmt(vSnap.at)} (remote-verified; ${vSnap.from}).` : "No verified code snapshot among contributing sessions: treat the code state as unverified."} Sources: ${sources.instructions} instructions · ${sources.assistant_messages} assistant messages · ${sources.tool_calls} tool calls · ${sources.compaction_summaries} compaction summaries · ${sources.sessions} sessions / ${sources.spans} spans · ${sources.proposed_updates} proposed / ${sources.confirmed_updates} confirmed updates.`);
+    L.push(`The claim is advisory. Proposed items are unaccepted. No event text is inlined; every reference below is an exact fetch.`);
     const lag = lagStats.filter((s) => s.cap > s.cls);
-    if (lag.length) L.push(`Classifier lag: ${lag.map((s) => `${short(s.session_id)} ${s.cap - s.cls} of ${s.cap} events unclassified`).join("; ")}; later work may be unassigned to any record yet (ledger_unassigned).`);
+    if (lag.length) L.push(`Classifier lag: ${lag.map((s) => `${short(s.session_id)} ${s.cap - s.cls}/${s.cap} events`).join(", ")} unclassified; later work may be unassigned to any record yet (ledger_unassigned).`);
     L.push(``);
 
     // state: confirmed first within each kind; proposed in full up to LEAN_PROPOSED_FULL, else count + ids
@@ -652,13 +652,12 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
     L.push(``);
 
     // decisions in force, compact
-    for (const line of renderDecisionsInForce(ledgerRefs, saved, { compact: true })) L.push(line);
-    if (ledgerRefs.length) om.push(`Ledger object titles in Decisions in force (ids and status kept); ledger_get per id`);
+    for (const line of renderDecisionsInForce(ledgerRefs, saved, { compact: true, lean: true })) L.push(line);
     for (const o of acceptedRefs) {
       const resolution = resolveAccepted(all, o.id);
-      L.push(`${resolution.status === 'conflict' ? 'CONFLICTING ACCEPTED SOURCE — resolve before reuse' : 'Accepted source'}: ${o.type} ${o.id} @${objectVersion(o).slice(0, 8)}${o.fields.analysis_scope ? "" : " · SCOPE UNKNOWN: use ledger_investigation with the analytical scope before applying it"}`);
+      L.push(`${resolution.status === 'conflict' ? 'CONFLICTING ACCEPTED SOURCE — resolve before reuse' : 'Accepted source'}: ${o.type} ${o.id} @${objectVersion(o).slice(0, 8)}${o.fields.analysis_scope ? "" : " · SCOPE UNKNOWN (ledger_investigation before applying it)"}`);
     }
-    if (acceptedRefs.length) om.push(`accepted source formula/query text; ledger_get per id`);
+    if (ledgerRefs.length || acceptedRefs.length) om.push(`Ledger object titles${acceptedRefs.length ? ", accepted source formula/query text" : ""} (ids and status kept); ledger_get per id`);
     for (const impact of reviewImpacts) {
       for (const item of impact.affected) L.push(`NEEDS REVIEW: ${item.id}; ${item.reason}; ${item.path.join(' -> ')}`);
       for (const item of impact.incomplete) L.push(`INCOMPLETE IMPACT: ${item.id}; ${item.reason}`);
@@ -684,23 +683,23 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
     L.push(``);
 
     // drill down: references only
-    L.push(`## Drill down (references only; nothing is inlined above)`);
-    L.push(`Evidence: ${evidenceTotal} content events in ${sources.spans} span${sources.spans === 1 ? "" : "s"}. One call per linked span, in time order:`);
+    L.push(`## Drill down (references only)`);
+    L.push(`Evidence: ${evidenceTotal} content events in ${sources.spans} span${sources.spans === 1 ? "" : "s"}; one call per linked span, in time order:`);
     const spanMax = level >= 2 ? 3 : 8;
     spanRefs.slice(0, spanMax).forEach((l) => { const s = sessions.find((x) => x.session_id === l.session_id); L.push(`- ${spanFetch(l)}  · ${s ? `${s.author}/${harnessName(s.harness)}` : short(l.session_id)}`); });
     if (spanRefs.length > spanMax) { L.push(`- … ${spanRefs.length - spanMax} more spans; ${evidenceFetch}`); om.push(`${spanRefs.length - spanMax} span fetches (list shortened for budget); ${evidenceFetch}`); }
     if (lastErr) L.push(`- last error: session ${short(lastErr.session_id)} seq ${lastErr.seq} ${String(lastErr.payload?.tool ?? "")}${errArtifacts.length ? ` [artifacts ${errArtifacts.join(", ")}; ledger_artifact_get(id)]` : ""} → ${lastErrFetch}`);
     if (sessionSummary) L.push(`- session summary written by ${sessionSummary.harness} at compaction (${num(sessionSummary.chars)} chars; evidence, not memory) → ${summaryFetch}`);
     if (unassignedTotal) L.push(`- ${unassignedTotal} unassigned span${unassignedTotal === 1 ? "" : "s"} in contributing sessions may belong here → ledger_unassigned(session_id: ${q(unassigned[0]?.session_id ?? sessions[0]?.session_id ?? "")})`);
-    L.push(`- search: ledger_evidence_search(q: "…", record_id: ${q(rec.id)}) · full pack with event lines: ${evidenceFetch}`);
-    om.push(`evidence lines, session summary text, files touched (${files.length}) and unassigned spans are references only in lean detail; ${evidenceFetch}`);
+    L.push(`- search: ledger_evidence_search(q: "…", record_id: ${q(rec.id)})`);
+    om.push(`evidence lines, session summary text, files touched (${files.length}) and unassigned spans: references only in lean detail; ${evidenceFetch}`);
     L.push(``);
 
     // contract, compact
     L.push(`## First turn contract`);
     L.push(`1. ${DECISION_RULE} Contradictions stay open until a person resolves them.`);
-    L.push(rec.repo ? `2. Check out the snapshot into a fresh worktree; state what is confirmed (verified snapshot, linked evidence) vs uncertain (unverified edits, pending operations); never rerun a pending operation that mutates anything until you know its outcome.` : `2. Non-code work, no worktree: state what is confirmed (linked evidence, confirmed updates) vs uncertain (proposed updates, unassigned spans); never rerun a pending operation that mutates anything until you know its outcome.`);
-    L.push(`3. Drill down only where the state leaves a question. Propose updates with ledger_record_update(record_id, action: "propose", …) citing exact evidence (session_id, seq); link your spans with ledger_record_link; a person accepts with \`ledger record confirm <update_id>\`.`);
+    L.push(rec.repo ? `2. Check out the snapshot into a fresh worktree; state confirmed (verified snapshot, linked evidence) vs uncertain (unverified edits, pending operations); never rerun a pending operation that mutates anything until its outcome is known.` : `2. Non-code work, no worktree: state confirmed (linked evidence, confirmed updates) vs uncertain (proposed updates, unassigned spans); never rerun a pending operation that mutates anything until its outcome is known.`);
+    L.push(`3. Drill down only where the state leaves a question. Propose updates with ledger_record_update(record_id, action: "propose", …) citing exact evidence (session_id, seq); link your spans with ledger_record_link.`);
     L.push(``); L.push(`## Omitted for budget or unavailable`); for (const o of om) L.push(`- ${o}`);
     return { text: L.join("\n"), omitted: om, evidence: { total: evidenceTotal, shown: [], omitted: evidenceTotal ? { count: evidenceTotal, fetch: spanFetches } : null } };
   };
