@@ -92,7 +92,7 @@ export const LEAN_PROPOSED_FULL = 3;
 /** A lean pack above min(budget, this) shrinks level by level (boilerplate, then proposed ids, then caps); each drop is named. */
 export const LEAN_TARGET_TOKENS = 1200;
 /** The decision rule as the lean pack states it (one sentence in the honesty block; the full DECISION_RULE is in the evidence pack's contract). */
-export const LEAN_DECISION_RULE = "Act only on [in force] Ledger objects and [accepted by <person>] record decisions; superseded, draft, conflicting, [PROPOSED] and agent-confirmed items were not decided by a person (`ledger record confirm <update_id>` accepts one).";
+export const LEAN_DECISION_RULE = "Act only on [in force] Ledger objects and [accepted by <person>] record decisions; superseded, draft, conflicting, [PROPOSED] and agent-confirmed items were not decided by a person (a person accepts with `ledger record confirm <update_id>`).";
 
 export interface RecordPackOpts {
   author: string;
@@ -605,15 +605,16 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
   // after_seq + limit 1 on one session is already exact; the kinds filter is redundant in the lean pointer
   const leanSummaryFetch = sessionSummary ? `ledger_events(session_id: ${q(sessionSummary.session_id)}, after_seq: ${sessionSummary.seq - 1}, limit: 1, preview_chars: ${Math.min(sessionSummary.chars, PREVIEW_MAX_CHARS)})` : "";
   /**
-   * Lean levels (each drop named in Omitted): 0 full lean; 1 boilerplate trimmed (sources counts, contract detail,
-   * pending inputs, delta detail); 2 proposed items as ids, soft confirmed kinds capped at 3; 3 confirmed soft kinds
-   * capped at 1, span/pending lists cut to 3. Hard kinds (decisions, blockers) never lose confirmed items.
+   * Lean levels (each drop named in Omitted): 0 full lean; 1 accepted-source review reasons clipped, unassigned pointer
+   * moved to Omitted; 2 proposed items as ids, soft confirmed kinds capped at 3, pending inputs and delta detail
+   * clipped; 3 confirmed soft kinds capped at 1, span/pending lists cut to 3. Hard kinds (decisions, blockers)
+   * never lose confirmed items.
    */
   const renderLean = (level: number): { text: string; omitted: string[]; evidence: RecordPack["evidence_summary"] } => {
     const om = [...omitted];
     const L: string[] = [];
     L.push(`# Record pack: ${rec.title}`);
-    L.push(`record ${rec.id} · ${rec.kind} · ${rec.repo ? `repo ${rec.repo}` : "non-code work"} · status ${rec.status} · created by ${rec.created_by} ${fmt(rec.created_at)} · state v${rec.state_version} · updated ${fmt(rec.updated_at)}`);
+    L.push(`record ${rec.id} · ${rec.kind} · ${rec.repo ? `repo ${rec.repo}` : "non-code work"} · status ${rec.status} · created by ${rec.created_by} ${fmt(rec.created_at)} · state v${rec.state_version} · updated ${ago(rec.updated_at, now)}`);
     L.push(`goal: ${rec.goal ? oneLine(rec.goal) : "(none recorded)"}`);
     if (asOfLine) L.push(asOfLine);
     L.push(`claim: ${claimInfo.note}`);
@@ -666,27 +667,23 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
     for (const line of renderDecisionsInForce(ledgerRefs, saved, { compact: true, lean: true })) L.push(line);
     for (const o of acceptedRefs) {
       const resolution = resolveAccepted(all, o.id);
-      const impact = reviewImpacts.find((i) => i.affected.some((a) => a.id === o.id) || i.incomplete.some((a) => a.id === o.id));
-      if (level >= 1) L.push(`${resolution.status === 'conflict' ? 'CONFLICTING ACCEPTED SOURCE' : 'Accepted source'} ${o.type} ${o.id} @${objectVersion(o).slice(0, 8)}${o.fields.analysis_scope ? "" : "; SCOPE UNKNOWN"}${impact ? "; review impact flagged" : ""} (ledger_get, ledger_investigation before applying it)`);
-      else L.push(`${resolution.status === 'conflict' ? 'CONFLICTING ACCEPTED SOURCE — resolve before reuse' : 'Accepted source'}: ${o.type} ${o.id} @${objectVersion(o).slice(0, 8)}${o.fields.analysis_scope ? "" : " · SCOPE UNKNOWN (ledger_investigation before applying it)"}`);
+      // one line per accepted source: pin, scope, and its review-impact flags with the reason clipped; ids are not repeated
+      const flags = reviewImpacts.flatMap((i) => [...i.affected.filter((a) => a.id === o.id).map((a) => `NEEDS REVIEW: ${clipTo(a.reason, level >= 1 ? 40 : 120)}`), ...i.incomplete.filter((a) => a.id === o.id).map((a) => `INCOMPLETE IMPACT: ${clipTo(a.reason, level >= 1 ? 40 : 120)}`)]);
+      L.push(`${resolution.status === 'conflict' ? 'CONFLICTING ACCEPTED SOURCE — resolve before reuse' : 'Accepted source'}: ${o.type} ${o.id} @${objectVersion(o).slice(0, 8)}${o.fields.analysis_scope ? "" : " · SCOPE UNKNOWN (ledger_investigation before applying it)"}${flags.length ? ` · ${flags.join(" · ")}` : ""}`);
     }
-    if (ledgerRefs.length || acceptedRefs.length) om.push(`Ledger object titles${acceptedRefs.length ? " and accepted source formula/query text" : ""}; ledger_get per id`);
-    if (level >= 1 && reviewImpacts.some((i) => i.affected.length || i.incomplete.length)) om.push(`review-impact detail for accepted sources (for budget); ledger_impact per id`);
-    else for (const impact of reviewImpacts) {
-      for (const item of impact.affected) L.push(`NEEDS REVIEW: ${item.id}; ${item.reason}; ${item.path.join(' -> ')}`);
-      for (const item of impact.incomplete) L.push(`INCOMPLETE IMPACT: ${item.id}; ${item.reason}`);
-    }
+    if (ledgerRefs.length || acceptedRefs.length) om.push(`Ledger object titles${acceptedRefs.length ? ", accepted source formula/query text and review-impact paths" : ""}; ledger_get / ledger_impact per id`);
+    for (const impact of reviewImpacts) for (const item of [...impact.affected, ...impact.incomplete]) if (!acceptedRefs.some((o) => o.id === item.id)) L.push(`NEEDS REVIEW: ${item.id}; ${item.reason}`);
     L.push(``);
 
     // pending / unknown
     const pendMax = level >= 3 ? 3 : 10;
     L.push(`## Pending / unknown operations (${pend.length}) — all contributing sessions, inside linked spans`);
-    for (const p of pend.slice(0, pendMax)) L.push(`- session ${short(p.session_id)} seq ${p.seq} ${p.tool}: ${clipTo(oneLine(p.input), level >= 1 ? 80 : 160)}  ← outcome unknown; do not rerun blindly`);
+    for (const p of pend.slice(0, pendMax)) L.push(`- session ${short(p.session_id)} seq ${p.seq} ${p.tool}: ${clipTo(oneLine(p.input), level >= 2 ? 80 : 160)}  ← outcome unknown; do not rerun blindly`);
     if (pend.length > pendMax) { L.push(`… ${pend.length - pendMax} more; ${evidenceFetch}`); om.push(`${pend.length - pendMax} pending operations (list shortened for budget); ${evidenceFetch}`); }
     L.push(``);
 
     // changed since your last visit
-    for (const line of renderVisitDelta(delta!, { unit: "record", created: rec.created_at, stateFetch, level: level >= 1 ? 1 : 0 })) L.push(line);
+    for (const line of renderVisitDelta(delta!, { unit: "record", created: rec.created_at, stateFetch, level: level >= 2 ? 1 : 0 })) L.push(line);
     L.push(``);
 
     // bootstrap
@@ -708,7 +705,7 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
       else L.push(`- ${unassignedTotal} unassigned span${unassignedTotal === 1 ? "" : "s"} may belong here: ledger_unassigned(session_id: ${q(unassigned[0]?.session_id ?? sessions[0]?.session_id ?? "")})`);
     }
     L.push(`- search: ledger_evidence_search(q: "…", record_id: ${q(rec.id)})`);
-    L.push(`- write back: ledger_record_update(record_id, action: "propose", …) with exact evidence (session_id, seq); ledger_record_link for your spans.`);
+    L.push(`- write back: ledger_record_update(record_id, action: "propose", …) with exact evidence (session_id, seq); ledger_record_link your spans.`);
     om.push(`lean detail omits evidence lines, summary text, files (${files.length}), unassigned spans, source counts, full contract; ${evidenceFetch}`);
     L.push(``); L.push(`## Omitted for budget or unavailable`); for (const o of om) L.push(`- ${o}`);
     return { text: L.join("\n"), omitted: om, evidence: { total: evidenceTotal, shown: [], omitted: evidenceTotal ? { count: evidenceTotal, fetch: spanFetches } : null } };

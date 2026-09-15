@@ -222,7 +222,7 @@ for (const t of [lean.text, pack.text]) {
   assert.ok(drill.includes(`- ledger_events(session_id: "${sidA}", after_seq: 0, limit: 10)  · agaaz/Claude Code\n- ledger_events(session_id: "${sidR}", after_seq: 0, limit: 7)  · rachit/Codex\n`), drill);
   assert.ok(drill.includes(`- last error (${A8} seq 7 Bash): ledger_events(session_id: "${sidA}", after_seq: 6, limit: 1, preview_chars: 2000)`), drill);
   assert.ok(drill.includes(`- compaction summary by Codex (${codexSummary.length} chars, evidence not memory): ledger_events(session_id: "${sidR}", after_seq: 4, limit: 1, preview_chars: ${codexSummary.length})`), drill);
-  assert.ok(drill.includes(`- 1 unassigned span may belong here: ledger_unassigned(session_id: "${sidR}")`) && drill.includes(`- search: ledger_evidence_search(q: "…", record_id: "${recAttr.id}")`), drill);
+  assert.ok(t.includes(`1 unassigned span may belong here`) && t.includes(`ledger_unassigned(session_id: "${sidR}")`) && drill.includes(`- search: ledger_evidence_search(q: "…", record_id: "${recAttr.id}")`), drill);
   assert.deepEqual(lean.drill_down.slice(0, 2), [`ledger_events(session_id: "${sidA}", after_seq: 0, limit: 10)`, `ledger_events(session_id: "${sidR}", after_seq: 0, limit: 7)`]);
   // every omission names its fetch; the evidence pack is one call away
   assert.ok(lean.omitted.every((o) => /ledger_/.test(o)), lean.omitted.join(" | "));
