@@ -591,14 +591,121 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
     return { text: L.join("\n"), omitted: om, evidence: evidenceSummary };
   };
 
+  // ----- lean: references, never event lines. Levels shrink state caps and delta detail; each drop named. -----
+  const drill: string[] = [];
+  const spanRefs = [...covering].sort((a, b) => firstIdx(a) - firstIdx(b));
+  for (const l of spanRefs) drill.push(spanFetch(l));
+  if (lastErrFetch) drill.push(lastErrFetch);
+  if (summaryFetch) drill.push(summaryFetch);
+  const errArtifacts = lastErr ? artifactIds(lastErr.payload) : [];
+  const renderLean = (level: number): { text: string; omitted: string[]; evidence: RecordPack["evidence_summary"] } => {
+    const om = [...omitted];
+    const L: string[] = [];
+    L.push(`# Record pack: ${rec.title}`);
+    L.push(`record ${rec.id} · ${rec.kind} · ${rec.repo ? `repo ${rec.repo}` : "non-code work"} · status ${rec.status} · created by ${rec.created_by} ${fmt(rec.created_at)} · state v${rec.state_version} · updated ${fmt(rec.updated_at)}`);
+    L.push(`goal: ${rec.goal ? oneLine(rec.goal) : "(none recorded)"}`);
+    if (asOfLine) L.push(asOfLine);
+    L.push(`claim: ${claimInfo.note}`);
+    // honesty, compact: one line for the sessions, one for the snapshot and sources, one standing rule
+    const sesShown = sessions.slice(0, level >= 2 ? 2 : 6);
+    L.push(`Honesty: ${sessions.length ? `${sessions.length} contributing session${sessions.length === 1 ? "" : "s"}: ${sesShown.map((s) => `${short(s.session_id)} (${s.author}, ${harnessName(s.harness)}, last seen ${fmt(s.last_seen_at)}${s.ended ? ", ended" : ""})`).join("; ")}${sessions.length > sesShown.length ? `; … ${sessions.length - sesShown.length} more` : ""}.` : "no span is linked to this record yet; link one with ledger_record_link."}`);
+    L.push(`${!rec.repo ? "Non-code record: no code snapshot applies." : vSnap ? `Code saved through ${fmt(vSnap.at)} (remote-verified; ${vSnap.from}).` : "No verified code snapshot among contributing sessions: treat the code state as unverified."} Sources: ${sources.instructions} instructions, ${sources.assistant_messages} assistant messages, ${sources.tool_calls} tool calls, ${sources.compaction_summaries} compaction summaries across ${sources.sessions} sessions in ${sources.spans} spans; ${sources.proposed_updates} proposed and ${sources.confirmed_updates} confirmed state updates.`);
+    L.push(`The claim is advisory. Proposed items are unconfirmed: nobody has accepted them. Narrative-free: machine-assembled from evidence; no event text is inlined here, every reference below is an exact fetch.`);
+    const lag = lagLines.filter((l) => l.includes("(lag "));
+    if (lag.length) for (const l of lag.slice(0, 2)) L.push(l);
+    L.push(``);
+
+    // state: confirmed first within each kind; proposed in full up to LEAN_PROPOSED_FULL, else count + ids
+    L.push(`## State (v${rec.state_version} · ${state.proposed_count} proposed · ${state.confirmed_count} confirmed)`);
+    for (const conflict of state.conflicts) L.push(`UNRESOLVED ACCEPTED CONFLICT: ${conflict.update_ids.join(', ')} replace ${conflict.supersedes}. Do not choose by recency; inspect evidence and explicitly resolve.`);
+    let anyState = false;
+    for (const k of STATE_ORDER) {
+      const items = state[k.key];
+      if (!items.length) continue;
+      anyState = true;
+      const accepted = items.filter((u) => u.status === "confirmed");
+      const proposals = items.filter((u) => u.status === "proposed");
+      const accCap = k.hard ? stateCap : level >= 2 ? 1 : level >= 1 ? 3 : stateCap;
+      const accShown = accepted.slice(-accCap);
+      const propFull = level >= 1 ? 0 : LEAN_PROPOSED_FULL;
+      L.push(`### ${k.label} (${items.length})`);
+      for (const u of accShown) L.push(stateLine(u));
+      if (accepted.length > accShown.length) { L.push(`… ${accepted.length - accShown.length} more confirmed via ${stateFetch}`); om.push(`${accepted.length - accShown.length} older confirmed ${k.key} (list shortened for budget); ${stateFetch}`); }
+      if (proposals.length) {
+        if (proposals.length <= propFull) for (const u of proposals) L.push(stateLine(u));
+        else {
+          L.push(`- [PROPOSED] ${proposals.length} proposed ${k.key} not accepted by anyone: ${proposals.map((u) => `${short(u.id)} (${u.created_by})`).join(", ")}; full text via ${stateFetch}`);
+          om.push(`${proposals.length} proposed ${k.key} shown as ids only${level >= 1 ? " (for budget)" : ""}; ${stateFetch}`);
+        }
+      }
+    }
+    if (!anyState) L.push(`(no state updates yet; propose one with ledger_record_update(record_id: ${q(rec.id)}, action: "propose", …))`);
+    L.push(``);
+
+    // decisions in force, compact
+    for (const line of renderDecisionsInForce(ledgerRefs, saved, { compact: true })) L.push(line);
+    if (ledgerRefs.length) om.push(`Ledger object titles in Decisions in force (ids and status kept); ledger_get per id`);
+    for (const o of acceptedRefs) {
+      const resolution = resolveAccepted(all, o.id);
+      L.push(`${resolution.status === 'conflict' ? 'CONFLICTING ACCEPTED SOURCE — resolve before reuse' : 'Accepted source'}: ${o.type} ${o.id} @${objectVersion(o)}${o.fields.analysis_scope ? "" : " · SCOPE UNKNOWN: use ledger_investigation with the analytical scope before applying it"} (ledger_get ${q(o.id)})`);
+    }
+    if (acceptedRefs.length) om.push(`accepted source formula/query text; ledger_get per id`);
+    for (const impact of reviewImpacts) {
+      for (const item of impact.affected) L.push(`NEEDS REVIEW: ${item.id}; ${item.reason}; ${item.path.join(' -> ')}`);
+      for (const item of impact.incomplete) L.push(`INCOMPLETE IMPACT: ${item.id}; ${item.reason}`);
+    }
+    L.push(``);
+
+    // pending / unknown
+    L.push(`## Pending / unknown operations (${pend.length}) — all contributing sessions, inside linked spans`);
+    for (const p of pend.slice(0, level >= 2 ? 3 : 10)) L.push(`- session ${short(p.session_id)} seq ${p.seq} ${p.tool}: ${clipTo(oneLine(p.input), level >= 1 ? 80 : 160)}  ← outcome unknown; do not blindly rerun if it mutates anything`);
+    const pendMax = level >= 2 ? 3 : 10;
+    if (pend.length > pendMax) { L.push(`… ${pend.length - pendMax} more; ${evidenceFetch}`); om.push(`${pend.length - pendMax} pending operations (list shortened for budget); ${evidenceFetch}`); }
+    L.push(``);
+
+    // changed since your last visit
+    for (const line of renderVisitDelta(delta!, { unit: "record", created: rec.created_at, stateFetch, level: level >= 1 ? 1 : 0 })) L.push(line);
+    L.push(``);
+
+    // bootstrap
+    L.push(`## Bootstrap`);
+    if (!rec.repo) L.push(`non-code record; no worktree`);
+    else if (bootstrap.length) { L.push(`snapshot from ${wip!.from}`); L.push("```\n" + bootstrap.join("\n") + "\n```"); }
+    else L.push(`(no snapshot to check out: no contributing session or thread head carries a verified wip ref)`);
+    L.push(``);
+
+    // drill down: references only
+    L.push(`## Drill down (references only; nothing is inlined above)`);
+    L.push(`Evidence: ${evidenceTotal} content events in ${sources.spans} span${sources.spans === 1 ? "" : "s"}. One call per linked span, in time order:`);
+    const spanMax = level >= 2 ? 3 : 8;
+    spanRefs.slice(0, spanMax).forEach((l) => { const s = sessions.find((x) => x.session_id === l.session_id); L.push(`- ${spanFetch(l)}  · ${s ? `${s.author}/${harnessName(s.harness)}` : short(l.session_id)}, seq ${l.from_seq}..${l.to_seq}`); });
+    if (spanRefs.length > spanMax) { L.push(`- … ${spanRefs.length - spanMax} more spans; ${evidenceFetch}`); om.push(`${spanRefs.length - spanMax} span fetches (list shortened for budget); ${evidenceFetch}`); }
+    if (lastErr) L.push(`- last error: session ${short(lastErr.session_id)} seq ${lastErr.seq} ${String(lastErr.payload?.tool ?? "")}${errArtifacts.length ? ` [artifacts ${errArtifacts.join(", ")}; ledger_artifact_get(id)]` : ""} → ${lastErrFetch}`);
+    if (sessionSummary) L.push(`- session summary written by ${sessionSummary.harness} at compaction (${num(sessionSummary.chars)} chars; evidence, not memory) → ${summaryFetch}`);
+    if (unassignedTotal) L.push(`- ${unassignedTotal} unassigned span${unassignedTotal === 1 ? "" : "s"} in contributing sessions may belong here → ledger_unassigned(session_id: ${q(unassigned[0]?.session_id ?? sessions[0]?.session_id ?? "")}); link with ledger_record_link`);
+    L.push(`- search: ledger_evidence_search(q: "…", record_id: ${q(rec.id)}) · full pack with event lines: ${evidenceFetch}`);
+    om.push(`evidence lines, session summary text, files touched (${files.length}) and unassigned spans are references only in lean detail; ${evidenceFetch}`);
+    L.push(``);
+
+    // contract, compact
+    L.push(`## First turn contract`);
+    L.push(`1. ${DECISION_RULE} Contradictions stay open until a person resolves them.`);
+    L.push(rec.repo ? `2. Check out the snapshot into a fresh worktree; state what is confirmed (verified snapshot, linked evidence) vs uncertain (unverified edits, pending operations). Never rerun a pending operation that mutates anything until you know its outcome.` : `2. Non-code work: no worktree. State what is confirmed (linked evidence, confirmed updates) vs uncertain (proposed updates, unassigned spans). Never rerun a pending operation that mutates anything until you know its outcome.`);
+    L.push(`3. Drill down only where the state above leaves a question; propose progress, decisions, hypotheses, blockers and next steps with ledger_record_update(record_id: ${q(rec.id)}, action: "propose", …) citing exact evidence (session_id, seq); link this session's spans with ledger_record_link; ask the person to run \`ledger record confirm <update_id>\` for anything they decide.`);
+    L.push(``); L.push(`## Omitted for budget or unavailable`); for (const o of om) L.push(`- ${o}`);
+    return { text: L.join("\n"), omitted: om, evidence: { total: evidenceTotal, shown: [], omitted: evidenceTotal ? { count: evidenceTotal, fetch: spanFetches } : null } };
+  };
+
   // shrink the softest sections first: evidence tail and file list, then the summary, then soft state kinds, then details
   let level = 0;
-  let out = render(level);
-  while (approxTokens(out.text) > budget && level < 5) out = render(++level);
+  let out = detail === "lean" ? renderLean(level) : render(level);
+  if (detail === "lean") { while (approxTokens(out.text) > Math.min(budget, LEAN_DEFAULT_BUDGET) && level < 2) out = renderLean(++level); }
+  else { while (approxTokens(out.text) > budget && level < 5) out = render(++level); }
 
   return {
     record: rec, state, ledger_refs: ledgerRefs, evidence_summary: out.evidence, session_summary: sessionSummary,
     files, recent_files: recentFiles, pending_operations: pend, last_error: lastErr, unassigned, contributing_sessions: sessions,
     claim: claimInfo, bootstrap, sources, omitted: out.omitted, text: out.text,
+    detail, as_of: asOf ? asOf.toISOString() : null, changed_since: delta, drill_down: drill,
   };
 }
