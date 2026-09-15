@@ -380,7 +380,7 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
   const lastErrFetch = lastErr ? `ledger_events(session_id: ${q(lastErr.session_id)}, after_seq: ${lastErr.seq - 1}, limit: 1, preview_chars: 2000)` : null;
 
   // ----- changed since the viewer's last visit (lean and evidence alike; the section is rendered in lean) -----
-  const delta: VisitDelta | null = await recordVisitDelta(pool, rec.id, state, pendFull, { viewer: opts.viewer ?? null, excludeSessionId: opts.sessionId ?? null, asOf });
+  const delta: VisitDelta | null = await recordVisitDelta(pool, rec.id, state, pendFull, { viewer: opts.viewer ?? null, excludeSessionId: opts.sessionId ?? null, asOf, kinds: EVIDENCE_KINDS });
 
   // ----- unassigned spans in the contributing sessions -----
   let unassigned: UnassignedSpan[] = [];

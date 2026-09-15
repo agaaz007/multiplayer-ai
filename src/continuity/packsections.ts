@@ -189,15 +189,15 @@ export function decisionTag(r: LedgerRefStatus): string {
   return r.superseded_by ? `SUPERSEDED by ${r.superseded_by}, which is in force` : "SUPERSEDED; no single replacement is in force";
 }
 
-/** The "Decisions in force" section, shared by the thread and record packs. */
-export function renderDecisionsInForce(refs: LedgerRefStatus[], captured: { results: number; sessions: number }, opts: { compact?: boolean; groups?: RecordDecisionGroup[]; perGroup?: number } = {}): string[] {
+/** The "Decisions in force" section, shared by the thread and record packs. `lean` drops the explanatory sentences (the status tags carry the rule). */
+export function renderDecisionsInForce(refs: LedgerRefStatus[], captured: { results: number; sessions: number }, opts: { compact?: boolean; lean?: boolean; groups?: RecordDecisionGroup[]; perGroup?: number } = {}): string[] {
   const L: string[] = [];
   const groups = opts.groups ?? [];
   L.push(`## Decisions in force for this work (${refs.length})`);
   if (!refs.length) {
-    L.push(`(none: no Ledger decision, definition, finding or change was saved in this work's events or linked to it; decisions it only read are not tracked here)`);
+    L.push(opts.lean ? `(none saved or linked; decisions the work only read are not tracked here)` : `(none: no Ledger decision, definition, finding or change was saved in this work's events or linked to it; decisions it only read are not tracked here)`);
   } else {
-    L.push(`Ledger objects this work saved or linked, resolved to what is in force now. Only [in force] items are accepted knowledge.`);
+    if (!opts.lean) L.push(`Ledger objects this work saved or linked, resolved to what is in force now. Only [in force] items are accepted knowledge.`);
     const rank = (r: LedgerRefStatus) => (r.found ? TYPE_ORDER[r.type ?? ""] ?? 4 : 5);
     const sorted = refs.map((r, i) => ({ r, i })).sort((a, b) => rank(a.r) - rank(b.r) || a.i - b.i).map((x) => x.r);
     // a warning shared by several objects (legacy scope, say) prints once after the list, so it cannot bury a status line
@@ -216,7 +216,9 @@ export function renderDecisionsInForce(refs: LedgerRefStatus[], captured: { resu
     const notInForce = sorted.filter((r) => !r.found || r.status !== "stable" || r.authority_status === "conflict");
     if (notInForce.length) L.push(`NOT IN FORCE (${notInForce.length}): ${notInForce.map((r) => (r.status === "deprecated" && r.superseded_by ? `${r.id} → ${r.superseded_by}` : r.id)).join("; ")}. Do not act on these as decided.`);
     const explicit = refs.filter((r) => r.source === "explicit").length;
-    L.push(`Captured from ${plural(captured.results, "Ledger save result")} in ${plural(captured.sessions, "session")} and ${plural(explicit, "explicit link")}. Decisions the work only read are not listed; search the Ledger before relying on one.`);
+    L.push(opts.lean
+      ? `Captured from ${plural(captured.results, "save result")} in ${plural(captured.sessions, "session")} and ${plural(explicit, "explicit link")}; decisions only read are not listed.`
+      : `Captured from ${plural(captured.results, "Ledger save result")} in ${plural(captured.sessions, "session")} and ${plural(explicit, "explicit link")}. Decisions the work only read are not listed; search the Ledger before relying on one.`);
   }
   if (groups.length) {
     const cap = Math.max(1, opts.perGroup ?? 5);

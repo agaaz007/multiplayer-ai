@@ -187,7 +187,7 @@ export async function buildResumePack(cfg: Config, pool: pg.Pool, threadId: stri
   const asOfLine = asOf ? `as of ${fmt(asOf)}: events, checkpoints and pending operations after this instant are hidden.` : null;
 
   // ----- changed since the viewer's last session on this thread -----
-  const delta: VisitDelta | null = opts.viewer ? await threadVisitDelta(pool, t.id, pend.map((p) => ({ ...p, session_id: srcSession?.id })), { viewer: opts.viewer, excludeSessionId: opts.sessionId ?? null, asOf }) : null;
+  const delta: VisitDelta | null = opts.viewer ? await threadVisitDelta(pool, t.id, pend.map((p) => ({ ...p, session_id: srcSession?.id })), { viewer: opts.viewer, excludeSessionId: opts.sessionId ?? null, asOf, kinds: ["instruction.added", "assistant.message", "tool.requested", "file.changed", "compaction"] }) : null;
 
   const fileCounts = new Map<string, number>();
   for (const f of fileRows) { const p = String(f.payload?.path ?? ""); if (p) fileCounts.set(p, (fileCounts.get(p) ?? 0) + 1); }

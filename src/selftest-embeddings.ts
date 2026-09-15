@@ -359,7 +359,7 @@ ok("fixtures: 16 events in 3 sessions across 2 repos, including a whitespace-onl
   fs.utimesSync(f, T(125), T(125));
   await helperOnce(base, { roots, now: T(126), push: false, log: (l) => lines.push(l) });
   assert.equal(providerCalls.length, 0, "no embeddings config: the helper never calls a provider");
-  assert.equal((await pool.query<{ n: number }>(`select count(*)::int as n from cont_events ev left join cont_event_embeddings e on e.event_id = ev.id where ev.session_id = $1 and e.event_id is null`, [sidH])).rows[0].n, 1, "the new event stays pending for a backfill");
+  assert.equal((await pool.query<{ n: number }>(`select count(*)::int as n from cont_events ev left join cont_event_embeddings e on e.event_id = ev.id where ev.session_id = $1 and ev.kind = 'assistant.message' and e.event_id is null`, [sidH])).rows[0].n, 1, "the new event stays pending for a backfill");
   ok("daemon: a pass embeds the events it uploaded in one batch and logs 'embedded N events'; quiet passes and unconfigured helpers call no provider");
 }
 
