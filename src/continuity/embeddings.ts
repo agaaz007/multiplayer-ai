@@ -64,7 +64,7 @@ export class EmbedError extends Error {
 // ---------- config ----------
 
 export function embeddingsConfigured(cfg: Config): boolean {
-  return cfg.continuity?.embeddings?.provider === "openai";
+  return cfg?.continuity?.embeddings?.provider === "openai";
 }
 
 function apiKeyFor(e: EmbeddingsConfig): string | undefined {
@@ -72,7 +72,7 @@ function apiKeyFor(e: EmbeddingsConfig): string | undefined {
 }
 
 export function embeddingSettings(cfg: Config): ResolvedEmbeddings | null {
-  const e = cfg.continuity?.embeddings;
+  const e = cfg?.continuity?.embeddings;
   if (!e || e.provider !== "openai") return null;
   const dimensions = Number(e.dimensions ?? EMBED_DEFAULTS.dimensions);
   if (!Number.isInteger(dimensions) || dimensions < 1) throw new Error(`continuity.embeddings.dimensions must be a positive integer, got ${String(e.dimensions)}`);
@@ -161,7 +161,7 @@ async function openaiEmbed(cfg: EmbeddingsConfig, s: ResolvedEmbeddings, inputs:
 /** The embed function for this config: the test override when set, else OpenAI over fetch. */
 export function embedProvider(cfg: Config): EmbedFn {
   if (override) return override;
-  const e = cfg.continuity?.embeddings;
+  const e = cfg?.continuity?.embeddings;
   const s = embeddingSettings(cfg);
   if (!e || !s) throw new EmbedError("embeddings not configured", { permanent: true });
   return (inputs) => openaiEmbed(e, s, inputs);
