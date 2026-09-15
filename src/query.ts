@@ -48,7 +48,20 @@ export interface SearchOpts {
   tags?: string[];
   scope?: ScopeQuery;
   asOf?: string;
+  /** Only objects recorded under this author. */
+  author?: string;
 }
+
+/**
+ * Authority tier of a ledger object, the first sort key of `search`.
+ *   3 = stable and current: not superseded, or the accepted head of an unresolved conflict
+ *   2 = draft: recorded by a person or the transcript fallback, never in force
+ *   0 = superseded or deprecated: shown only with includeSuperseded
+ */
+export type ObjectAuthorityTier = 3 | 2 | 0;
+
+/** `current` · `draft` · `superseded by <id>` · `rejected` (a discarded draft) · `deprecated` (retired without a successor). */
+export type ObjectAuthorityLabel = "current" | "draft" | `superseded by ${string}` | "rejected" | "deprecated";
 
 export type AuthoritySearchHit = LedgerObject & {
   score: number;
@@ -56,6 +69,8 @@ export type AuthoritySearchHit = LedgerObject & {
   authority_warnings: string[];
   authority_current_ids: string[];
   scope_status: "known" | "unknown";
+  authority_tier: ObjectAuthorityTier;
+  authority_label: ObjectAuthorityLabel;
 };
 
 /** Discover a definition family before resolving its time intervals; partial applicability must stay visible as a warning. */
@@ -67,23 +82,51 @@ export function matchesDiscoveryScope(o: LedgerObject, scope?: ScopeQuery): bool
   return matchesAnalysisScope(o,scope);
 }
 
+/** Tier and label from the object's own lifecycle plus its accepted resolution; the label always names what displaced it. */
+export function objectAuthority(o: LedgerObject, authority: { status: string; current: { id: string }[] }): { tier: ObjectAuthorityTier; label: ObjectAuthorityLabel } {
+  if (o.superseded_by) return { tier: 0, label: `superseded by ${o.superseded_by}` };
+  if (o.status === "deprecated") return { tier: 0, label: o.fields.discarded ? "rejected" : "deprecated" };
+  if (o.status === "draft") return { tier: 2, label: "draft" };
+  // stable: current unless the accepted resolution names other heads and not this one
+  if (authority.status === "conflict" && !authority.current.some((c) => c.id === o.id)) {
+    const head = authority.current[0]?.id;
+    return head ? { tier: 0, label: `superseded by ${head}` } : { tier: 0, label: "deprecated" };
+  }
+  return { tier: 3, label: "current" };
+}
+
+/** One line naming what the search covered; the first line of every result so a reader never guesses the scope. */
+export function objectScopeLine(opts: SearchOpts): string {
+  return `scope: ledger objects, all repos · types ${opts.types?.length ? opts.types.join(",") : "any"} · author ${opts.author ?? "any"} · as of ${opts.asOf ?? "now"} · ${opts.includeSuperseded ? "including superseded and drafts" : "current only"} · lexical only`;
+}
+
+/**
+ * Ranking: authority tier desc, then created desc, then lexical score desc. A newer current object
+ * outranks an older one whatever their scores; score only breaks ties inside one tier and instant.
+ */
+export function compareHits(a: AuthoritySearchHit, b: AuthoritySearchHit): number {
+  return b.authority_tier - a.authority_tier || (a.created < b.created ? 1 : a.created > b.created ? -1 : 0) || b.score - a.score || a.id.localeCompare(b.id);
+}
+
 export function search(cfg: Config, query: string, opts: SearchOpts = {}): AuthoritySearchHit[] {
   const source = loadAll(cfg, TYPES);
   const all = opts.includeSuperseded ? source : projectAuthorityObjects(source, { asOf: opts.asOf, scope: opts.scope });
   const annotated = (o: LedgerObject): AuthoritySearchHit => {
     const authority = resolveAccepted(source, o.id, { asOf: opts.asOf, scope: opts.scope });
+    const { tier, label } = objectAuthority(o, authority);
     return { ...o, score: score(query, o), authority_status: authority.status, authority_warnings: authority.warnings,
-      authority_current_ids: authority.current.map(c => c.id), scope_status: authority.scope_status };
+      authority_current_ids: authority.current.map(c => c.id), scope_status: authority.scope_status, authority_tier: tier, authority_label: label };
   };
   const ranked = all
     .filter(o => !opts.types || opts.types.includes(o.type))
+    .filter(o => !opts.author || o.author === opts.author)
     .filter(o => matchesDiscoveryScope(o, opts.scope))
     .filter((o) => !opts.tags?.length || opts.tags.some((t) => o.tags.includes(t)))
     .map(annotated)
     .filter(o => opts.includeSuperseded || o.status==='stable' || (o.authority_status==='conflict' && o.authority_current_ids.includes(o.id)) ||
       (o.type==='definition' && opts.scope?.window && o.authority_status==='unavailable' && o.status!=='draft' && o.previous_status!=='draft' && o.fields.capture_method!=='transcript_fallback'))
     .filter((o) => o.score > 0)
-    .sort((a, b) => b.score - a.score || (a.created < b.created ? 1 : -1));
+    .sort(compareHits);
   const selected = ranked.slice(0, opts.limit ?? 10);
   const ids = new Set(selected.map(o => o.id));
   // A result limit may trim relevance, never one side of an unresolved accepted conflict.
@@ -97,9 +140,9 @@ export function search(cfg: Config, query: string, opts: SearchOpts = {}): Autho
   return selected;
 }
 
-/** Findings that answer a similar question. This is the rework-killer. */
+/** Findings that answer a similar question. This is the rework-killer. Relevance-ordered: a recent weak match must not crowd out the near-duplicate. */
 export function similarFindings(cfg: Config, question: string, limit = 5) {
-  return search(cfg, question, { types: ["finding"], limit }).filter((o) => o.score >= 0.5);
+  return search(cfg, question, { types: ["finding"], limit: 50 }).filter((o) => o.score >= 0.5).sort((a, b) => b.score - a.score || compareHits(a, b)).slice(0, limit);
 }
 
 // ---------- rendering ----------
