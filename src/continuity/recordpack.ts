@@ -10,9 +10,31 @@ import { eventLine, PREVIEW_MAX_CHARS } from "./evidence.js";
 import { defaultRemoteBranch, repoIdentity, repoRoot } from "./shadow.js";
 import { readProgress } from "./classify.js";
 import { DECISION_RULE, ledgerRefStatuses, renderDecisionsInForce, stateLine, writtenLedgerIds, type LedgerRefInput, type LedgerRefStatus } from "./packsections.js";
+import { artifactIds, parseAsOf, pendingOperationsAsOf, recordEvidenceCountAsOf, recordStateAsOf, recordVisitDelta, renderVisitDelta, spanFetch, type PackDetail, type VisitDelta } from "./packlean.js";
 export { acceptanceLabel, evidenceRefs, stateLine, type LedgerRefStatus } from "./packsections.js";
+export { type PackDetail, type VisitDelta } from "./packlean.js";
 
 /**
+ * SIGNATURE (for mcp.ts / cli.ts):
+ *
+ *   buildRecordPack(cfg: Config, pool: pg.Pool, recordId: string, opts: RecordPackOpts): Promise<RecordPack>
+ *
+ *   RecordPackOpts = {
+ *     mode: "continue" | "inspect";      // continue claims the thread of the latest contributing session
+ *     author: string;                    // the resuming author (claim holder)
+ *     sessionId?: string;                // the resuming session; synthesized if absent
+ *     repoPath?: string;                 // local checkout, for the bootstrap rebase target
+ *     budgetTokens?: number;             // default 6000; shrinks sections, never switches detail
+ *     detail?: "lean" | "evidence";      // default "lean": state, decisions, pending, changed-since, bootstrap, drill-down references;
+ *                                        // "evidence": inline event lines, session summary text, files, unassigned spans (the pre-2026-09-15 pack)
+ *     asOf?: string;                     // ISO time: state and events only up to that instant (links and sessions are not filtered)
+ *     viewer?: string;                   // the requesting author (mcp passes cfg.author): drives "Changed since your last visit"
+ *     now?: Date;
+ *   }
+ *
+ *   MCP wiring: ledger_record_get / ledger_resume(record_id) pass { detail, asOf: as_of, viewer: cfg.author }.
+ *   The pack's `text` is what the agent reads; `detail`, `as_of`, `changed_since` are on the returned object.
+ *
  * The record pack (spec §13a, "Retrieval by record"): the active context for
  * one work record, assembled from the shared evidence layer and the record's
  * own state projection. A record accumulates from many sessions and teammates,
@@ -24,6 +46,16 @@ export { acceptanceLabel, evidenceRefs, stateLine, type LedgerRefStatus } from "
  *
  * Threads stay the physical unit: a claim, when one is acquired, is on the
  * thread of the most recent contributing session; a non-code record has none.
+ *
+ * Lean mode (default since 2026-09-15; the teamwork-v3 bake-off measured that a
+ * pack full of raw event lines sent successors to pull events with 12,000-char
+ * previews and compact six or seven times): the retrieval unit is a reference,
+ * not an event. The lean pack is ~600-900 tokens for a typical record and
+ * contains, in order: header + honesty, State (confirmed first, proposed
+ * summarised as count + ids when more than LEAN_PROPOSED_FULL per kind),
+ * Decisions in force (compact), Pending / unknown operations, Changed since
+ * your last visit, Bootstrap, Drill down (one ledger_events call per linked
+ * span, the last error, artifacts, evidence search). Nothing inline.
  */
 
 type Q = pg.Pool | pg.PoolClient;
@@ -54,6 +86,11 @@ const STATE_ORDER: { key: StateKey; label: string; hard: boolean }[] = [
 ];
 
 export type RecordPackMode = "continue" | "inspect";
+export type RecordPackDetail = PackDetail;
+/** In lean mode, a kind's proposed items are listed in full up to this many; more become a count plus ids. */
+export const LEAN_PROPOSED_FULL = 3;
+/** Lean packs above this size shrink (state caps, delta detail); each drop is named. */
+export const LEAN_DEFAULT_BUDGET = 1200;
 
 export interface RecordPackOpts {
   author: string;
@@ -64,6 +101,12 @@ export interface RecordPackOpts {
   repoPath?: string;
   budgetTokens?: number;
   now?: Date;
+  /** "lean" (default): references, no inline evidence. "evidence": inline event lines, summary text, files, unassigned spans. */
+  detail?: RecordPackDetail;
+  /** ISO time; state updates and events after this instant are hidden (links and contributing sessions are not filtered) */
+  asOf?: string;
+  /** the requesting author; "Changed since your last visit" is computed from their most recent contributing session */
+  viewer?: string;
 }
 
 export interface ContributingSession {
@@ -100,6 +143,14 @@ export interface RecordPack {
   sources: RecordSources;
   omitted: string[];
   text: string;
+  /** which shape was rendered */
+  detail: RecordPackDetail;
+  /** the as-of instant applied to state and events, ISO; null when the pack is current */
+  as_of: string | null;
+  /** what happened after the viewer's last contributing session; totals on a first visit; null without a viewer */
+  changed_since: VisitDelta | null;
+  /** the exact fetches the lean pack points at: one per linked span, plus the last error and the compaction summary */
+  drill_down: string[];
 }
 
 const approxTokens = (s: string) => Math.ceil(s.length / 4);

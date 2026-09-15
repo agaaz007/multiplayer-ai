@@ -507,7 +507,12 @@ export async function vectorCandidates(
     const where: string[] = [];
     if (f.repo === null) where.push(`s.repo is null`);
     else if (f.repo) { params.push(f.repo); where.push(`s.repo = $${params.length}`); }
-    if (f.session_id) { params.push((await resolveSessionId(pool, f.session_id)).id); where.push(`ev.session_id = $${params.length}`); }
+    if (f.session_id) {
+      // an unknown session is an empty candidate set, not a logged failure
+      let sid: string;
+      try { sid = (await resolveSessionId(pool, f.session_id)).id; } catch { return []; }
+      params.push(sid); where.push(`ev.session_id = $${params.length}`);
+    }
     if (f.record_id) { params.push(f.record_id); where.push(`exists (select 1 from cont_record_links l where l.record_id = $${params.length} and l.session_id = ev.session_id and ev.seq between l.from_seq and l.to_seq)`); }
     if (f.kinds?.length) { params.push(f.kinds); where.push(`ev.kind = any($${params.length})`); }
     if (f.sinceHours != null) {
