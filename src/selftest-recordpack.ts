@@ -390,7 +390,9 @@ for (const t of [lean.text, pack.text]) {
   ]);
   assert.ok(pack.text.includes(`## Bootstrap\nsnapshot from session ${R8} (rachit, Codex)\n\`\`\`\ngit fetch origin ${WIP_REF}:${WIP_REF}\n`), "bootstrap block names the snapshot's session");
   assert.ok(pack.text.includes("2. Check out the snapshot into a fresh worktree"), "code contract");
-  const copyPack = await buildRecordPack(cfg, pool, recCopy.id, { mode: "inspect", author: "agaaz", now: T(120) });
+  const copyLean = await buildRecordPack(cfg, pool, recCopy.id, { mode: "inspect", author: "agaaz", now: T(120) });
+  assert.ok(copyLean.text.includes("## Bootstrap\nnon-code record; no worktree") && copyLean.text.includes("Non-code record: no code snapshot applies.") && !copyLean.text.includes("First turn contract"), "lean non-code bootstrap and honesty");
+  const copyPack = await buildRecordPack(cfg, pool, recCopy.id, { mode: "inspect", author: "agaaz", now: T(120), detail: "evidence" });
   assert.deepEqual(copyPack.bootstrap, []);
   assert.ok(copyPack.text.includes("## Bootstrap\nnon-code record; no worktree"), "non-code bootstrap");
   assert.ok(copyPack.text.includes(`record ${recCopy.id} · writing · non-code work · status open · created by rachit`), "non-code header");
@@ -429,7 +431,7 @@ for (const t of [lean.text, pack.text]) {
 
 // ---------- 9. budget 1500 keeps honesty, decisions, pending, bootstrap; drops named ----------
 {
-  const tight = await buildRecordPack(cfg, pool, recAttr.id, { mode: "inspect", author: "agaaz", now: T(120), budgetTokens: 1500 });
+  const tight = await buildRecordPack(cfg, pool, recAttr.id, { mode: "inspect", author: "agaaz", now: T(120), budgetTokens: 1500, detail: "evidence" });
   assert.ok(approxTokens(pack.text) <= 6000, `default pack within 6000 tokens: ${approxTokens(pack.text)}`);
   assert.ok(tight.text.length < pack.text.length, `tight pack is smaller: ${tight.text.length} < ${pack.text.length}`);
   for (const must of ["## Honesty", "Sources: 2 instructions", `Code saved through ${fmt(T(69))}`, "### Decisions (1)", "- [confirmed by agaaz; how it was accepted was not recorded] Use ClickHouse paywall_resolved", "## Pending / unknown operations (1)", "seq 7 Bash: psql analytics", "## Bootstrap", `git fetch origin ${WIP_REF}:${WIP_REF}`, "## First turn contract", `NOT IN FORCE (1): ${dec1.id} → ${dec2.id}`, "## Omitted for budget or unavailable"]) {
@@ -444,7 +446,11 @@ for (const t of [lean.text, pack.text]) {
   assert.ok(tight.evidence_summary.shown.length <= 3 && tight.evidence_summary.omitted!.count >= 10, "evidence head/tail shrink");
   assert.equal(tight.session_summary!.text, codexSummary, "JSON keeps the summary");
   assert.equal(tight.state.hypotheses.length, 2, "JSON keeps the full state");
-  ok(`budget 1500: honesty, snapshot, decisions, pending op, bootstrap, contract, superseded flag survive (${approxTokens(tight.text)} tokens vs ${approxTokens(pack.text)}); summary text, evidence tail, and soft state kinds shrink with each drop named`);
+  // a tight lean pack keeps the same guarantees without ever inlining evidence
+  const tightLean = await buildRecordPack(cfg, pool, recAttr.id, { mode: "inspect", author: "agaaz", now: T(120), budgetTokens: 1500 });
+  for (const must of ["### Decisions (1)", "- [confirmed by agaaz; how it was accepted was not recorded] Use ClickHouse paywall_resolved", "## Pending / unknown operations (1)", "seq 7 Bash: psql analytics", "## Bootstrap", `git fetch origin ${WIP_REF}:${WIP_REF}`, "## Drill down", `[SUPERSEDED by ${dec2.id}, which is in force]`]) assert.ok(tightLean.text.includes(must), `tight lean pack keeps: ${must}`);
+  assert.ok(approxTokens(tightLean.text) <= 1500 && !tightLean.text.includes(codexSummary), `tight lean pack within budget: ${approxTokens(tightLean.text)}`);
+  ok(`budget 1500 (evidence detail): honesty, snapshot, decisions, pending op, bootstrap, contract, superseded flag survive (${approxTokens(tight.text)} tokens vs ${approxTokens(pack.text)}); summary text, evidence tail, and soft state kinds shrink with each drop named; the lean pack keeps the same guarantees at ${approxTokens(tightLean.text)} tokens`);
 }
 
 // ---------- 11. listRecordSummaries counts and recordLine ----------
@@ -590,7 +596,7 @@ const call = async (name: string, args: Record<string, unknown>) => {
 
 // ---------- 13. acceptance tests from spec §13a, asserted explicitly ----------
 {
-  const fresh = await buildRecordPack(cfg, pool, recAttr.id, { mode: "inspect", author: "agaaz", now: T(130) });
+  const fresh = await buildRecordPack(cfg, pool, recAttr.id, { mode: "inspect", author: "agaaz", now: T(130), detail: "evidence" });
   // 28: two sessions by different authors contribute to one record
   assert.deepEqual(fresh.contributing_sessions.map((s) => s.session_id).sort(), [sidA, sidR].sort());
   assert.deepEqual(new Set(fresh.contributing_sessions.map((s) => s.author)), new Set(["agaaz", "rachit"]));
@@ -651,13 +657,20 @@ const call = async (name: string, args: Record<string, unknown>) => {
   await R.linkSpan(pool,{record_id:rec.id,session_id:sidFresh,from_seq:1,to_seq:1,source:'explicit',created_by:'agaaz'});
   await R.addStateUpdate(pool,{record_id:rec.id,kind:'decision',text:'ACCEPTED DENOMINATOR CONSTRAINT',created_by:'agaaz',status:'confirmed',evidence:[{session_id:sidLong,seq:1}]});
   for(let i=0;i<12;i++) await R.addStateUpdate(pool,{record_id:rec.id,kind:'decision',text:`newer unsupported proposal ${i}`,created_by:'rachit'});
-  const longPack = await buildRecordPack(cfg,pool,rec.id,{mode:'inspect',author:'agaaz',budgetTokens:20000});
+  const longLean = await buildRecordPack(cfg,pool,rec.id,{mode:'inspect',author:'agaaz',budgetTokens:20000});
+  assert.equal(longLean.detail,'lean','a 20000 budget alone does not switch to evidence');
+  assert.ok(longLean.text.includes('ACCEPTED DENOMINATOR CONSTRAINT') && longLean.text.includes('- [PROPOSED] 12 proposed, accepted by nobody: ') && !longLean.text.includes('newer unsupported proposal 0'), 'lean: the accepted constraint in full, 12 proposals as a count plus ids');
+  assert.ok(longLean.text.includes(`Full text of proposed 12 decisions: ledger_record_get(record_id: "${rec.id}", detail: "evidence")`), longLean.text);
+  assert.ok(longLean.text.includes('- ledger_events(session_id: "reuse-long-history", after_seq: 0, limit: 200) then page with after_seq up to 2105  · agaaz/Codex'), 'a span longer than the tool limit says how to page');
+  assert.ok(longLean.pending_operations.some(p=>p.call_id==='old-pending-export') && longLean.text.includes('seq 2 export: export denominator evidence'), 'lean keeps the old pending operation');
+  assert.ok(!/unrelated chatter/.test(longLean.text) && !/ACTUAL LATEST EVIDENCE/.test(longLean.text), 'lean inlines none of the 2,105 events');
+  const longPack = await buildRecordPack(cfg,pool,rec.id,{mode:'inspect',author:'agaaz',budgetTokens:20000,detail:'evidence'});
   assert.equal(longPack.evidence_summary.total,2106);
   assert.ok(longPack.evidence_summary.shown.some(e=>e.seq===2105 && e.session_id===sidLong),'true tail after oldest 2000');
   assert.ok(longPack.pending_operations.some(p=>p.session_id===sidLong && p.call_id==='old-pending-export'),'older contributor pending work retained');
   assert.ok(longPack.text.includes('ACCEPTED DENOMINATOR CONSTRAINT'),'proposals cannot crowd out accepted constraints');
   assert.equal(longPack.evidence_summary.omitted!.count,2106-longPack.evidence_summary.shown.length);
-  ok('full-history count and true tail, earlier pending operation, accepted constraint under proposal flood');
+  ok('full-history count and true tail, earlier pending operation, accepted constraint under proposal flood; lean summarises the 12 proposals as ids and pages the 2,105-event span');
 }
 
 // ---------- rejecting a proposed decision settles its checkpoint prompt ----------
@@ -683,13 +696,15 @@ const call = async (name: string, args: Record<string, unknown>) => {
   ], null, null);
   const started = await call("ledger_record_start", { kind: "other", title: "Readout source decision", link: { session_id: sidS, from_seq: 1, to_seq: 2 }, ledger_refs: ["dec-20260101-nope-zzzz"] });
   const recId = started.match(/^Record ([0-9a-f-]{36})/)![1];
-  let p = await buildRecordPack(cfg, pool, recId, { mode: "inspect", author: "agaaz", now: T(130) });
+  let p = await buildRecordPack(cfg, pool, recId, { mode: "inspect", author: "agaaz", now: T(130), detail: "evidence" });
   assert.deepEqual(p.ledger_refs.map((r) => [r.id, r.source, r.origin?.seq ?? null, r.status]), [["dec-20260101-nope-zzzz", "explicit", null, null], [dec1.id, "saved", 2, "deprecated"]], "the explicit ref, then the id saved inside the linked span; seq 3 is outside it");
+  const pLean = await buildRecordPack(cfg, pool, recId, { mode: "inspect", author: "agaaz", now: T(130) });
+  assert.ok(pLean.text.includes(`- [SUPERSEDED by ${dec2.id}, which is in force] decision ${dec1.id} · saved in session ${sidS.slice(0, 8)} seq 2\n`) && pLean.text.includes(`- [NOT FOUND] dec-20260101-nope-zzzz · linked explicitly (ledger_get "dec-20260101-nope-zzzz")`), "lean keeps the status tags and the save origin");
   assert.ok(p.text.includes(`- [SUPERSEDED by ${dec2.id}, which is in force] decision ${dec1.id}: ClickHouse is the source of truth for the September paywall test (agaaz, ${TODAY}) · saved in session ${sidS.slice(0, 8)} seq 2`), p.text);
   assert.ok(p.text.indexOf(`decision ${dec1.id}`) < p.text.indexOf("[NOT FOUND] dec-20260101-nope-zzzz"), "found decisions before missing ids");
   const linked = await call("ledger_record_link", { record_id: recId, session_id: sidS, from_seq: 3, to_seq: 3, ledger_refs: [dec2.id, "dec-20260101-nope-zzzz"] });
   assert.ok(linked.endsWith(`Ledger refs now: dec-20260101-nope-zzzz, ${dec2.id}.`), linked);
-  p = await buildRecordPack(cfg, pool, recId, { mode: "inspect", author: "agaaz", now: T(130) });
+  p = await buildRecordPack(cfg, pool, recId, { mode: "inspect", author: "agaaz", now: T(130), detail: "evidence" });
   assert.deepEqual(p.ledger_refs.map((r) => [r.id, r.source, r.status]), [["dec-20260101-nope-zzzz", "explicit", null], [dec2.id, "explicit", "stable"], [dec1.id, "saved", "deprecated"]], "an explicit ref wins over the same id saved in a span");
   assert.ok(p.text.includes(`- [in force] decision ${dec2.id}: `) && p.text.includes("Captured from 2 Ledger save results in 1 session and 2 explicit links."), p.text);
   assert.ok(p.text.includes(`NOT IN FORCE (2): ${dec1.id} → ${dec2.id}; dec-20260101-nope-zzzz.`));
