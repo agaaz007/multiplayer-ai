@@ -69,7 +69,8 @@ const USAGE = `ledger — shared definitions, findings, changes, decisions for y
   ledger thread show|close|title <id>
   ledger records [--all] [--kind k] [--status s] [--q text] [--hours N] [--limit N]
                                          open work records (this repo by default): kind · title · repo · updated · sessions · proposed/confirmed · id
-  ledger record show <id> [--budget N]   record pack without claiming: state (PROPOSED flagged), evidence, pending ops, unassigned, bootstrap
+  ledger record show <id> [--budget N] [--detail lean|evidence]
+                                         record pack without claiming: lean by default (state, decisions in force, pending ops, changed since your last visit, drill-down refs); --detail evidence inlines event lines
   ledger record start <kind> <title…> [--goal g] [--link <session>:<from>:<to>]
                                          new record (repo from cwd when inside a git repo, else non-code)
   ledger record link <id> <session> <from> <to> [--note n]
@@ -503,14 +504,14 @@ async function main() {
         const mode = (flag(args, "--mode") ?? "continue") as "continue" | "fork" | "inspect";
         if (recordId) {
           if (mode === "fork") throw new Error("--mode fork applies to threads; use continue or inspect with --record");
-          const pack = await buildRecordPack(cfg, getPool(cfg), recordId, { mode, author: cfg.author, sessionId: `cli:${cfg.author}:${Date.now()}`, repoPath: process.cwd() });
+          const pack = await buildRecordPack(cfg, getPool(cfg), recordId, { mode, author: cfg.author, sessionId: `cli:${cfg.author}:${Date.now()}`, repoPath: process.cwd(), viewer: cfg.author, detail: (flag(args, "--detail") as "lean" | "evidence" | undefined) });
           console.log(pack.text);
           await closePools();
           return;
         }
         const id = args[0];
         if (!id || id.startsWith("--")) throw new Error("usage: ledger resume <thread-id> [--mode continue|fork|inspect] [--checkout <dir>]  |  ledger resume --record <id> [--mode continue|inspect]");
-        const pack = await buildResumePack(cfg, getPool(cfg), id, { mode, author: cfg.author, sessionId: `cli:${cfg.author}:${Date.now()}`, repoPath: process.cwd() });
+        const pack = await buildResumePack(cfg, getPool(cfg), id, { mode, author: cfg.author, sessionId: `cli:${cfg.author}:${Date.now()}`, repoPath: process.cwd(), viewer: cfg.author, detail: (flag(args, "--detail") as "lean" | "evidence" | undefined) });
         console.log(pack.text);
         const dest = flag(args, "--checkout");
         if (dest && pack.checkpoint?.wip_ref && pack.checkpoint?.wip_commit) {
@@ -528,7 +529,7 @@ async function main() {
         const pool = getPool(cfg);
         const t = await getThread(pool, id);
         if (!t) throw new Error(`not found: ${id}`);
-        if (sub === "show") console.log((await buildResumePack(cfg, pool, id, { mode: "inspect", author: cfg.author, repoPath: process.cwd(), budgetTokens: 12000 })).text);
+        if (sub === "show") console.log((await buildResumePack(cfg, pool, id, { mode: "inspect", author: cfg.author, repoPath: process.cwd(), budgetTokens: 12000, viewer: cfg.author, detail: (flag(args, "--detail") as "lean" | "evidence" | undefined) })).text);
         else if (sub === "close") { await updateThread(pool, id, { status: "done" }); console.log(`closed ${id}`); }
         else if (sub === "title") { await updateThread(pool, id, { title: flag(args, "--title") ?? t.title }); console.log("updated"); }
         else throw new Error("usage: ledger thread show|close|title <id>");
@@ -607,7 +608,7 @@ async function workRecordCommand(args: string[]): Promise<void> {
   const usage = `usage: ledger record <definition|finding|change|decision> < fields.json  |  ledger record show <id> [--budget N] | start <kind> <title…> [--goal g] [--link <session>:<from>:<to>] | link <id> <session> <from> <to> [--note n] | propose <id> <kind> <text…> --evidence <session>:<seq>[,…] [--supersedes <update>] | confirm <update-id> | reject <update-id> --reason "..."`;
   if (sub === "show") {
     if (!pos[1]) throw new Error(usage);
-    console.log((await buildRecordPack(cfg, pool, pos[1], { mode: "inspect", author: cfg.author, repoPath: process.cwd(), budgetTokens: Number(flag(args, "--budget") ?? 12000) })).text);
+    console.log((await buildRecordPack(cfg, pool, pos[1], { mode: "inspect", author: cfg.author, repoPath: process.cwd(), budgetTokens: Number(flag(args, "--budget") ?? 12000), viewer: cfg.author, detail: (flag(args, "--detail") as "lean" | "evidence" | undefined) })).text);
   } else if (sub === "start") {
     const [, kind, ...title] = pos;
     if (!kind || !title.length) throw new Error(usage);
