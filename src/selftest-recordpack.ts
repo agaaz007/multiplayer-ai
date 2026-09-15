@@ -197,7 +197,8 @@ for (const t of [lean.text, pack.text]) {
   assert.ok(!t.includes("## Evidence across sessions") && !t.includes("### Session summary") && !t.includes("### Files touched") && !t.includes("## Unassigned spans") && !t.includes("## First turn contract"), "evidence-detail sections absent");
   assert.ok(!/ · \d+ · \d\d:\d\d · (instruction\.added|assistant\.message|tool\.requested|tool\.finished|file\.changed|compaction) · /.test(t), "no evidence line is inlined");
   assert.ok(!t.includes(codexSummary) && !t.includes("Attribution: compare Mixpanel") && !t.includes("Draft headline") && !t.includes("FATAL"), "no event text (instructions, summary, error output) is inlined");
-  assert.ok(approxTokens(t) < LEAN_TARGET_TOKENS, `lean pack under ${LEAN_TARGET_TOKENS} tokens: ${approxTokens(t)}`);
+  assert.ok(approxTokens(t) < 1200 && 1200 <= LEAN_TARGET_TOKENS, `lean pack under 1200 tokens at level 0: ${approxTokens(t)}`);
+  assert.ok(!lean.omitted.some((o) => /for budget/.test(o)), `no budget shrink was needed: ${lean.omitted.join(" | ")}`);
   assert.ok(t.length < pack.text.length / 1.5, `lean is much smaller than evidence: ${t.length} vs ${pack.text.length}`);
   assert.deepEqual(lean.evidence_summary, { total: 13, shown: [], omitted: { count: 13, fetch: [`ledger_events(session_id: "${sidA}", after_seq: 0, before_seq: 11)`, `ledger_events(session_id: "${sidR}", after_seq: 0, before_seq: 8)`] } }, "lean shows no evidence and names the per-span fetches");
   // honesty, compact: sessions on one line, the snapshot, the decision rule, no full contract
@@ -277,19 +278,21 @@ for (const t of [lean.text, pack.text]) {
   assert.ok(earlyLean.text.includes("## Drill down (7 content events in 2 spans; references only)") && !earlyLean.text.includes("compaction summary"), "lean counts and pointers are as-of too");
   assert.ok(earlyLean.changed_since?.first_visit === false && earlyLean.changed_since?.events.length === 0, "the delta is bounded by as_of as well");
   // a later update is hidden by an as_of before it, and a confirmation after as_of shows the update as it was then: proposed
+  const updatedBefore = (await R.getRecord(pool, recAttr.id))!.updated_at;
   const late = await R.addStateUpdate(pool, { record_id: recAttr.id, kind: "note", text: "LATER NOTE that as_of must hide", evidence: [{ session_id: sidR, seq: 4 }], created_by: "rachit" });
   await pool.query(`update cont_state_updates set created_at = now() + interval '1 hour' where id = $1`, [late.id]);
   await pool.query(`update cont_state_updates set confirmed_at = now() + interval '1 hour' where id = $1`, [d1.id]);
   const cut = new Date(Date.now() + 30 * 60_000).toISOString();
   const now2 = await buildRecordPack(cfg, pool, recAttr.id, { mode: "inspect", author: "agaaz", now: T(120) });
   const asOf = await buildRecordPack(cfg, pool, recAttr.id, { mode: "inspect", author: "agaaz", now: T(120), asOf: cut });
-  assert.ok(now2.text.includes("LATER NOTE that as_of must hide") && now2.state.notes.length === 1, "without as_of the future-dated note is live");
+  assert.ok(now2.text.includes("LATER NOTE that as_of must hide") && now2.state.notes.length === 1 && now2.text.includes("### Notes (1)"), "without as_of the future-dated note is live");
   assert.ok(!asOf.text.includes("LATER NOTE") && asOf.state.notes.length === 0, "as_of hides the update created after it");
   assert.ok(now2.text.includes("- [confirmed by agaaz; how it was accepted was not recorded] Use ClickHouse") && asOf.text.includes("- [PROPOSED] Use ClickHouse paywall_resolved as the source of truth"), "a confirmation after as_of is undone: the decision shows as proposed");
   assert.deepEqual({ p: asOf.state.proposed_count, c: asOf.state.confirmed_count }, { p: 5, c: 0 });
   await assert.rejects(buildRecordPack(cfg, pool, recAttr.id, { mode: "inspect", author: "agaaz", asOf: "not-a-time" }), /as_of is not a time/);
   await pool.query(`update cont_state_updates set confirmed_at = created_at where id = $1`, [d1.id]);
   await pool.query(`delete from cont_state_updates where id = $1`, [late.id]);
+  await pool.query(`update cont_records set updated_at = $2 where id = $1`, [recAttr.id, updatedBefore]);
   ok("as_of: at T(20) the pack has agaaz's 7 events, no state, no pending call, one file; a future-dated update is hidden and a later confirmation is undone; an invalid time is an error");
 }
 
@@ -554,7 +557,7 @@ const call = async (name: string, args: Record<string, unknown>) => {
   const list = await call("ledger_records", {});
   assert.ok(list.includes(recAttr.id) && list.includes(recCopy.id) && list.includes("· Attribution investigation · demo ·"), list);
   assert.ok((await call("ledger_records", { kind: "writing" })).includes(recCopy.id) && !(await call("ledger_records", { kind: "writing" })).includes(recAttr.id));
-  assert.equal(await call("ledger_records", { q: "zzz-nothing" }), "No records match.");
+  assert.match(await call("ledger_records", { q: "zzz-nothing" }), /(^|\n)No records match\.$/, "a scope line may precede the empty result");
   const get = await call("ledger_record_get", { record_id: recAttr.id });
   assert.ok(get.startsWith("# Record pack: Attribution investigation\n") && get.includes("[PROPOSED]") && get.includes("## Bootstrap"), "ledger_record_get returns the pack");
   assert.equal(await S.getClaim(pool, thread.id), null, "ledger_record_get does not claim");

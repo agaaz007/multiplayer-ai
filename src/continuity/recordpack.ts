@@ -89,8 +89,8 @@ export type RecordPackMode = "continue" | "inspect";
 export type RecordPackDetail = PackDetail;
 /** In lean mode, a kind's proposed items are listed in full up to this many; more become a count plus ids. */
 export const LEAN_PROPOSED_FULL = 3;
-/** A lean pack above min(budget, this) shrinks level by level (boilerplate, then proposed ids, then caps); each drop is named. */
-export const LEAN_TARGET_TOKENS = 1200;
+/** A lean pack above min(budget, this) shrinks level by level (review detail, then proposed ids, then caps); each drop is named. A typical record renders at level 0 in 600-1,200 tokens. */
+export const LEAN_TARGET_TOKENS = 1500;
 /** The decision rule as the lean pack states it (one sentence in the honesty block; the full DECISION_RULE is in the evidence pack's contract). */
 export const LEAN_DECISION_RULE = "Act only on [in force] Ledger objects and [accepted by <person>] record decisions; superseded, draft, conflicting, [PROPOSED] and agent-confirmed items were not decided by a person.";
 
