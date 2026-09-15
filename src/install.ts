@@ -40,6 +40,65 @@ export function ledgerCommand(...args: string[]): string {
   return [q(NODE), q(CLI), ...args].join(" ");
 }
 
+// ---------- where does the installed cli.js live? ----------
+
+/**
+ * Every installed command above is an absolute path to *this* cli.js. When this file sits inside a
+ * git worktree (a Conductor workspace, a clone), `npm run build` there silently redeploys to every
+ * hook, the MCP server and the launchd helper on the machine. On 2026-09-13 that forced safety-fix
+ * builds into a side directory. Installers therefore refuse a worktree source and point at
+ * `ledger deploy`, which copies the build into a versioned directory under ~/.ledger/bin.
+ */
+export const RELEASES_DIR = () => path.join(ledgerHome(), "bin", "releases");
+
+/** The nearest ancestor of `file` that holds a `.git` entry (directory or worktree file), or null. */
+export function gitWorktreeOf(file: string): string | null {
+  let dir = path.dirname(path.resolve(file));
+  for (;;) {
+    if (fs.existsSync(path.join(dir, ".git"))) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+export interface InstallSource {
+  cli: string;
+  /** Under ~/.ledger/bin/releases/<id>/ (a `ledger deploy` copy). */
+  release: boolean;
+  /** Installed package copy (global npm, node_modules); not a working tree. */
+  packaged: boolean;
+  worktree: string | null;
+  stable: boolean;
+}
+
+export function installSource(cli: string = CLI): InstallSource {
+  const real = (() => { try { return fs.realpathSync(cli); } catch { return path.resolve(cli); } })();
+  const releases = (() => { try { return fs.realpathSync(RELEASES_DIR()); } catch { return RELEASES_DIR(); } })();
+  const release = real.startsWith(releases + path.sep);
+  const packaged = real.split(path.sep).includes("node_modules");
+  const worktree = release || packaged ? null : gitWorktreeOf(real);
+  return { cli: real, release, packaged, worktree, stable: release || packaged || worktree === null };
+}
+
+export class UnstableInstallSourceError extends Error {
+  constructor(public source: InstallSource, what: string) {
+    super(
+      `refusing to install ${what} from a git worktree.\n` +
+      `  cli.js: ${source.cli}\n  worktree: ${source.worktree}\n` +
+      `A rebuild in that tree would redeploy to every hook, the MCP server and the helper at once.\n` +
+      `Run \`ledger deploy\` from this tree: it copies the build to ${RELEASES_DIR()}/<version> and installs from there.\n` +
+      `Override for a throwaway machine with LEDGER_ALLOW_WORKTREE_INSTALL=1.`
+    );
+  }
+}
+
+/** Installers call this before writing any absolute path. Throws unless the source is stable. */
+export function assertStableInstallSource(what: string, source: InstallSource = installSource()): InstallSource {
+  if (source.stable || process.env.LEDGER_ALLOW_WORKTREE_INSTALL === "1") return source;
+  throw new UnstableInstallSourceError(source, what);
+}
+
 /** One command hook per lifecycle event. PostToolUse is filtered further inside hooks.ts. */
 export const HOOK_EVENTS: Record<string, { matcher?: string; timeout: number }> = {
   SessionStart: { timeout: 30 },
@@ -145,6 +204,7 @@ export const RECONCILE_INTERVAL_S = 30 * 60;
  * LEDGER_NO_LAUNCHD=1 writes the plist without loading it (tests, sandboxes).
  */
 export function installReconciler(): string[] {
+  assertStableInstallSource("the reconciler");
   const log: string[] = [];
   const home = os.homedir();
   const logFile = path.join(ledgerHome(), "reconcile.log");
@@ -193,6 +253,7 @@ const HELPER_LABEL = "com.tranzmit.ledger.helper";
  * back after a crash and starts at login. Elsewhere: a systemd/cron hint.
  */
 export function installHelper(): string[] {
+  assertStableInstallSource("the capture helper");
   const log: string[] = [];
   const home = os.homedir();
   const logFile = path.join(ledgerHome(), "helper.log");
@@ -241,6 +302,14 @@ export function helperStatus(): string[] {
     const r = execFileSync("launchctl", ["list"], { stdio: ["ignore", "pipe", "ignore"] }).toString().split("\n").find((l) => l.includes(HELPER_LABEL));
     out.push(r ? `launchctl: ${r.trim()} (pid status label)` : "launchctl: not loaded");
   } catch { out.push("launchctl: unavailable"); }
+  const hbFile = path.join(ledgerHome(), "helper-heartbeat.json");
+  try {
+    const hb = JSON.parse(fs.readFileSync(hbFile, "utf8"));
+    if (hb?.cli) {
+      const src = installSource(hb.cli);
+      out.push(`running: pid ${hb.pid} · ${src.cli}${src.stable ? "" : `  ⚠ inside git worktree ${src.worktree} — run \`ledger deploy\``}`);
+    }
+  } catch { /* no heartbeat yet */ }
   const logFile = path.join(ledgerHome(), "helper.log");
   if (fs.existsSync(logFile)) {
     const tail = fs.readFileSync(logFile, "utf8").trim().split("\n").slice(-3);
@@ -252,6 +321,7 @@ export function helperStatus(): string[] {
 // ---------- Claude Code (also what Conductor runs) ----------
 
 export function installClaude(): string[] {
+  assertStableInstallSource("Claude Code hooks and MCP");
   const log: string[] = [];
   const home = os.homedir();
 
@@ -295,6 +365,7 @@ export function installClaude(): string[] {
 // ---------- Codex (CLI and desktop app share ~/.codex) ----------
 
 export function installCodex(): string[] {
+  assertStableInstallSource("Codex hooks and MCP");
   const log: string[] = [];
   const home = os.homedir();
   const codexDir = path.join(home, ".codex");

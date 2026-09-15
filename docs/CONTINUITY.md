@@ -45,6 +45,7 @@ Documents:
 | CLI: `continuity`, `helper`, `threads`, `resume`, `thread` | live | `src/cli.ts` |
 | Brief sections: Open threads, Ledger notices | live | `src/continuity/brief.ts` |
 | launchd agent `com.tranzmit.ledger.helper` with KeepAlive | live on Agaaz's machine | `src/install.ts` |
+| Stable install: `ledger deploy` copies the build to `~/.ledger/bin/releases/<id>` and installs hooks, MCP, reconciler and helper from it; installers refuse a worktree `cli.js`; `ledger continuity rotate` for password rotation | live on Agaaz's machine 15 Sep; Rachit's machine pending | `src/deploy.ts`, `src/install.ts` |
 | Regex redaction and deny globs before spool | live, tested | `src/continuity/redact.ts` |
 | All drafts shown in brief and README, labeled not in force | live, tested | `src/query.ts`, `src/views.ts` |
 | Stop checkpoint clears on receipt-style record responses | live, tested | `src/hooks.ts` |

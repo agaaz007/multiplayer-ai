@@ -41,9 +41,61 @@ class ScorerTests(unittest.TestCase):
         obs[key] = filename
 
     def test_supported_decisions_pass(self):
-        for id_ in ("D01", "D02", "D03", "R02"):
+        for id_ in ("D01", "D02", "D03", "D04", "R02"):
             with self.subTest(id_=id_):
                 self.assertEqual(self.score(id_, self.observation(id_))["status"], "pass")
+
+    def test_superseded_number_fails(self):
+        """D04's first pass is still in history and still matches the question. Answering it fails."""
+        obs = self.observation("D04")
+        obs["answers"]["trial_start_cvr_pct"]["value"] = 12.4
+        self.assertEqual(self.score("D04", obs)["status"], "fail")
+
+    def test_unstated_assumption_must_be_surfaced(self):
+        for value in (None, "all_users", "marriage_intent"):
+            with self.subTest(value=value):
+                obs = self.observation("D04")
+                obs["answers"]["cvr_caveat"]["value"] = value
+                self.assertEqual(self.score("D04", obs)["status"], "fail")
+
+    def test_rejected_option_must_come_from_the_rejection(self):
+        """Citing only the turn that proposed both options is not evidence that one was retired."""
+        obs = self.observation("D04")
+        obs["answers"]["rejected_option"]["evidence_ids"] = ["options"]
+        self.assertEqual(self.score("D04", obs)["status"], "fail")
+
+    def test_accepted_spellings_are_the_same_answer(self):
+        for key, value in (("rejected_option", "Price cut to 149"), ("rejection_reason", "store price locked"),
+                           ("cvr_caveat", "Android only")):
+            with self.subTest(key=key):
+                obs = self.observation("D04")
+                obs["answers"][key]["value"] = value
+                self.assertEqual(self.score("D04", obs)["status"], "pass")
+
+    def test_stem_admits_any_spelling_of_the_same_reason(self):
+        """Both spellings the live run actually produced, from the same retrieved sentence."""
+        for value in ("locked", "price_locked_for_quarter", "locked_pricing", "Store price locked"):
+            with self.subTest(value=value):
+                obs = self.observation("D04")
+                obs["answers"]["rejection_reason"]["value"] = value
+                self.assertEqual(self.score("D04", obs)["status"], "pass")
+
+    def test_stem_does_not_admit_a_different_reason(self):
+        for value in ("longer_trial_14d", "low_conversion", "distracting", None):
+            with self.subTest(value=value):
+                obs = self.observation("D04")
+                obs["answers"]["rejection_reason"]["value"] = value
+                self.assertEqual(self.score("D04", obs)["status"], "fail")
+
+    def test_accept_does_not_admit_a_different_fact(self):
+        obs = self.observation("D04")
+        obs["answers"]["rejected_option"]["value"] = "longer_trial_14d"
+        self.assertEqual(self.score("D04", obs)["status"], "fail")
+
+    def test_accept_absent_keeps_exact_matching(self):
+        obs = self.observation("D01")
+        obs["answers"]["animation_target"]["value"] = "Locked Insight"
+        self.assertEqual(self.score("D01", obs)["status"], "fail")
 
     def test_wrong_price_fails(self):
         obs = self.observation("D01")
@@ -236,7 +288,7 @@ class ScorerTests(unittest.TestCase):
         directions = ["codex-to-claude", "claude-to-codex"]
         report = ev.report(suite, self.base / "full", 3, directions)
         self.assertEqual(report["pilot_level_demonstrated"], 0)
-        self.assertEqual(len(report["results"]), 72)
+        self.assertEqual(len(report["results"]), 78)  # 13 cases x 2 directions x 3 repetitions
         self.assertTrue(all(r["status"] == "not_run" for r in report["results"]))
         smoke = ev.report(suite, self.base / "smoke", 1, directions[:1])
         self.assertIsNone(smoke["pilot_level_demonstrated"])
@@ -244,7 +296,7 @@ class ScorerTests(unittest.TestCase):
     def test_cumulative_level_stops_at_first_gap(self):
         suite, output = self.base / "suite", self.base / "results"
         ev.prepare(suite, 4)
-        for id_ in ("D01", "D02", "D03", "R02"):
+        for id_ in ("D01", "D02", "D03", "D04", "R02"):
             obs = self.observation(id_)
             for direction in ("codex-to-claude", "claude-to-codex"):
                 obs["provenance"]["origin_harness"], obs["provenance"]["successor_harness"] = direction.split("-to-")

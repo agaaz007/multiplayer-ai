@@ -2,6 +2,7 @@ import type { CaseRunner, PublicCase } from "../types.js";
 import { D01 } from "./D01.js";
 import { D02 } from "./D02.js";
 import { D03 } from "./D03.js";
+import { D04 } from "./D04.js";
 import { R01 } from "./R01.js";
 import { R02 } from "./R02.js";
 import { E01 } from "./E01.js";
@@ -19,7 +20,7 @@ import { L02 } from "./L02.js";
  */
 export interface EvalCaseRunner extends CaseRunner { skip?: string }
 
-export const RUNNERS: Record<string, EvalCaseRunner> = { D01, D02, D03, R01, R02, E01, E02, E03, C01, C02, L01, L02 };
+export const RUNNERS: Record<string, EvalCaseRunner> = { D01, D02, D03, D04, R01, R02, E01, E02, E03, C01, C02, L01, L02 };
 
 export function runnerFor(id: string): EvalCaseRunner {
   const r = RUNNERS[id];

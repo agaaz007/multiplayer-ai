@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { TrialContext } from "../types.js";
@@ -12,11 +13,18 @@ import type { EvalCaseRunner } from "./index.js";
  * fixture event id, which the collector uses as the system_ref when a successor tool output
  * carrying the text also carries the id. The decision statement is the exact fixture text so a
  * retrieval of the object contains the excerpt verbatim.
+ *
+ * Since the analytical-scope work (3486dfe) an accepted replacement must also carry `acceptance` with
+ * `expected_predecessor.{id, version}` and at least one evidence ref — a supersession is no longer
+ * accepted on the `supersedes` pointer alone. metric-v2 supplies them from the predecessor it just
+ * wrote, which is what the fixture already claims in prose ("Confirmed by Agaaz"). Without this, every
+ * D02 trial failed before the successor ran, in both conditions.
  */
 export const D02: EvalCaseRunner = {
   id: "D02",
   async before(ctx: TrialContext) {
-    const { record, initLedger } = await import("../../store.js");
+    const { record, initLedger, loadAll } = await import("../../store.js");
+    const { objectVersion } = await import("../../authority.js");
     const events = ctx.request.case.events;
     const v1 = events.find((e) => e.id === "metric-v1");
     const v2 = events.find((e) => e.id === "metric-v2");
@@ -53,6 +61,10 @@ export const D02: EvalCaseRunner = {
         body: v1.text,
       },
     });
+    // The predecessor as it exists on disk right now: the version hash must be of the persisted object,
+    // not of the input, and re-reading it is also the "reread the current record before accepting" step.
+    const stored = loadAll(cfg(v2.author), ["decision"], false).find((o) => o.id === first.id);
+    if (!stored) throw new Error(`D02: just-written decision ${first.id} is not readable from the trial ledger`);
     const second = record(cfg(v2.author), {
       type: "decision",
       fields: {
@@ -73,6 +85,12 @@ export const D02: EvalCaseRunner = {
         valid_from: today,
         owner: v2.author,
         supersedes: first.id,
+        acceptance: {
+          actor: v2.author,
+          accepted_at: today,
+          evidence_refs: [{ role: "review", sha256: crypto.createHash("sha256").update(v2.text).digest("hex") }],
+          expected_predecessor: { id: first.id, version: objectVersion(stored) },
+        },
         tags: ["conversion", "eval-fixture"],
         body: v2.text,
       },

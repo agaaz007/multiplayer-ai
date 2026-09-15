@@ -21,7 +21,7 @@ const KIT = path.join(REPO_ROOT, "eval", "kit", "continuity_eval.py");
 const ADAPTER = path.join(HERE, "adapter.js");
 const COMPARE = path.join(HERE, "compare.js");
 const PY = process.env.PYTHON || "python3";
-const PHASE1 = ["D01", "D02", "D03", "R01", "R02", "E01"];
+const PHASE1 = ["D01", "D02", "D03", "D04", "R01", "R02", "E01"];
 const PHASE2 = ["E02", "C01", "L02"];
 
 let step = 0;
@@ -41,7 +41,7 @@ const obsPath = (out: string, c: string, d = "codex-to-claude", r = 1) => path.j
 const suite = path.join(tmp, "suite");
 py(["prepare", "--out", suite, "--noise-events", "50"]);
 assert.ok(fs.existsSync(path.join(suite, "public", "D01.json")) && fs.existsSync(path.join(suite, "private", "oracle.json")));
-ok(`kit prepared 12 cases into ${suite}`);
+ok(`kit prepared 13 cases into ${suite}`);
 
 function kitRun(condition: string, out: string, extraEnv: Record<string, string> = {}) {
   const adapterJson = path.join(tmp, `adapter-${path.basename(out)}.json`);
@@ -208,32 +208,37 @@ ok("a retrieved_evidence entry whose raw_ref file is missing scores fail");
   assert.equal(out, path.join(runs, "matrix.md"));
   const m = readJson(path.join(runs, "matrix.json"));
   assert.deepEqual(m.conditions, ["ours", "gbrain"]);
-  assert.equal(m.cells.length, 24);
+  assert.equal(m.cells.length, 26);  // 13 cases x 2 conditions
   assert.equal(m.suite_sha256.length, 64);
   const cell = (c: string, cs: string) => m.cells.find((x: any) => x.condition === c && x.case === cs && x.direction === "codex-to-claude" && x.repetition === 1);
   assert.equal(cell("ours", "E01").status, "pass");
   assert.equal(cell("gbrain", "E01").status, "fail");
   assert.equal(cell("ours", "L01").status, "not_run"); // kit maps an infrastructure error to not_run
   assert.ok(cell("ours", "D01").checks.some((k: any) => k.type === "answer" && k.key === "price_inr" && k.status === "pass"));
+  for (const c of ["ours", "gbrain"]) {
+    assert.equal(cell(c, "D04").status, "pass", `${c} D04`);
+    for (const k of ["trial_start_cvr_pct", "rejected_option", "rejection_reason", "cvr_caveat"])
+      assert.ok(cell(c, "D04").checks.some((x: any) => x.key === k && x.status === "pass"), `${c} D04 ${k}`);
+  }
   assert.equal(typeof cell("ours", "D01").metrics.successor_boot_tokens, "number");
-  assert.deepEqual(m.levels.ours[1], { passed: 3, total: 3, qualified: true });
+  assert.deepEqual(m.levels.ours[1], { passed: 4, total: 4, qualified: true });  // D01-D04
   assert.deepEqual(m.levels.gbrain[3], { passed: 0, total: 3, qualified: false });
-  assert.equal(m.summary.ours.pass_rate, 6 / 12);
-  assert.equal(m.summary.gbrain.pass_rate, 5 / 12);
+  assert.equal(m.summary.ours.pass_rate, 7 / 13);
+  assert.equal(m.summary.gbrain.pass_rate, 6 / 13);
   assert.ok(typeof m.summary.ours.median_boot_tokens === "number");
   const md = fs.readFileSync(path.join(runs, "matrix.md"), "utf8");
   assert.ok(md.startsWith("# Continuity evaluation matrix"));
   assert.ok(md.includes("| Case | Level | Direction | Rep | ours | gbrain |"));
   assert.ok(md.includes("| E01 | 3 | codex-to-claude | 1 | pass | fail (file_hash:layout.json, file_hash:generated/study.txt, absent_file:obsolete.txt) |"));
   assert.ok(md.includes("## Summary"));
-  assert.ok(md.includes("ours: 6 passed, 2 failed, 4 not run"));
-  assert.ok(md.includes("gbrain: 5 passed, 3 failed, 4 not run"));
+  assert.ok(md.includes("ours: 7 passed, 2 failed, 4 not run"));
+  assert.ok(md.includes("gbrain: 6 passed, 3 failed, 4 not run"));
   assert.ok(md.includes("no pilot level is demonstrated"));
   console.log("\n--- matrix.md (first 40 lines) ---");
   console.log(md.split("\n").slice(0, 40).join("\n"));
   console.log("--- end ---\n");
 }
-ok("compare.js wrote matrix.json (24 cells, levels, summary) and matrix.md with the expected table, level rows and an honest summary");
+ok("compare.js wrote matrix.json (26 cells, levels, summary) and matrix.md with the expected table, level rows and an honest summary");
 
 console.log(`selftest-eval-adapter: ok (${step} checks)`);
 if (process.env.LEDGER_EVAL_KEEP !== "1") fs.rmSync(tmp, { recursive: true, force: true });

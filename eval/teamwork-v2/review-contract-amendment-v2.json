@@ -1,0 +1,19 @@
+{
+  "schema": "pm-review-contract-amendment/v2",
+  "declared_at": "2026-09-12T12:16:34.699635+00:00",
+  "phase": "prepared while original reviews run; execution gated on ended original run",
+  "scope": "uniform audit of every retained initial/adjudicator receipt; no changed original statuses",
+  "normalizations": [
+    "type -> kind only if kind absent",
+    "rationale -> explanation only if explanation absent",
+    "conflicting aliases remain invalid"
+  ],
+  "residual_clearance": "Explicit manual evidence-backed clearance of common public fixture entities, bound to original raw hash and express reviewer statement of no vendor/arm inference; no automatic inference",
+  "additional_model_calls": 0,
+  "files": {
+    "eval/teamwork-v2/review-contract-v2.mjs": "4b1744ba7ccbfc4c9ff4dad1e04a6aa7a7c02e2c3be046c5204844564e04ff3b",
+    "eval/teamwork-v2/test-review-contract-v2.mjs": "30bc8fec14b0e3ef06fa2a46cceda51c3a1a4bfb4cc824f4da26021dc669bc65",
+    "eval/teamwork-v2/REVIEW-CONTRACT-V2.md": "2e50a958cd23877db44d5ebaefecf28eb6ecaa6ed2ea2c12be843626b6e94a10",
+    "eval/teamwork-v2/review-runner.mjs": "2fece21b19d27cc1f0b3b511ea2a7767c644e916cd3b3450db87d222c700bbf8"
+  }
+}
