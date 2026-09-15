@@ -214,10 +214,11 @@ export function renderDecisionsInForce(refs: LedgerRefStatus[], captured: { resu
     }
     for (const [w, n] of warnCount) if (n > 1) L.push(`WARNING (${n} objects above): ${w}`);
     const notInForce = sorted.filter((r) => !r.found || r.status !== "stable" || r.authority_status === "conflict");
-    if (notInForce.length) L.push(`NOT IN FORCE (${notInForce.length}): ${notInForce.map((r) => (r.status === "deprecated" && r.superseded_by ? `${r.id} → ${r.superseded_by}` : r.id)).join("; ")}. Do not act on these as decided.`);
+    // lean: every ref's tag is on its own line above, so the restatement is only kept when the list is long enough to need it
+    if (notInForce.length && (!opts.lean || sorted.length > 3)) L.push(`NOT IN FORCE (${notInForce.length}): ${notInForce.map((r) => (r.status === "deprecated" && r.superseded_by ? `${r.id} → ${r.superseded_by}` : r.id)).join("; ")}. Do not act on these as decided.`);
     const explicit = refs.filter((r) => r.source === "explicit").length;
     L.push(opts.lean
-      ? `Captured from ${plural(captured.results, "save result")} in ${plural(captured.sessions, "session")} and ${plural(explicit, "explicit link")}; decisions only read are not listed.`
+      ? `From ${plural(captured.results, "save result")} and ${plural(explicit, "explicit link")}; decisions only read are not listed.`
       : `Captured from ${plural(captured.results, "Ledger save result")} in ${plural(captured.sessions, "session")} and ${plural(explicit, "explicit link")}. Decisions the work only read are not listed; search the Ledger before relying on one.`);
   }
   if (groups.length) {

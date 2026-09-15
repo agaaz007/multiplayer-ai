@@ -284,7 +284,7 @@ export function renderVisitDelta(d: VisitDelta, o: { unit: "record" | "thread"; 
     return parts.join(", ");
   };
   if (!d.viewer) {
-    L.push(`No viewer given, so your last visit is unknown. Totals for this ${o.unit} (created ${fmt(o.created)}): ${totals()}.`);
+    L.push(`No viewer given (pass viewer for your delta). Totals since creation (${fmt(o.created)}): ${totals()}.`);
     if (d.files.length && level < 1) L.push(`- files: ${d.files.slice(0, DELTA_FILES_MAX).map((f) => f.path).join(", ")}${d.files.length > DELTA_FILES_MAX ? ` … ${d.files.length - DELTA_FILES_MAX} more` : ""}`);
     return L;
   }
