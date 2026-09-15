@@ -195,7 +195,7 @@ export function renderDecisionsInForce(refs: LedgerRefStatus[], captured: { resu
   const groups = opts.groups ?? [];
   L.push(`## Decisions in force for this work (${refs.length})`);
   if (!refs.length) {
-    L.push(opts.lean ? `(none saved or linked; decisions the work only read are not tracked here)` : `(none: no Ledger decision, definition, finding or change was saved in this work's events or linked to it; decisions it only read are not tracked here)`);
+    L.push(opts.lean ? `(none: nothing saved or linked; decisions the work only read are not tracked here)` : `(none: no Ledger decision, definition, finding or change was saved in this work's events or linked to it; decisions it only read are not tracked here)`);
   } else {
     if (!opts.lean) L.push(`Ledger objects this work saved or linked, resolved to what is in force now. Only [in force] items are accepted knowledge.`);
     const rank = (r: LedgerRefStatus) => (r.found ? TYPE_ORDER[r.type ?? ""] ?? 4 : 5);
