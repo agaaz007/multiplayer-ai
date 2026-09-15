@@ -571,14 +571,16 @@ const call = async (name: string, args: Record<string, unknown>) => {
   const un = await call("ledger_unassigned", { session_id: sidR });
   assert.ok(un.includes(`session ${R8} seq 10..11 (2 events, `) && un.includes("Unrelated: look at the CI flake"), un);
   assert.equal(await call("ledger_unassigned", { session_id: sidA }), "No unassigned spans match.");
+  // the search tool may print a "scope:" header line first and suffix each hit with an authority tier; hit lines stay `[rank] sid author/harness · seq · HH:MM · …`
+  const hits = (out: string) => out.split("\n").filter((l) => !l.startsWith("scope:"));
   const srch = await call("ledger_evidence_search", { q: "distinct_id", record_id: recAttr.id });
-  const srchLines = srch.split("\n");
-  assert.ok(srchLines.length >= 4 && srchLines.every((l) => /^\[\d\.\d{3}\] [0-9a-z-]{8} (agaaz\/claude|rachit\/codex) · \d+ · \d\d:\d\d · /.test(l)), srch);
+  const srchLines = hits(srch);
+  assert.ok(srchLines.length >= 4 && srchLines.every((l) => /^\[\d\.\d+\] [0-9a-z-]{8} (agaaz\/claude|rachit\/codex) · \d+ · \d\d:\d\d · /.test(l)), srch);
   assert.ok(srch.includes(`${R8} rachit/codex · 4 · `) && srch.includes(`${A8} agaaz/claude · 4 · `), "hits from both sessions");
   assert.ok(!srch.includes("npm run build"), "restricted to the record's spans");
   const srchS = await call("ledger_evidence_search", { q: "attribution window", session_id: sidR, kinds: ["compaction"] });
-  assert.ok(srchS.split("\n").length === 1 && srchS.includes("compaction · codex_compacted"), srchS);
-  assert.match(await call("ledger_evidence_search", { q: "zebra-quokka" }), /^No events match/);
+  assert.ok(hits(srchS).length === 1 && srchS.includes("compaction · codex_compacted"), srchS);
+  assert.match(await call("ledger_evidence_search", { q: "zebra-quokka" }), /(^|\n)No events match/);
   const start = await call("ledger_record_start", { kind: "other", title: "CI flake in the deploy job", cwd: tmp, link: { session_id: sidR, from_seq: 10, to_seq: 11 } });
   const newId = start.match(/^Record ([0-9a-f-]{36}) "CI flake in the deploy job" \(other\) created as non-code work by agaaz\. Linked session /)?.[1];
   assert.ok(newId, start);
