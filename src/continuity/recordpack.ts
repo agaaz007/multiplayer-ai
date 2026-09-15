@@ -236,9 +236,12 @@ async function recordSourceCounts(qq: Q, recordId: string): Promise<Omit<RecordS
 
 export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: string, opts: RecordPackOpts): Promise<RecordPack> {
   const now = opts.now ?? new Date();
+  const detail: RecordPackDetail = opts.detail ?? "lean";
   const budget = opts.budgetTokens ?? 6000;
+  const asOf = parseAsOf(opts.asOf);
+  const upTo = (d: Date | null | undefined) => !asOf || (d != null && d.getTime() <= asOf.getTime());
   const omitted: string[] = [];
-  const state = await recordState(pool, recordId);
+  const state = asOf ? await recordStateAsOf(pool, recordId, asOf) : await recordState(pool, recordId);
   if (!state) throw new Error(`record not found: ${recordId}`);
   const rec = state.record;
   const links = await recordLinks(pool, rec.id);
@@ -292,7 +295,7 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
 
   // ----- decisions in force: explicit ledger_refs plus Ledger objects saved inside the record's spans -----
   const refs = Array.isArray(rec.ledger_refs) ? rec.ledger_refs : [];
-  const saved = await writtenLedgerIds(pool, { recordId: rec.id });
+  const saved = await writtenLedgerIds(pool, { recordId: rec.id }, { asOf });
   const refInputs: LedgerRefInput[] = [...refs.map((r) => ({ id: r.id, version: r.version, source: "explicit" as const })), ...saved.refs];
   const all = refInputs.length ? loadAll(cfg, TYPES) : [];
   const ledgerRefs: LedgerRefStatus[] = ledgerRefStatuses(all, refInputs);
@@ -301,13 +304,17 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
   const reviewImpacts = acceptedRefs.filter(o=>o.supersedes).map(o=>correctionImpact(all,o.id));
 
   // ----- evidence across sessions, ordered by occurred_at, each attributed -----
-  const [evFirst, evLast, evidenceTotal, latestComp] = await Promise.all([
+  const [evFirst, evLastRaw, evidenceTotal, latestCompRaw] = await Promise.all([
     recordEvidence(pool, rec.id, { kinds: ['instruction.added'], limit: EVIDENCE_HEAD, sources: COVERING }),
     recordEvidence(pool, rec.id, { kinds: EVIDENCE_KINDS, limit: 2000, sources: COVERING, order: 'desc' }),
-    recordEvidenceCount(pool, rec.id, EVIDENCE_KINDS, COVERING),
-    recordEvidence(pool, rec.id, { kinds: ['compaction'], limit: 1, sources: COVERING, order: 'desc' }),
+    asOf ? recordEvidenceCountAsOf(pool, rec.id, EVIDENCE_KINDS, COVERING, asOf) : recordEvidenceCount(pool, rec.id, EVIDENCE_KINDS, COVERING),
+    recordEvidence(pool, rec.id, { kinds: ['compaction'], limit: asOf ? 50 : 1, sources: COVERING, order: 'desc' }),
   ]);
-  const evAll = [...new Map([...evFirst, ...evLast].map(e => [e.id, e])).values()].sort((a,b) =>
+  // as-of: events after the instant are dropped from the sampled window (the count above is already as-of)
+  const evTime = (e: { occurred_at: Date | null; received_at: Date }) => e.occurred_at ?? e.received_at;
+  const evLast = evLastRaw.filter((e) => upTo(evTime(e)));
+  const latestComp = latestCompRaw.filter((e) => upTo(evTime(e)));
+  const evAll = [...new Map([...evFirst.filter((e) => upTo(evTime(e))), ...evLast].map(e => [e.id, e])).values()].sort((a,b) =>
     (a.occurred_at ?? a.received_at).getTime() - (b.occurred_at ?? b.received_at).getTime()
       || a.session_id.localeCompare(b.session_id) || a.seq - b.seq);
   if (evidenceTotal > evAll.length) omitted.push(`${evidenceTotal - evAll.length} middle events not loaded; evidence counts cover the full history, file previews cover the sampled window; fetch exact linked spans with ledger_events`);
@@ -363,12 +370,17 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
   const recentFiles = files.filter((f) => f.recent).map(({ path: p, count, last_at }) => ({ path: p, count, last_at }));
 
   // An unfinished operation remains pending even after another contributor becomes active.
-  const pend = (await Promise.all(sessions.map(async (s) => (await pendingOperations(pool, s.session_id))
+  const pendFull = (await Promise.all(sessions.map(async (s) => (asOf ? await pendingOperationsAsOf(pool, s.session_id, asOf) : await pendingOperations(pool, s.session_id))
     .filter((p) => inSpans(s.session_id, p.seq))
-    .map((p) => ({ call_id: p.call_id, tool: p.tool, input: p.input, seq: p.seq, session_id: s.session_id }))))).flat();
-  const errRows = await recordEvidence(pool, rec.id, { kinds: ["tool.finished"], limit: 1, sources: COVERING, order: 'desc', errorsOnly: true });
-  const lastErrRow = errRows.find((e) => e.payload?.is_error || (typeof e.payload?.stderr_preview === "string" && e.payload.stderr_preview)) ?? null;
+    .map((p) => ({ call_id: p.call_id, tool: p.tool, input: p.input, seq: p.seq, session_id: s.session_id, occurred_at: p.occurred_at }))))).flat();
+  const pend: RecordPack["pending_operations"] = pendFull.map(({ occurred_at: _at, ...p }) => p);
+  const errRows = await recordEvidence(pool, rec.id, { kinds: ["tool.finished"], limit: asOf ? 50 : 1, sources: COVERING, order: 'desc', errorsOnly: true });
+  const lastErrRow = errRows.filter((e) => upTo(evTime(e))).find((e) => e.payload?.is_error || (typeof e.payload?.stderr_preview === "string" && e.payload.stderr_preview)) ?? null;
   const lastErr = lastErrRow ? { session_id: lastErrRow.session_id, seq: lastErrRow.seq, payload: lastErrRow.payload } : null;
+  const lastErrFetch = lastErr ? `ledger_events(session_id: ${q(lastErr.session_id)}, after_seq: ${lastErr.seq - 1}, limit: 1, preview_chars: 2000)` : null;
+
+  // ----- changed since the viewer's last visit (lean and evidence alike; the section is rendered in lean) -----
+  const delta: VisitDelta | null = await recordVisitDelta(pool, rec.id, state, pendFull, { viewer: opts.viewer ?? null, excludeSessionId: opts.sessionId ?? null, asOf });
 
   // ----- unassigned spans in the contributing sessions -----
   let unassigned: UnassignedSpan[] = [];
@@ -406,7 +418,9 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
 
   // ----- render within budget; softer sections shrink first, each drop named -----
   const stateCap = budget >= STATE_WIDE_BUDGET ? STATE_MAX_PER_KIND_WIDE : STATE_MAX_PER_KIND;
-  const stateFetch = `ledger_record_get(record_id: ${q(rec.id)}${budget < STATE_WIDE_BUDGET ? `, budget_tokens: ${STATE_WIDE_BUDGET}` : ""})`;
+  const stateFetch = `ledger_record_get(record_id: ${q(rec.id)}${budget < STATE_WIDE_BUDGET ? `, budget_tokens: ${STATE_WIDE_BUDGET}` : ""}${detail === "lean" ? `, detail: "evidence"` : ""})`;
+  const evidenceFetch = `ledger_record_get(record_id: ${q(rec.id)}, detail: "evidence")`;
+  const asOfLine = asOf ? `as of ${fmt(asOf)}: state updates and events after this instant are hidden (links and contributing sessions are not filtered).` : null;
   // classifier lag per contributing session: organization into records may trail raw capture; say so
   const lagLines: string[] = [];
   for (const s of sessions.slice(0, 3)) {
