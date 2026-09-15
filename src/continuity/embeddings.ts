@@ -409,7 +409,8 @@ export interface EmbeddingStatus {
   estimated_usd: number | null;
 }
 
-export async function embeddingStatus(pool: pg.Pool, cfg: Config): Promise<EmbeddingStatus> {
+/** `opts.sinceHours` restricts the pending/cost figures to events newer than that (the backfill's --since); totals are unaffected. */
+export async function embeddingStatus(pool: pg.Pool, cfg: Config, opts: { sinceHours?: number } = {}): Promise<EmbeddingStatus> {
   const ext = await pool.query<{ available: string | null; installed: string | null }>(
     `select default_version as available, installed_version as installed from pg_available_extensions where name = 'vector'`
   );
@@ -423,20 +424,29 @@ export async function embeddingStatus(pool: pg.Pool, cfg: Config): Promise<Embed
   if (!s) return base;
   Object.assign(base, { provider: s.provider, model: s.model, dims: s.dimensions, api_key_env: s.api_key_env, api_key_present: s.api_key_present, kinds: s.kinds, max_chars: s.max_chars });
   const shape = await storedShape(pool);
+  const since = opts.sinceHours != null ? `and coalesce(ev.occurred_at, ev.received_at) > now() - ($3::float8 * interval '1 hour')` : "";
+  const params: unknown[] = opts.sinceHours != null ? [s.kinds, s.max_chars, opts.sinceHours] : [s.kinds, s.max_chars];
   if (!shape) {
-    const e = await pool.query<{ eligible: number; chars: string }>(`select count(*)::int as eligible, coalesce(sum(least(length(${EVENT_TEXT_SQL}), $2)),0)::text as chars from cont_events ev where ev.kind = any($1) and ${EVENT_TEXT_SQL} is not null`, [s.kinds, s.max_chars]);
-    base.eligible = e.rows[0].eligible; base.pending = e.rows[0].eligible; base.pending_chars = Number(e.rows[0].chars);
+    const e = await pool.query<{ eligible: number; pending: number; chars: string }>(
+      `select (select count(*)::int from cont_events ev where ev.kind = any($1) and ${EVENT_TEXT_SQL} is not null) as eligible,
+              count(*)::int as pending, coalesce(sum(least(length(${EVENT_TEXT_SQL}), $2)),0)::text as chars
+         from cont_events ev where ev.kind = any($1) and ${EVENT_TEXT_SQL} is not null ${since}`,
+      params
+    );
+    base.eligible = e.rows[0].eligible; base.pending = e.rows[0].pending; base.pending_chars = Number(e.rows[0].chars);
   } else {
     base.table_exists = true; base.stored_dims = shape.dims; base.stored_models = shape.models; base.dims_match = shape.dims == null || shape.dims === s.dimensions;
     const c = await pool.query<{ embedded: number; failures: number; eligible: number; pending: number; chars: string }>(
       `select (select count(*)::int from cont_event_embeddings) as embedded,
               (select count(*)::int from cont_embedding_failures) as failures,
               (select count(*)::int from cont_events ev where ev.kind = any($1) and ${EVENT_TEXT_SQL} is not null) as eligible,
-              (select count(*)::int from cont_events ev left join cont_event_embeddings emb on emb.event_id = ev.id left join cont_embedding_failures f on f.event_id = ev.id
-                where emb.event_id is null and f.event_id is null and ev.kind = any($1) and ${EVENT_TEXT_SQL} is not null) as pending,
-              (select coalesce(sum(least(length(${EVENT_TEXT_SQL}), $2)),0)::text from cont_events ev left join cont_event_embeddings emb on emb.event_id = ev.id left join cont_embedding_failures f on f.event_id = ev.id
-                where emb.event_id is null and f.event_id is null and ev.kind = any($1) and ${EVENT_TEXT_SQL} is not null) as chars`,
-      [s.kinds, s.max_chars]
+              count(*)::int as pending,
+              coalesce(sum(least(length(${EVENT_TEXT_SQL}), $2)),0)::text as chars
+         from cont_events ev
+         left join cont_event_embeddings emb on emb.event_id = ev.id
+         left join cont_embedding_failures f on f.event_id = ev.id
+        where emb.event_id is null and f.event_id is null and ev.kind = any($1) and ${EVENT_TEXT_SQL} is not null ${since}`,
+      params
     );
     Object.assign(base, { embedded: c.rows[0].embedded, failures: c.rows[0].failures, eligible: c.rows[0].eligible, pending: c.rows[0].pending, pending_chars: Number(c.rows[0].chars) });
   }

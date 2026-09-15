@@ -435,6 +435,7 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
     L.push(`# Record pack: ${rec.title}`);
     L.push(`record ${rec.id} · ${rec.kind} · ${rec.repo ? `repo ${rec.repo}` : "non-code work"} · status ${rec.status} · created by ${rec.created_by} ${fmt(rec.created_at)} · state v${rec.state_version} · updated ${fmt(rec.updated_at)}`);
     L.push(`goal: ${rec.goal ? oneLine(rec.goal) : "(none recorded)"}`);
+    if (asOfLine) L.push(asOfLine);
     for (const conflict of state.conflicts) L.push(`UNRESOLVED ACCEPTED CONFLICT: ${conflict.update_ids.join(', ')} replace ${conflict.supersedes}. Do not choose by recency; inspect evidence and explicitly resolve.`);
     L.push(`claim: ${claimInfo.note}`);
     L.push(``);
