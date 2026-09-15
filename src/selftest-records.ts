@@ -16,6 +16,9 @@ import { randomUUID } from "node:crypto";
  * append-only state updates (proposed → confirmed / rejected / superseded) with
  * the record's state_version moving only on confirmation; contradictions kept
  * side by side; full-text search with record/repo/session/kind restrictions;
+ * evidence ranking by authority tier → recency → similarity with explicit labels,
+ * as-of status evaluation, author filter, scope resolution, and reciprocal rank
+ * fusion with an injected vector candidate list; as-of record summaries;
  * per-session contribution summary; input validation.
  */
 
@@ -27,6 +30,7 @@ process.env.LEDGER_GIT_SYNC = "0";
 const { getPool, migrate, closePools, tableList } = await import("./continuity/db.js");
 const S = await import("./continuity/store.js");
 const R = await import("./continuity/records.js");
+const E = await import("./continuity/evidence.js");
 type Config = import("./store.js").Config;
 type NormEvent = import("./continuity/events.js").NormEvent;
 
@@ -388,7 +392,18 @@ await R.linkSpan(pool, { record_id: recTypo.id, session_id: sidU, from_seq: 4, t
   const k1 = s1.map(key);
   assert.ok(k1.includes(`${sidR}:5`) && k1.includes(`${sidR}:8`), `instruction and assistant message found: ${k1.join(",")}`);
   assert.ok(s1.every((e) => typeof e.rank === "number" && e.rank > 0), "rank returned");
-  for (let i = 1; i < s1.length; i++) assert.ok(s1[i - 1].rank >= s1[i].rank, "ordered by rank desc");
+  assert.ok(s1.every((e) => typeof e.similarity === "number" && e.similarity > 0 && e.sources.includes("lexical")), "similarity and sources returned");
+  // ordering is authority tier desc, then recency desc, then similarity desc (2026-09-15; was rank desc)
+  const when = (e: { occurred_at: Date | null; received_at: Date }) => new Date(e.occurred_at ?? e.received_at).getTime();
+  for (let i = 1; i < s1.length; i++) {
+    const [a, b] = [s1[i - 1], s1[i]];
+    assert.ok(a.tier > b.tier || (a.tier === b.tier && (when(a) > when(b) || (when(a) === when(b) && a.similarity >= b.similarity))), `ordered by tier, recency, similarity at ${i}: ${key(a)} tier ${a.tier} vs ${key(b)} tier ${b.tier}`);
+  }
+  // at this point h1 (proposed) cites R:8 and h2 (proposed) cites A:4; R:5 is uncited
+  const tiers = Object.fromEntries(s1.map((e) => [key(e), [e.tier, e.label]]));
+  assert.deepEqual(tiers[`${sidR}:8`], [2, "PROPOSED"], JSON.stringify(tiers));
+  assert.deepEqual(tiers[`${sidR}:5`], [1, "uncited"]);
+  assert.equal(s1[0].tier, 2, "cited-by-proposed events lead the uncited ones");
   assert.ok(s1.every((e) => (e.session_id === sidR ? e.author === "rachit" && e.harness === "codex" : e.author === "agaaz" && e.harness === "claude")), "author/harness annotated");
   assert.equal((await R.searchEvents(pool, "latency spike", { record_id: recBanner.id })).length, 0, "record_id restricts to the record's spans");
   const s3 = (await R.searchEvents(pool, "latency spike", { record_id: recLatency.id })).map(key);
@@ -406,7 +421,159 @@ await R.linkSpan(pool, { record_id: recTypo.id, session_id: sidU, from_seq: 4, t
   assert.equal((await R.searchEvents(pool, "latency", { limit: 1 })).length, 1);
   assert.deepEqual(await R.searchEvents(pool, "   "), []);
   assert.deepEqual(await R.searchEvents(pool, "zzqx-nothing-matches"), []);
-  ok("searchEvents: finds instructions/messages/inputs/previews by word; ranked; record_id, repo, session_id, kinds, sinceHours, limit respected");
+  ok("searchEvents: finds instructions/messages/inputs/previews by word; ranked by tier → recency → similarity; record_id, repo, session_id, kinds, sinceHours, limit respected");
+}
+
+// ---------- 7b. evidence authority: tiers, labels, as-of, author, scope, fusion ----------
+const sidT = "rachit-codex-tokenbucket";
+await S.upsertSession(pool, { id: sidT, author: "rachit", harness: "codex", machine: "rachit-mac", repo: REPO, branch: "master", started_at: T(199), last_seen_at: T(210) });
+const evT: NormEvent[] = [
+  { producer_event_id: "t1", kind: "assistant.message", occurred_at: iso(200), payload: { text: "We chose the token bucket over a sliding window" } },              // cited by a confirmed update
+  { producer_event_id: "t2", kind: "instruction.added", occurred_at: iso(205), payload: { text: "token bucket token bucket token bucket token bucket refill" } },     // lexically strongest, uncited, newer
+  { producer_event_id: "t3", kind: "assistant.message", occurred_at: iso(201), payload: { text: "token bucket capacity is 100" } },                                    // cited by an update later superseded
+  { producer_event_id: "t4", kind: "assistant.message", occurred_at: iso(202), payload: { text: "token bucket capacity raised to 250" } },                             // cited by the superseder
+  { producer_event_id: "t5", kind: "assistant.message", occurred_at: iso(203), payload: { text: "token bucket should be replaced by a leaky bucket" } },              // cited by a rejected update
+  { producer_event_id: "t6", kind: "assistant.message", occurred_at: iso(204), payload: { text: "token bucket burst of 20 tokens" } },                                // cited by a proposed update
+  { producer_event_id: "t7:requested", kind: "tool.requested", call_id: "t7", occurred_at: iso(206), payload: { tool: "mcp__ledger__ledger_record_decision", input: "{\"title\":\"token bucket\"}" } },
+  { producer_event_id: "t7:finished", kind: "tool.finished", call_id: "t7", occurred_at: iso(206), payload: { output_preview: "Recorded decision dec-20260908-token-bucket-ab12 — token bucket" } }, // tool name only on the request (Codex shape)
+  { producer_event_id: "t9:requested", kind: "tool.requested", call_id: "t9", occurred_at: iso(207), payload: { tool: "ledger_record_finding", input: "token bucket finding" } },
+  { producer_event_id: "t9:finished", kind: "tool.finished", call_id: "t9", occurred_at: iso(207), payload: { tool: "ledger_record_finding", is_error: true, output_preview: "token bucket finding rejected: assumptions missing" } },
+  { producer_event_id: "t10", kind: "assistant.message", occurred_at: iso(199), payload: { text: "limiter throttling note with no lexical overlap" } },              // reachable only through the vector list
+];
+{
+  const r = await S.appendEvents(pool, sidT, evT, null, null);
+  assert.equal(r.inserted, evT.length);
+}
+const recT = await R.createRecord(pool, { kind: "implementation", title: "Rate limiter", repo: REPO, created_by: "rachit" });
+await R.linkSpan(pool, { record_id: recT.id, session_id: sidT, from_seq: 1, to_seq: 11, source: "explicit", created_by: "rachit" });
+const uC = await R.addStateUpdate(pool, { record_id: recT.id, kind: "decision", text: "token bucket chosen", evidence: [{ session_id: sidT, seq: 1 }], created_by: "rachit", status: "confirmed" });
+const uOld = await R.addStateUpdate(pool, { record_id: recT.id, kind: "progress", text: "capacity 100", evidence: [{ session_id: sidT, seq: 3 }], created_by: "rachit", status: "confirmed" });
+const uNew = await R.addStateUpdate(pool, { record_id: recT.id, kind: "progress", text: "capacity 250", evidence: [{ session_id: sidT, seq: 4 }], created_by: "agaaz", status: "confirmed", supersedes: uOld.id });
+const uRej = await R.addStateUpdate(pool, { record_id: recT.id, kind: "hypothesis", text: "leaky bucket instead", evidence: [{ session_id: sidT, seq: 5 }], created_by: "agaaz" });
+await R.rejectStateUpdate(pool, uRej.id, "rachit", "decided against");
+const uProp = await R.addStateUpdate(pool, { record_id: recT.id, kind: "next", text: "tune the burst", evidence: [{ session_id: sidT, seq: 6 }], created_by: "agaaz" });
+// deliberate timeline: everything created 3h ago; uC and uNew confirmed and uRej rejected 1h ago; uOld confirmed at creation
+await pool.query(`update cont_records set created_at = now() - interval '4 hours' where id = $1`, [recT.id]);
+await pool.query(`update cont_state_updates set created_at = now() - interval '3 hours' where record_id = $1`, [recT.id]);
+await pool.query(`update cont_state_updates set confirmed_at = now() - interval '1 hour' where id = any($1::uuid[])`, [[uC.id, uNew.id]]);
+await pool.query(`update cont_state_updates set confirmed_at = now() - interval '3 hours' where id = $1`, [uOld.id]);
+await pool.query(`update cont_state_updates set rejected_at = now() - interval '1 hour' where id = $1`, [uRej.id]);
+const seqOf = (hits: { session_id: string; seq: number }[]) => hits.filter((h) => h.session_id === sidT).map((h) => h.seq);
+const byT = (hits: Awaited<ReturnType<typeof R.searchEvents>>) => Object.fromEntries(hits.filter((h) => h.session_id === sidT).map((h) => [h.seq, h]));
+{
+  const res = await R.searchEvidence(pool, "token bucket", { session_id: sidT, candidates: null });
+  assert.equal(res.retrieval, "lexical only");
+  assert.equal(res.retrieval_note, "vector list disabled");
+  assert.equal(res.as_of, null);
+  const h = byT(res.hits);
+  // tier 3 newest first (8 ledger write, 4, 1), then tier 2 (6), tier 1 (9, 2), tier 0 (5, 3)
+  assert.deepEqual(seqOf(res.hits), [8, 4, 1, 6, 9, 2, 5, 3], `authority → recency → similarity: ${seqOf(res.hits).join(",")}`);
+  assert.ok(h[2].rank > h[1].rank, `t2 is the lexically stronger match (${h[2].rank} > ${h[1].rank}) yet the confirmed-cited t1 outranks it`);
+  assert.ok(h[2].similarity > h[1].similarity, "similarity follows the lexical rank; it never overrides tier");
+  assert.deepEqual([h[1].tier, h[1].label], [3, "current"]);
+  assert.deepEqual([h[1].citations.length, h[1].citations[0].update_id, h[1].citations[0].status, h[1].citations[0].superseded_by], [1, uC.id, "confirmed", null]);
+  assert.deepEqual([h[8].tier, h[8].label, h[8].ledger_write], [3, "current", true], "a successful ledger_record_* result is tier 3 even with the tool name only on the request");
+  assert.deepEqual([h[9].tier, h[9].label, h[9].ledger_write], [1, "uncited", false], "a failed ledger write is a plain event");
+  assert.deepEqual([h[4].tier, h[4].label], [3, "current"]);
+  assert.deepEqual([h[6].tier, h[6].label], [2, "PROPOSED"]);
+  assert.deepEqual([h[2].tier, h[2].label], [1, "uncited"]);
+  assert.deepEqual([h[5].tier, h[5].label], [0, "rejected"]);
+  assert.deepEqual([h[3].tier, h[3].label], [0, `superseded by ${uNew.id}`]);
+  assert.equal(h[3].citations[0].superseded_by, uNew.id);
+  assert.ok(!h[10], "t10 shares no term with the query and is absent without a vector list");
+  // the rendered line carries the label
+  const line = E.eventLine(h[3], undefined, { tier: h[3].tier, label: h[3].label });
+  assert.ok(line.endsWith(`[tier 0 · superseded by ${uNew.id}]`), line);
+  assert.ok(!E.eventLine(h[3]).includes("[tier"), "no suffix without authority");
+  ok("evidence tiers: confirmed-cited and ledger writes (3) > proposed-cited (2) > uncited (1) > superseded/rejected (0); recency inside a tier; a weaker confirmed match beats a stronger plain one; labels name the superseder");
+}
+{
+  const twoHoursAgo = new Date(Date.now() - 2 * 3600_000).toISOString();
+  const res = await R.searchEvidence(pool, "token bucket", { session_id: sidT, candidates: null, asOf: twoHoursAgo });
+  assert.equal(res.as_of, new Date(twoHoursAgo).toISOString());
+  const h = byT(res.hits);
+  assert.deepEqual([h[1].tier, h[1].label, h[1].citations[0].status], [2, "PROPOSED", "proposed"], "confirmed after as_of counts as proposed");
+  assert.deepEqual([h[3].tier, h[3].label, h[3].citations[0].superseded_by], [3, "current", null], "the superseder was confirmed after as_of, so the predecessor is still current");
+  assert.deepEqual([h[4].tier, h[4].label], [2, "PROPOSED"], "the superseder itself is only proposed as of then");
+  assert.deepEqual([h[5].tier, h[5].label], [2, "PROPOSED"], "rejected after as_of counts as proposed");
+  assert.deepEqual([h[8].tier, h[8].label], [3, "current"], "a ledger write is not an update; as_of does not demote it");
+  assert.deepEqual(seqOf(res.hits), [8, 3, 6, 9, 2, 5, 4, 1], `as-of ordering: ${seqOf(res.hits).join(",")}`);
+  const recent = await R.searchEvidence(pool, "token bucket", { session_id: sidT, candidates: null, asOf: new Date(Date.now() - 30 * 60_000).toISOString() });
+  assert.deepEqual(seqOf(recent.hits), [8, 4, 1, 6, 9, 2, 5, 3], "half an hour ago every confirmation had happened");
+  const early = await R.searchEvidence(pool, "token bucket", { session_id: sidT, candidates: null, asOf: iso(201) });
+  assert.deepEqual(seqOf(early.hits).sort(), [1, 3], "as_of also bounds the events themselves");
+  assert.equal(early.hits.find((e) => e.seq === 1)?.label, "PROPOSED", "no update existed at that instant, but the citing update's creation is what as_of hides; created 3h ago > 2026-09-08, so none apply");
+  await assert.rejects(R.searchEvidence(pool, "token bucket", { asOf: "not-a-date" }), /invalid asOf/);
+  ok("as_of: a confirmation, rejection or supersession after the instant is evaluated as proposed / not yet happened; events after the instant are excluded");
+}
+{
+  assert.equal((await R.searchEvents(pool, "token bucket", { author: "agaaz", candidates: null })).length, 0, "author filter: the session belongs to rachit");
+  assert.deepEqual(seqOf(await R.searchEvents(pool, "token bucket", { author: "rachit", candidates: null })), [8, 4, 1, 6, 9, 2, 5, 3]);
+  assert.equal((await R.searchEvents(pool, "token bucket", { repo: SITE, candidates: null })).length, 0, "scope repo: another repo sees nothing");
+  assert.equal((await R.searchEvents(pool, "token bucket", { repo: REPO, candidates: null })).length, 8, "scope repo: the session's repo sees everything");
+  assert.equal((await R.searchEvents(pool, "token bucket", { candidates: null })).length, 8, "scope all");
+  assert.deepEqual(seqOf(await R.searchEvents(pool, "token bucket", { session_id: sidT, candidates: null, limit: 2 })), [8, 4], "limit keeps the top of the authority ordering, not the top lexical ranks");
+  // scope resolution: repo whenever cwd is given, all otherwise, never widened silently
+  const fns = { repoRoot: (cwd: string) => (cwd.startsWith("/git/") ? cwd : null), repoIdentity: (root: string) => `https://github.com/tranzmit/${root.slice("/git/".length)}` };
+  assert.deepEqual(E.resolveSearchScope({ cwd: "/git/demo" }, fns), { scope: "repo", repo: "https://github.com/tranzmit/demo", cwd: "/git/demo", error: null });
+  assert.deepEqual(E.resolveSearchScope({}, fns), { scope: "all", repo: null, cwd: null, error: null });
+  assert.deepEqual(E.resolveSearchScope({ cwd: "/git/demo", scope: "all" }, fns), { scope: "all", repo: null, cwd: "/git/demo", error: null });
+  assert.deepEqual(E.resolveSearchScope({ scope: "repo", fallbackCwd: "/git/site" }, fns).repo, "https://github.com/tranzmit/site", "explicit repo scope falls back to the server cwd");
+  assert.match(E.resolveSearchScope({ scope: "repo" }, fns).error ?? "", /no cwd/, "explicit repo scope with nothing to resolve is an error");
+  assert.match(E.resolveSearchScope({ scope: "repo", fallbackCwd: "/tmp/nogit" }, fns).error ?? "", /not inside a git repo/, "never widened to all");
+  assert.match(E.resolveSearchScope({ cwd: "/tmp/nogit" }, fns).error ?? "", /not inside a git repo/, "a cwd outside git is an error, not scope all");
+  assert.equal(E.scopeLine(E.resolveSearchScope({ cwd: "/git/demo" }, fns), { retrieval: "lexical only" }), "scope: repo tranzmit/demo · author any · as of now · lexical only");
+  assert.equal(E.scopeLine(E.resolveSearchScope({}, fns), { author: "rachit", asOf: "2026-09-08T02:00:00.000Z", retrieval: "lexical + vector" }), "scope: all repos · author rachit · as of 2026-09-08T02:00:00.000Z · lexical + vector");
+  ok("author and repo filters; limit applies after authority ordering; resolveSearchScope defaults to repo with cwd, all without, errors instead of widening; scopeLine format");
+}
+{
+  const idOf = async (seq: number) => (await pool.query<{ id: string }>(`select id from cont_events where session_id = $1 and seq = $2`, [sidT, seq])).rows[0].id;
+  const [id10, id2, id9] = await Promise.all([idOf(10), idOf(2), idOf(9)]);
+  let seen: unknown = null;
+  const fake: import("./continuity/records.js").CandidateFn = async (query, filters, k) => { seen = { query, filters, k }; return [{ event_id: id10, score: 0.9 }, { event_id: id2, score: 0.8 }, { event_id: id9, score: 0.7 }]; };
+  const res = await R.searchEvidence(pool, "token bucket", { session_id: sidT, candidates: fake, limit: 20 });
+  assert.equal(res.retrieval, "lexical + vector");
+  assert.equal(res.retrieval_note, null);
+  assert.deepEqual(seen, { query: "token bucket", filters: { repo: undefined, record_id: undefined, session_id: sidT, kinds: undefined, sinceHours: undefined, asOf: undefined }, k: 60 }, "the generator gets the query, the filters and K = 3 × limit");
+  const h = byT(res.hits);
+  assert.ok(h[10], "a vector-only candidate joins the result");
+  assert.deepEqual([h[10].sources, h[10].rank, h[10].tier, h[10].label], [["vector"], 0, 1, "uncited"]);
+  assert.ok(Math.abs(h[10].similarity - 1 / 61) < 1e-9, `RRF for vector rank 1 only: ${h[10].similarity}`);
+  assert.deepEqual(h[2].sources, ["lexical", "vector"]);
+  assert.ok(h[2].similarity > h[10].similarity && h[2].similarity > h[9].similarity, "an event on both lists fuses higher than one on a single list");
+  assert.ok(Math.abs(h[9].similarity - (1 / (60 + 3) + 1 / (60 + res.hits.filter((e) => e.sources.includes("lexical")).length + 0))) > -1, "sanity");
+  assert.deepEqual(seqOf(res.hits), [8, 4, 1, 6, 9, 2, 10, 5, 3], `fusion changes similarity, not tier or recency: the vector top-1 (t10, oldest, uncited) lands at the end of tier 1: ${seqOf(res.hits).join(",")}`);
+  // a candidate outside the scope is dropped, never shown
+  const other = await R.searchEvidence(pool, "token bucket", { repo: SITE, candidates: fake });
+  assert.equal(other.hits.length, 0, "vector candidates from another repo do not leak into a repo-scoped search");
+  assert.equal(other.retrieval, "lexical only", "nothing survived the scope, so no vector list was used");
+  // a failing generator degrades to lexical and says so
+  const broken = await R.searchEvidence(pool, "token bucket", { session_id: sidT, candidates: async () => { throw new Error("pgvector missing"); } });
+  assert.equal(broken.retrieval, "lexical only");
+  assert.match(broken.retrieval_note ?? "", /vector search failed \(pgvector missing\)/);
+  assert.deepEqual(seqOf(broken.hits), [8, 4, 1, 6, 9, 2, 5, 3]);
+  // an empty list is reported, not hidden
+  const none = await R.searchEvidence(pool, "token bucket", { session_id: sidT, candidates: async () => [] });
+  assert.equal(none.retrieval, "lexical only");
+  assert.match(none.retrieval_note ?? "", /no candidates/);
+  // the default generator (dynamic import of ./embeddings.js) never breaks the search
+  const dflt = await R.searchEvidence(pool, "token bucket", { session_id: sidT });
+  assert.ok(dflt.retrieval === "lexical only" || dflt.retrieval === "lexical + vector", dflt.retrieval);
+  assert.ok(dflt.hits.length >= 8, "lexical hits are always present");
+  if (dflt.retrieval === "lexical only") assert.ok(dflt.retrieval_note, "lexical-only fallback states why");
+  ok("RRF: FTS top-K and an injected vector top-K fuse into similarity; vector-only hits appear with rank 0; scope filters apply to vector rows; a failing or empty generator falls back to lexical with a note");
+}
+{
+  const [row] = await (await import("./continuity/recordpack.js")).listRecordSummaries(pool, { q: "Rate limiter" });
+  assert.deepEqual([row.proposed, row.confirmed, row.state_version], [1, 2, 3], "now: uProp proposed; uC and uNew confirmed (uOld superseded)");
+  const twoHoursAgo = new Date(Date.now() - 2 * 3600_000);
+  const [asOf] = await R.asOfRecordSummaries(pool, [row], twoHoursAgo);
+  assert.deepEqual([asOf.proposed, asOf.confirmed, asOf.state_version], [4, 1, 1], "2h ago: uC, uNew, uRej, uProp all proposed; uOld confirmed and not yet superseded; two confirmations still to come");
+  assert.equal(asOf.as_of, twoHoursAgo.toISOString());
+  assert.deepEqual(await R.asOfRecordSummaries(pool, [row], new Date(Date.now() - 5 * 3600_000)), [], "a record created after as_of is hidden");
+  const [nowRow] = await R.asOfRecordSummaries(pool, [row], new Date());
+  assert.deepEqual([nowRow.proposed, nowRow.confirmed, nowRow.state_version], [1, 2, 3], "as of now equals the live summary");
+  ok("asOfRecordSummaries: counts and state_version re-evaluated as of an instant; records created later disappear");
 }
 
 // ---------- 8. records for a session ----------

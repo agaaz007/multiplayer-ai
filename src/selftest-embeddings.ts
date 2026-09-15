@@ -34,6 +34,7 @@ const E = await import("./continuity/embeddings.js");
 const { helperOnce } = await import("./helper/daemon.js");
 type Config = import("./store.js").Config;
 type NormEvent = import("./continuity/events.js").NormEvent;
+type EmbedFn = import("./continuity/embeddings.js").EmbedFn;
 
 let step = 0;
 const ok = (msg: string) => console.log(`  ok ${++step}. ${msg}`);
@@ -69,7 +70,7 @@ function fakeVector(text: string): number[] {
 }
 const providerCalls: string[][] = [];
 let transientDown = false;
-const fake: E.EmbedFn = async (inputs) => {
+const fake: EmbedFn = async (inputs) => {
   providerCalls.push(inputs);
   if (transientDown) throw new E.EmbedError("HTTP 503 upstream", { permanent: false, status: 503 });
   for (const t of inputs) if (t.includes("POISON")) throw new E.EmbedError("HTTP 400 input rejected", { permanent: true, status: 400 });
@@ -243,8 +244,8 @@ ok("fixtures: 16 events in 3 sessions across 2 repos, including a whitespace-onl
   assert.deepEqual(await E.vectorCandidates(pool, cfgE, q, { session_id: "no-such-session-anywhere" }, 10), [], "unknown session: []");
 
   // record filter: a record whose span covers r5..r8 in rachit's session only
-  const rec = await R.createRecord(pool, { kind: "investigation", title: "checkout latency", created_by: "rachit", repo: REPO } as any);
-  await R.linkSpan(pool, { record_id: rec.id, session_id: sidR, from_seq: await seqOf(sidR, "r5"), to_seq: await seqOf(sidR, "r8"), source: "explicit", created_by: "rachit" } as any);
+  const rec = await R.createRecord(pool, { kind: "investigation", title: "checkout latency", created_by: "rachit", repo: REPO });
+  await R.linkSpan(pool, { record_id: rec.id, session_id: sidR, from_seq: await seqOf(sidR, "r5"), to_seq: await seqOf(sidR, "r8"), source: "explicit", created_by: "rachit" });
   const byRecord = await E.vectorCandidates(pool, cfgE, q, { record_id: rec.id }, 10);
   assert.deepEqual(ids(byRecord).sort(), [idCheckoutInstr, await idOf(sidR, "r6:finished"), idLatencyMsg].sort(), `record span r5..r8 (tool.requested is not embedded): ${JSON.stringify(byRecord)}`);
   assert.equal(byRecord[0].event_id, idCheckoutInstr);

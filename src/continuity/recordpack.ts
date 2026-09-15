@@ -423,9 +423,11 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
   const asOfLine = asOf ? `as of ${fmt(asOf)}: state updates and events after this instant are hidden (links and contributing sessions are not filtered).` : null;
   // classifier lag per contributing session: organization into records may trail raw capture; say so
   const lagLines: string[] = [];
+  const lagStats: { session_id: string; cap: number; cls: number }[] = [];
   for (const s of sessions.slice(0, 3)) {
     const cap = (await pool.query<{ m: number }>(`select coalesce(max(seq),0)::int as m from cont_events where session_id = $1`, [s.session_id])).rows[0].m;
     const cls = readProgress(s.session_id)?.last_seq ?? 0;
+    lagStats.push({ session_id: s.session_id, cap, cls });
     lagLines.push(`Classifier: session ${short(s.session_id)} captured through seq ${cap}, classified through seq ${cls}${cap > cls ? ` (lag ${cap - cls} events; later work may be unassigned to any record yet; see ledger_unassigned)` : " (current)"}.`);
   }
 
@@ -606,13 +608,13 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
     L.push(`goal: ${rec.goal ? oneLine(rec.goal) : "(none recorded)"}`);
     if (asOfLine) L.push(asOfLine);
     L.push(`claim: ${claimInfo.note}`);
-    // honesty, compact: one line for the sessions, one for the snapshot and sources, one standing rule
+    // honesty, compact: sessions; snapshot + sources; the standing rule; classifier lag in one line
     const sesShown = sessions.slice(0, level >= 2 ? 2 : 6);
     L.push(`Honesty: ${sessions.length ? `${sessions.length} contributing session${sessions.length === 1 ? "" : "s"}: ${sesShown.map((s) => `${short(s.session_id)} (${s.author}, ${harnessName(s.harness)}, last seen ${fmt(s.last_seen_at)}${s.ended ? ", ended" : ""})`).join("; ")}${sessions.length > sesShown.length ? `; … ${sessions.length - sesShown.length} more` : ""}.` : "no span is linked to this record yet; link one with ledger_record_link."}`);
     L.push(`${!rec.repo ? "Non-code record: no code snapshot applies." : vSnap ? `Code saved through ${fmt(vSnap.at)} (remote-verified; ${vSnap.from}).` : "No verified code snapshot among contributing sessions: treat the code state as unverified."} Sources: ${sources.instructions} instructions, ${sources.assistant_messages} assistant messages, ${sources.tool_calls} tool calls, ${sources.compaction_summaries} compaction summaries across ${sources.sessions} sessions in ${sources.spans} spans; ${sources.proposed_updates} proposed and ${sources.confirmed_updates} confirmed state updates.`);
-    L.push(`The claim is advisory. Proposed items are unconfirmed: nobody has accepted them. Narrative-free: machine-assembled from evidence; no event text is inlined here, every reference below is an exact fetch.`);
-    const lag = lagLines.filter((l) => l.includes("(lag "));
-    if (lag.length) for (const l of lag.slice(0, 2)) L.push(l);
+    L.push(`The claim is advisory. Proposed items are unconfirmed: nobody has accepted them. Narrative-free: no event text is inlined here; every reference below is an exact fetch.`);
+    const lag = lagStats.filter((s) => s.cap > s.cls);
+    if (lag.length) L.push(`Classifier lag: ${lag.map((s) => `${short(s.session_id)} ${s.cap - s.cls} of ${s.cap} events unclassified`).join("; ")}; later work may be unassigned to any record yet (ledger_unassigned).`);
     L.push(``);
 
     // state: confirmed first within each kind; proposed in full up to LEAN_PROPOSED_FULL, else count + ids

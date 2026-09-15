@@ -172,15 +172,15 @@ export function embedProvider(cfg: Config): EmbedFn {
 /** `text || input || output_preview`, clipped, prefixed with the kind and the tool name when present. Null when there is nothing to embed. */
 export function eventText(kind: string, payload: Record<string, unknown> | null | undefined, maxChars: number): string | null {
   const p = payload ?? {};
-  const raw = [p.text, p.input, p.output_preview].map((v) => (typeof v === "string" ? v : v == null ? "" : String(v))).find((v) => v.length > 0) ?? "";
-  const body = raw.trim();
+  // first of text / input / output_preview with non-blank content (EVENT_TEXT_SQL below is the SQL twin of this)
+  const body = [p.text, p.input, p.output_preview].map((v) => (typeof v === "string" ? v : v == null ? "" : String(v)).trim()).find((v) => v.length > 0) ?? "";
   if (!body) return null;
   const tool = typeof p.tool === "string" && p.tool ? ` ${p.tool}` : "";
   return `${kind}${tool}: ${body.slice(0, maxChars)}`;
 }
 
-/** SQL mirror of `payload.text || payload.input || payload.output_preview` (empty strings fall through like JS `||`). */
-const EVENT_TEXT_SQL = `coalesce(nullif(ev.payload->>'text',''), nullif(ev.payload->>'input',''), nullif(ev.payload->>'output_preview',''))`;
+/** SQL twin of eventText's field choice: first of text / input / output_preview that is not blank. */
+const EVENT_TEXT_SQL = `coalesce(nullif(btrim(ev.payload->>'text'),''), nullif(btrim(ev.payload->>'input'),''), nullif(btrim(ev.payload->>'output_preview'),''))`;
 
 export const vectorLiteral = (v: number[]): string => `[${v.map((x) => (Number.isFinite(x) ? x : 0)).join(",")}]`;
 
