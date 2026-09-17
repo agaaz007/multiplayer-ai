@@ -33,7 +33,9 @@ try {
   // ---- lineage is drawn, and only from version-pinned references ----
   const d1 = get(record(cfg, { type: "definition", fields: definition() }).id);
   const pinned = get(record(cfg, { type: "finding", fields: finding("Pinned to the definition", [dep(d1)]) }).id);
-  const named = get(record(cfg, { type: "finding", fields: finding("Definition by name only", []) }).id);
+  // The write path refuses a new *scoped* stable finding that names a metric without pinning it, so
+  // an unpinned name only exists in the legacy (unscoped) shape. That is the shape --unpinned hunts.
+  const named = get(record(cfg, { type: "finding", fields: finding("Definition by name only", [], { analysis_scope: undefined }) }).id);
   const decision = get(record(cfg, { type: "decision", fields: { title: "Target marriage intent on Android",
     decision: "Run the next paywall test on marriage intent", context: "One experiment slot this cycle and two candidate cohorts.",
     options_considered: [{ option: "Marriage / Android", chosen: true }, { option: "Do nothing", rationale: "slot unused" }],
@@ -75,7 +77,17 @@ try {
     assert.doesNotMatch(rendered, /\b20\d\d-\d\d-\d\d\b/, "no date reaches the rendered graph at all");
   }
 
-  // ---- a pin that stopped matching is louder than a name ----
+  // ---- reproduction: recorded while d1 is still the sole applicable accepted definition ----
+  const repro = get(record(cfg, { type: "finding", fields: finding("Re-ran the pinned cut",
+    [dep(d1), dep(get(pinned.id), "derived-from")],
+    { reproduction_of: { id: pinned.id, version: objectVersion(get(pinned.id)), outcome: "matched" } }) }).id);
+  const reproduced = buildGraph(cfg);
+  assert.equal(edge(reproduced, repro.id, pinned.id)?.kind, "reproduction");
+  assert.match(String(edge(reproduced, repro.id, pinned.id)?.detail), /matched/);
+  assert.equal(node(reproduced, pinned.id).verification, "reproduced");
+  assert.match(toDot(reproduced).split("\n").find((l) => l.includes(`"${pinned.id}" [`))!, /peripheries=2/);
+
+  // ---- supersession: the predecessor retires, but a pin that still matches stays lineage ----
   const d2 = get(record(cfg, { type: "definition", fields: definition({ title: "Denominator corrected to eligible exposures",
     formula: "trial users / eligible exposed users", supersedes: d1.id, acceptance: accept(d1),
     correction: { effect: "historical", reason: "denominator counted ineligible exposures" } }) }).id);
@@ -94,15 +106,21 @@ try {
   assert.equal(impact.nodes.find((n) => n.id === decision.id), undefined, "the blast radius is not the whole ledger");
   assert.match(toDot(impact).split("\n").find((l) => l.includes(`"${pinned.id}" [`))!, /color="#cf222e"/);
 
-  // ---- reproduction ----
-  const repro = get(record(cfg, { type: "finding", fields: finding("Re-ran the pinned cut",
-    [dep(get(pinned.id), "derived-from")], { title: "Re-ran the pinned cut", author: "agaaz",
-    reproduction_of: { id: pinned.id, version: objectVersion(get(pinned.id)), outcome: "matched" } }) }).id);
-  const reproduced = buildGraph(cfg);
-  assert.equal(edge(reproduced, repro.id, pinned.id)?.kind, "reproduction");
-  assert.match(String(edge(reproduced, repro.id, pinned.id)?.detail), /matched/);
-  assert.equal(node(reproduced, pinned.id).verification, "reproduced");
-  assert.match(toDot(reproduced).split("\n").find((l) => l.includes(`"${pinned.id}" [`))!, /peripheries=2/);
+
+  // ---- a pin that stopped matching: only reachable by editing bytes outside the write path,
+  // which is exactly when a reader most needs to see that the exactness claim expired ----
+  const other: AnalysisScope = { ...scope, metric: "paid_cvr", dataset: "fixture-paid-v1" };
+  const d3 = get(record(cfg, { type: "definition", fields: definition({ title: "Paid conversion", metric: "paid_cvr", analysis_scope: other }) }).id);
+  const pinsD3 = get(record(cfg, { type: "finding", fields: finding("Pinned to paid conversion", [dep(d3)],
+    { analysis_scope: other, definitions_used: ["paid_cvr"] }) }).id);
+  assert.equal(edge(buildGraph(cfg), pinsD3.id, d3.id)?.strength, "pinned");
+  fs.appendFileSync(d3.path, "\nHand-edited outside the write path.\n");
+  const drifted = buildGraph(cfg);
+  assert.equal(edge(drifted, pinsD3.id, d3.id)?.strength, "stale");
+  assert.match(String(edge(drifted, pinsD3.id, d3.id)?.detail), /version no longer matches/);
+  assert.equal(drifted.summary.stale_pins, 1);
+  assert.match(drifted.scope, /1 stale pin/);
+  assert.match(toDot(drifted).split("\n").find((l) => l.includes(`"${pinsD3.id}" -> "${d3.id}"`))!, /style=dashed, color="#cf222e"/);
 
   // ---- ego graph ----
   const ego = buildGraph(cfg, { id: d1.id, depth: 1 });
