@@ -4,7 +4,7 @@ import { loadAll, type Config } from "../store.js";
 import { TYPES } from "../schema.js";
 import { objectVersion, resolveAccepted, correctionImpact } from '../authority.js';
 import { claimThread, getClaim, getSession, getThread, headCheckpoint, pendingOperations, type ClaimRow, type ThreadRow } from "./store.js";
-import { listRecords, recordEvidence, recordEvidenceCount, recordLinks, recordState, unassignedSpans, type LinkSource, type RecordKind, type RecordState, type RecordStatus, type StateUpdate, type UnassignedSpan, type WorkRecord } from "./records.js";
+import { listRecords, recordEvidence, recordEvidenceCount, recordLinks, recordState, unassignedSpans, type LinkSource, type RecordKind, type RecordState, type RecordStatus, type StateUpdate, type UnassignedSpan, type WorkRecord, codeRepos, recordWhere } from "./records.js";
 import { clipSummary, INSTRUCTIONS_HEAD, RECENT_FILES_MINUTES, SUMMARY_BUDGET_SHARE, SUMMARY_MAX_TOKENS } from "./resume.js";
 import { eventLine, PREVIEW_MAX_CHARS } from "./evidence.js";
 import { defaultRemoteBranch, repoIdentity, repoRoot } from "./shadow.js";
@@ -213,7 +213,7 @@ export async function listRecordSummaries(qq: Q, f: { repo?: string | null; kind
 
 /** `<kind> · <title> · <repo basename or non-code> · updated <ago> · <n> sessions · <proposed>/<confirmed> updates · <id>` */
 export function recordLine(s: RecordSummary, now = new Date()): string {
-  return `- ${s.kind} · ${s.title} · ${s.repo ? path.basename(s.repo) : "non-code"} · updated ${ago(s.updated_at, now)} · ${s.sessions} session${s.sessions === 1 ? "" : "s"} · ${s.proposed}/${s.confirmed} updates · ${s.id}`;
+  return `- ${s.kind} · ${s.title} · ${recordWhere(s)} · updated ${ago(s.updated_at, now)} · ${s.sessions} session${s.sessions === 1 ? "" : "s"} · ${s.proposed}/${s.confirmed} updates · ${s.id}`;
 }
 
 // ---------- private: what the record's evidence is made of ----------
@@ -263,8 +263,14 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
   const latest = sessions[0] ?? null;
 
   // ----- the thread behind the record (most recent contributing session bound to one), for claim and bootstrap -----
+  // Code applies when the record is code work (repo identity) or an investigation whose sessions ran inside repos
+  // (touched_repos: capabilities the work may read, not its identity).
+  const code = codeRepos(rec);
+  const hasCode = code.length > 0;
+  /** header "where": identity repo for code work; touched repos (capabilities, not identity) for an investigation; else non-code */
+  const whereLine = rec.repo ? `repo ${rec.repo}` : hasCode ? `repos touched ${code.join(", ")} (read as tools; identity is the question)` : "non-code work";
   let thread: ThreadRow | null = null;
-  if (rec.repo) {
+  if (hasCode) {
     for (const s of sessions) {
       if (!s.thread_id) continue;
       const t = await getThread(pool, s.thread_id);
@@ -273,7 +279,7 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
   }
   const sessionId = opts.sessionId ?? `resume:${opts.author}:${now.toISOString()}`;
   let claimInfo: RecordPack["claim"];
-  if (!rec.repo) claimInfo = { acquired: false, thread_id: null, note: "non-code record; no thread claim (claims belong to threads, and this record has no repo)" };
+  if (!hasCode) claimInfo = { acquired: false, thread_id: null, note: "non-code record; no thread claim (claims belong to threads, and this record has no repo)" };
   else if (!thread) claimInfo = { acquired: false, thread_id: null, note: "no contributing session is bound to a thread; nothing to claim. The snapshot, if any, comes from the sessions themselves." };
   else if (opts.mode === "continue") {
     const c = await claimThread(pool, thread.id, sessionId, opts.author);
@@ -395,7 +401,7 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
   // ----- bootstrap: the latest snapshot among contributing sessions, else their thread's head -----
   let bootstrap: string[] = [];
   let wip: { ref: string; commit: string; from: string } | null = null;
-  if (rec.repo) {
+  if (hasCode) {
     for (const s of sessions) {
       if (s.wip_ref && s.wip_commit) { wip = { ref: s.wip_ref, commit: s.wip_commit, from: `session ${short(s.session_id)} (${s.author}, ${harnessName(s.harness)})` }; break; }
       if (s.thread_id) {
@@ -404,8 +410,8 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
       }
     }
     const localRepo = opts.repoPath ? repoRoot(opts.repoPath) : null;
-    const sameRepo = localRepo ? repoIdentity(localRepo) === rec.repo : false;
-    if (opts.repoPath && !sameRepo) omitted.push(`bootstrap rebase target defaulted: ${localRepo ? `local checkout is ${repoIdentity(localRepo)}, record repo is ${rec.repo}` : `${opts.repoPath} is not a git repo`}`);
+    const sameRepo = localRepo ? code.includes(repoIdentity(localRepo)) : false;
+    if (opts.repoPath && !sameRepo) omitted.push(`bootstrap rebase target defaulted: ${localRepo ? `local checkout is ${repoIdentity(localRepo)}, record ${rec.repo ? "repo is" : "touched repos are"} ${code.join(", ")}` : `${opts.repoPath} is not a git repo`}`);
     if (wip) {
       const slug = rec.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "record";
       bootstrap = [
@@ -437,7 +443,7 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
     const om = [...omitted];
     const L: string[] = [];
     L.push(`# Record pack: ${rec.title}`);
-    L.push(`record ${rec.id} · ${rec.kind} · ${rec.repo ? `repo ${rec.repo}` : "non-code work"} · status ${rec.status} · created by ${rec.created_by} ${fmt(rec.created_at)} · state v${rec.state_version} · updated ${fmt(rec.updated_at)}`);
+    L.push(`record ${rec.id} · ${rec.kind} · ${whereLine} · status ${rec.status} · created by ${rec.created_by} ${fmt(rec.created_at)} · state v${rec.state_version} · updated ${fmt(rec.updated_at)}`);
     L.push(`goal: ${rec.goal ? oneLine(rec.goal) : "(none recorded)"}`);
     if (asOfLine) L.push(asOfLine);
     for (const conflict of state.conflicts) L.push(`UNRESOLVED ACCEPTED CONFLICT: ${conflict.update_ids.join(', ')} replace ${conflict.supersedes}. Do not choose by recency; inspect evidence and explicitly resolve.`);
@@ -451,7 +457,7 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
     for (const s of sessions.slice(0, level >= 5 ? 3 : 12)) L.push(`- ${short(s.session_id)} · ${s.author} · ${harnessName(s.harness)} · last seen ${fmt(s.last_seen_at)} (${s.ended ? "ended" : "not marked ended"}) · ${s.spans} span${s.spans === 1 ? "" : "s"}${s.thread_id ? ` · thread ${short(s.thread_id)}` : ""}`);
     const sesMax = level >= 5 ? 3 : 12;
     if (sessions.length > sesMax) { L.push(`- … ${sessions.length - sesMax} more contributing sessions`); om.push(`${sessions.length - sesMax} contributing sessions not listed; ledger_record_get(record_id: ${q(rec.id)})`); }
-    if (!rec.repo) L.push(`Non-code record: no code snapshot applies.`);
+    if (!hasCode) L.push(`Non-code record: no code snapshot applies.`);
     else if (vSnap) L.push(`Code saved through ${fmt(vSnap.at)} (remote-verified; ${vSnap.from}).`);
     else L.push(`No verified code snapshot among contributing sessions: treat the code state as unverified.`);
     L.push(`Sources: ${sources.instructions} instructions, ${sources.assistant_messages} assistant messages, ${sources.tool_calls} tool calls, ${sources.compaction_summaries} compaction summaries across ${sources.sessions} sessions in ${sources.spans} spans; ${sources.proposed_updates} proposed and ${sources.confirmed_updates} confirmed state updates.`);
@@ -578,7 +584,7 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
 
     // bootstrap
     L.push(`## Bootstrap`);
-    if (!rec.repo) L.push(`non-code record; no worktree`);
+    if (!hasCode) L.push(`non-code record; no worktree`);
     else if (bootstrap.length) { L.push(`snapshot from ${wip!.from}`); L.push("```\n" + bootstrap.join("\n") + "\n```"); }
     else L.push(`(no snapshot to check out: no contributing session or thread head carries a verified wip ref)`);
     L.push(``);
@@ -586,7 +592,7 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
     // contract
     L.push(`## First turn contract`);
     L.push(`1. Inspect the state and decisions above. ${DECISION_RULE} Contradictions stay open until a person resolves them.`);
-    L.push(rec.repo ? `2. Check out the snapshot into a fresh worktree and inspect it; do not assume the branch tip matches. State what is confirmed (verified snapshot, linked evidence) vs uncertain (unverified edits, pending operations).` : `2. This is non-code work: there is no worktree. State what is confirmed (linked evidence, confirmed updates) vs uncertain (proposed updates, unassigned spans).`);
+    L.push(hasCode ? `2. Check out the snapshot into a fresh worktree and inspect it; do not assume the branch tip matches. State what is confirmed (verified snapshot, linked evidence) vs uncertain (unverified edits, pending operations).` : `2. This is non-code work: there is no worktree. State what is confirmed (linked evidence, confirmed updates) vs uncertain (proposed updates, unassigned spans).`);
     L.push(`3. Do not rerun a pending operation that mutates anything until you know its outcome.`);
     L.push(`4. Propose progress, decisions, hypotheses, blockers, and next steps with ledger_record_update(record_id: ${q(rec.id)}, action: "propose", …) citing exact evidence (session_id, seq). An agent confirmation is labelled agent-confirmed, never accepted by a person; ask the person to run \`ledger record confirm <update_id>\` for anything they decide.`);
     L.push(`5. Link this session's relevant spans with ledger_record_link(record_id: ${q(rec.id)}, session_id, from_seq, to_seq); the helper captures events automatically but does not know which record they serve.`);
@@ -614,7 +620,7 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
     const om = [...omitted];
     const L: string[] = [];
     L.push(`# Record pack: ${rec.title}`);
-    L.push(`record ${rec.id} · ${rec.kind} · ${rec.repo ? `repo ${rec.repo}` : "non-code work"} · status ${rec.status} · created by ${rec.created_by} ${fmt(rec.created_at)} · state v${rec.state_version} · updated ${ago(rec.updated_at, now)}`);
+    L.push(`record ${rec.id} · ${rec.kind} · ${whereLine} · status ${rec.status} · created by ${rec.created_by} ${fmt(rec.created_at)} · state v${rec.state_version} · updated ${ago(rec.updated_at, now)}`);
     L.push(`goal: ${rec.goal ? oneLine(rec.goal) : "(none recorded)"}`);
     if (asOfLine) L.push(asOfLine);
     L.push(`claim: ${claimInfo.note}`);
@@ -623,7 +629,7 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
     const sesShown = sessions.slice(0, sesMax);
     L.push(`Honesty: ${sessions.length ? `${sessions.length} contributing session${sessions.length === 1 ? "" : "s"}: ${sesShown.map((s) => `${short(s.session_id)} (${s.author}, ${harnessName(s.harness)}, last seen ${ago(s.last_seen_at, now)}${s.ended ? ", ended" : ""})`).join("; ")}${sessions.length > sesShown.length ? `; … ${sessions.length - sesShown.length} more` : ""}.` : "no span is linked to this record yet; link one with ledger_record_link."}`);
     if (sessions.length > sesMax) om.push(`${sessions.length - sesMax} contributing sessions not listed (for budget); ${evidenceFetch}`);
-    L.push(`${!rec.repo ? "Non-code record: no code snapshot applies." : vSnap ? `Code saved through ${fmt(vSnap.at)} (remote-verified; ${vSnap.from}).` : "No verified code snapshot among contributing sessions: treat the code state as unverified."} Claim advisory; nothing inlined, references are exact fetches.`);
+    L.push(`${!hasCode ? "Non-code record: no code snapshot applies." : vSnap ? `Code saved through ${fmt(vSnap.at)} (remote-verified; ${vSnap.from}).` : "No verified code snapshot among contributing sessions: treat the code state as unverified."} Claim advisory; nothing inlined, references are exact fetches.`);
     L.push(LEAN_DECISION_RULE);
     const lag = lagStats.filter((s) => s.cap > s.cls);
     if (lag.length) L.push(`Classifier lag: ${lag.map((s) => `${short(s.session_id)} ${s.cap - s.cls}/${s.cap}`).join(", ")} events unclassified (ledger_unassigned).`);
@@ -688,7 +694,7 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
 
     // bootstrap
     L.push(`## Bootstrap`);
-    if (!rec.repo) L.push(`non-code record; no worktree`);
+    if (!hasCode) L.push(`non-code record; no worktree`);
     else if (bootstrap.length) { L.push(`snapshot from ${wip!.from}`); L.push("```\n" + bootstrap.join("\n") + "\n```"); }
     else L.push(`(no snapshot to check out: no contributing session or thread head carries a verified wip ref)`);
     L.push(``);
