@@ -39,7 +39,8 @@ export interface InvestigationItem {
 }
 
 const TITLE_MAX = 140;
-const NEAR_DUPLICATE = 0.9;
+/** Title-token coverage, both directions, for the declare-time refusal. Not the ledger-object measure in query.ts: this compares two investigation titles, not two recorded questions, and 0.9 means each title covers nine tenths of the other's tokens. */
+const NEAR_IDENTICAL_TITLE = 0.9;
 const BOUND_NOTE_PREFIX = "bound by ";
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -183,7 +184,7 @@ export async function declareInvestigation(pool: pg.Pool, cfg: Config, opts: { q
   if (!question) throw new Error("question is required to declare an investigation");
   const title = question.length > TITLE_MAX ? question.slice(0, TITLE_MAX - 1) + "…" : question;
   const open = await openInvestigationRows(pool, { cap: 500 });
-  const dup = open.map((r) => ({ r, s: titleSimilarity(title, r.title) })).filter((x) => x.s >= NEAR_DUPLICATE).sort((a, b) => b.s - a.s)[0];
+  const dup = open.map((r) => ({ r, s: titleSimilarity(title, r.title) })).filter((x) => x.s >= NEAR_IDENTICAL_TITLE).sort((a, b) => b.s - a.s)[0];
   if (dup) {
     throw new Error(`An open investigation with a near-identical question already exists: "${dup.r.title}" (${dup.r.record_id}, by ${dup.r.created_by}, match ${dup.s.toFixed(2)}). Bind to it with ledger_investigation_bind(record_id: "${dup.r.record_id}") instead of declaring a new one; if the question is genuinely different, reword it so the difference is in the title.`);
   }
