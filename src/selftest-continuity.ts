@@ -51,7 +51,7 @@ const base: Omit<Config, "author"> = { ledger_dir: ledgerDir, git_sync: false, c
 const cfgR: Config = { ...base, author: "rachit", continuity: { ...base.continuity!, machine: "rachit-mac" } };
 const cfgA: Config = { ...base, author: "agaaz", continuity: { ...base.continuity!, machine: "agaaz-mac" } };
 const pool = getPool(cfgR);
-await pool.query(`drop table if exists cont_state_updates, cont_record_links, cont_records, cont_notifications, cont_artifacts, cont_claims, cont_checkpoints, cont_events, cont_sessions, cont_threads cascade`);
+await pool.query(`drop table if exists cont_session_bindings, cont_state_updates, cont_record_links, cont_records, cont_notifications, cont_artifacts, cont_claims, cont_checkpoints, cont_events, cont_sessions, cont_threads cascade`);
 await migrate(pool);
 ok(`schema reset on ${DB.replace(/\/\/[^@]*@/, "//…@")}`);
 
