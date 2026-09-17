@@ -13,6 +13,7 @@ import { verifyAcceptanceEvidence } from './acceptance-evidence.js';
 import { validateRecordCoverage, acknowledgeLocalCapture, reconcileSharedCapture } from './capture-boundary.js';
 import { investigation } from './investigation.js';
 import { correctionImpact, objectVersion, resolveAccepted } from './authority.js';
+import { buildGraph, renderGraph, type GraphFormat } from './graph.js';
 import { AnalysisScopeSchema, AnalyticalDateSchema } from './schema.js';
 import { DEFAULT_QUIET_MS, pendingDrafts, reconcile } from "./extract.js";
 import { continuityConfigured, getPool, migrate, tableList, closePools } from "./continuity/db.js";
@@ -21,6 +22,7 @@ import { buildResumePack, threadLine } from "./continuity/resume.js";
 import { queryEvents, getArtifact } from "./continuity/evidence.js";
 import { checkoutWip, repoRoot, repoIdentity } from "./continuity/shadow.js";
 import { openThreadsText } from "./continuity/brief.js";
+import { bindInvestigation, declareInvestigation, listInvestigations, sessionBinding } from "./continuity/investigations.js";
 import { buildRecordPack, listRecordSummaries, recordLine, unassignedLine } from "./continuity/recordpack.js";
 import { addStateUpdate, confirmStateUpdate, createRecord, getRecord, linkSpan, rejectStateUpdate, unassignedSpans, type RecordKind, type RecordStatus, type UpdateKind } from "./continuity/records.js";
 import { helperOnce, helperLoop, loadState } from "./helper/daemon.js";
@@ -44,6 +46,14 @@ const USAGE = `ledger — shared definitions, findings, changes, decisions for y
   ledger investigate <question> [--scope scope.json] [--definitions id,id] [--as-of DATE]
                                          accepted corrections, exact evidence and affected findings across all history
   ledger impact <correction-id>           direct/transitive review paths and unresolved lineage
+  ledger graph [--format mermaid|dot|json] [--id ID --depth N] [--impact ID]
+                                         render the lineage already in the ledger: supersedes, pinned
+                                         dependencies, reproductions, evidence. Selection:
+                                         --conflicts (unresolved accepted heads) · --unpinned (findings
+                                         on a definition name with no pinned version) · --impact <id>
+                                         (blast radius of a correction). Filters: --type --tag --author
+                                         --days N --current-only. --names draws dashed definitions_used
+                                         edges; --legend adds a key. Scope line goes to stderr.
   ledger record <type> < fields.json     record from JSON on stdin
   ledger drafts                          drafts awaiting review (from the transcript fallback)
   ledger discard <id> --reason "..."     reject a draft
@@ -76,6 +86,14 @@ const USAGE = `ledger — shared definitions, findings, changes, decisions for y
   ledger record link <id> <session> <from> <to> [--note n]
   ledger record propose <id> <kind> <text…> --evidence <session>:<seq>[,…] [--supersedes <update>]
   ledger record confirm <update-id> | ledger record reject <update-id> --reason "..."
+  ledger investigation list [--q text] [--author a] [--hours N] [--limit N]
+                                         open investigation records across all repos (repo-less included), ranked by match to --q
+  ledger investigation bind <record-id> [--session <id>] [--question q]
+                                         bind an analysis session to an open investigation (explicit span from seq 1; the helper extends it)
+  ledger investigation new "<question>" [--goal g] [--session <id>] [--repo <identity>]
+                                         declare a new investigation and bind the session; refused when a near-identical open one exists
+  ledger investigation show --session <id>
+                                         which investigation a session is bound to
   ledger unassigned [--hours N] [--session id] [--author a] [--limit N]
                                          spans no record claims: preview, seq range, author, harness, time
   ledger events --thread <id> | --session <id> [--kinds a,b] [--path p] [--q text] [--after N] [--before N] [--limit N] [--chars N]
@@ -93,7 +111,8 @@ function flag(args: string[], name: string): string | undefined {
   return i === -1 ? undefined : args[i + 1];
 }
 
-const BOOL_FLAGS = new Set(["--all", "--plain", "--box", "--no-push", "--dry-run", "--show"]);
+const BOOL_FLAGS = new Set(["--all", "--plain", "--box", "--no-push", "--dry-run", "--show",
+  "--current-only", "--conflicts", "--unpinned", "--names", "--legend"]);
 /** Non-flag arguments, with `--name value` pairs and boolean flags removed. */
 function positionals(args: string[]): string[] {
   const out: string[] = [];
@@ -308,6 +327,36 @@ async function main() {
       case 'impact': {
         if (!args[0]) throw new Error('usage: ledger impact <correction-id>');
         console.log(JSON.stringify(correctionImpact(loadAll(loadConfig()),args[0]),null,2));
+        return;
+      }
+      case "graph": {
+        const format = (flag(args, "--format") ?? "mermaid") as GraphFormat;
+        if (!["mermaid", "dot", "json"].includes(format)) throw new Error(`unknown --format ${format}; use mermaid, dot or json`);
+        const depth = flag(args, "--depth");
+        const days = flag(args, "--days");
+        const t = flag(args, "--type") as LedgerType | undefined;
+        if (t && !TYPES.includes(t)) throw new Error(`unknown --type ${t}; use ${TYPES.join(", ")}`);
+        const g = buildGraph(loadConfig(), {
+          types: t ? [t] : undefined,
+          tags: flag(args, "--tag")?.split(","),
+          author: flag(args, "--author"),
+          days: days ? Number(days) : undefined,
+          id: flag(args, "--id") ?? positionals(args)[0],
+          depth: depth ? Number(depth) : undefined,
+          currentOnly: args.includes("--current-only"),
+          conflictsOnly: args.includes("--conflicts"),
+          unpinnedOnly: args.includes("--unpinned"),
+          impact: flag(args, "--impact"),
+          names: args.includes("--names"),
+        });
+        // The scope line goes to stderr so stdout stays a clean pipe into graphviz or a mermaid paste,
+        // while a reader still sees what the picture cut. Silence here would let a filtered graph
+        // read as the whole ledger.
+        console.error(g.scope);
+        for (const heads of g.summary.conflicts)
+          console.error(`UNRESOLVED: ${heads.join(" vs ")} — both accepted, no authoritative head. Drawn without an arrow; resolve with evidence, never by recency.`);
+        if (!g.nodes.length) { console.error("nothing selected"); return; }
+        console.log(renderGraph(g, format, args.includes("--legend")));
         return;
       }
       case "record": {
@@ -548,6 +597,37 @@ async function main() {
           limit: Number(flag(args, "--limit") ?? 20),
         });
         console.log(rows.length ? rows.map((r) => recordLine(r)).join("\n") : "no records");
+        await closePools();
+        return;
+      }
+      case "investigation": {
+        // analysis-session scope (dec-20260917-multi-pm-continuity-bind-or-new-at-session-start-u44f): bind or declare, any repo or none
+        const cfg = loadConfig();
+        const pool = getPool(cfg);
+        const pos = positionals(args);
+        const sub = pos[0];
+        const usage = `usage: ledger investigation list [--q text] [--author a] [--hours N] [--limit N] | bind <record-id> [--session <id>] [--question q] | new "<question>" [--goal g] [--session <id>] [--repo <identity>] | show --session <id>`;
+        const sessionArg = flag(args, "--session") ?? process.env.LEDGER_SESSION_ID;
+        if (sub === "list") {
+          const hours = flag(args, "--hours"), limit = flag(args, "--limit");
+          const r = await listInvestigations(pool, cfg, { q: flag(args, "--q"), author: flag(args, "--author"), hours: hours ? Number(hours) : undefined, limit: limit ? Number(limit) : undefined });
+          console.log(r.text);
+        } else if (sub === "bind") {
+          if (!pos[1]) throw new Error(usage);
+          if (!sessionArg) throw new Error(`${usage}\nbind needs the session to bind: --session <id> (or LEDGER_SESSION_ID)`);
+          const r = await bindInvestigation(pool, cfg, { record_id: pos[1], session_id: sessionArg, question: flag(args, "--question") });
+          console.log(r.text);
+        } else if (sub === "new") {
+          const question = pos.slice(1).join(" ");
+          if (!question) throw new Error(usage);
+          // without a live session the CLI binds a synthetic one, as `ledger resume` does, so the record exists and the declaration is attributed
+          const r = await declareInvestigation(pool, cfg, { question, goal: flag(args, "--goal"), session_id: sessionArg ?? `cli:${cfg.author}:${Date.now()}`, repo: flag(args, "--repo") ?? null });
+          console.log(r.text);
+        } else if (sub === "show") {
+          if (!sessionArg) throw new Error(usage);
+          const b = await sessionBinding(pool, sessionArg);
+          console.log(b ? `session ${sessionArg} → investigation ${b.record_id} (bound by ${b.bound_by} at ${b.bound_at}${b.question ? `; question: ${b.question}` : ""})` : `session ${sessionArg} is not bound to an investigation`);
+        } else throw new Error(usage);
         await closePools();
         return;
       }

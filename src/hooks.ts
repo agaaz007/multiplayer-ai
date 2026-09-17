@@ -28,7 +28,7 @@ import { DEFAULT_DATA_TOOLS } from "./capture-tools.js";
  * pilot can count how often the nudge was ignored.
  */
 
-export type EntryKind = "query" | "decision" | "record" | "skip" | "search" | "nudge" | "unresolved" | "compact" | "end";
+export type EntryKind = "query" | "decision" | "record" | "skip" | "search" | "nudge" | "unresolved" | "compact" | "end" | "bind" | "gate";
 
 export interface JournalEntry {
   at: string;
@@ -42,6 +42,8 @@ export interface JournalEntry {
   input_complete?: boolean;
   /** decision entries: the work record the classifier proposed the decision on */
   record_title?: string;
+  /** query entries: a material pull (not a metadata call, and the response carried numbers or rows). Absent on entries journaled before 2026-09-17. */
+  material?: boolean;
 }
 
 export interface CaptureCoverage { session_id: string; evidence_ids: string[] }
@@ -63,6 +65,10 @@ export interface Journal {
   entries: JournalEntry[];
   /** fingerprint of the debt last nudged; same debt is never nudged twice */
   nudged?: string;
+  /** the open investigation this analysis session is bound to (ledger_investigation_bind / ledger_investigation_new) */
+  investigation?: { record_id: string; title?: string; at: string };
+  /** Stop already blocked once for "material queries, no investigation binding"; a bind clears the condition itself */
+  unbound_nudged?: boolean;
   /** Latest fallback batch. Coverage is explicit; a resumed session can accrue new debt. */
   extracted?: { at: string; result: "none" | "drafts" | "skipped" | "error"; reason: string; draft_ids: string[]; attempts?: number; evidence_ids?: string[] };
   extractions?: NonNullable<Journal["extracted"]>[];
@@ -82,9 +88,43 @@ export interface HookOpts {
   now?: Date;
 }
 
-const RECORD_TOOL = /^mcp__ledger__ledger_record_(finding|decision|change|definition)$/;
+/** ledger_propose_finding (query-grain draft, 2026-09-17) saves a draft with a pending_review capture_ack; the same acknowledgment path applies. */
+const RECORD_TOOL = /^mcp__ledger__ledger_(record_(finding|decision|change|definition)|propose_finding)$/;
 const SKIP_TOOL = "mcp__ledger__ledger_skip_record";
-const SEARCH_TOOLS = /^mcp__ledger__ledger_(search|brief|get)$/;
+const SEARCH_TOOLS = /^mcp__ledger__ledger_(search|brief|get|investigations)$/;
+/** Binding an analysis session to an investigation record; the success envelope carries structuredContent.record_id. */
+const BIND_TOOL = /^mcp__ledger__ledger_investigation_(bind|new)$/;
+
+/**
+ * A metadata call (schemas, table lists, property catalogues, health checks) is not analysis; neither is a query
+ * whose result carried no numbers or rows. Only material pulls gate on an investigation binding and are proposed
+ * at query grain.
+ */
+const METADATA_CALL = /list_|describe|schema|tables|databases|get_properties|get_events$|whoami|health/i;
+const EMPTY_RESULT = /^\s*(\[\s*\]|\{\s*\}|null|no (rows|results|data)( returned| found)?\.?|0 rows?( returned)?\.?|empty( result)?\.?)\s*$/i;
+
+function responseRows(r: any): unknown[] | null {
+  if (!r || typeof r !== "object") return null;
+  for (const k of ["rows", "data", "results", "records", "series"]) if (Array.isArray(r[k])) return r[k];
+  const sc = r.structuredContent;
+  if (sc && typeof sc === "object") for (const k of ["rows", "data", "results", "records", "series"]) if (Array.isArray(sc[k])) return sc[k];
+  return null;
+}
+
+/** Pure: is this journaled data-tool call a material pull (see METADATA_CALL). No response, an error, or an empty result is not. */
+export function isMaterialPull(tool: string, input: unknown, response: unknown): boolean {
+  if (METADATA_CALL.test(canonicalToolName(tool))) return false;
+  const text = typeof input === "string" ? input : summarize(input, 2000);
+  if (METADATA_CALL.test(text)) return false;
+  if (response == null) return false;
+  const env = responseEnvelope(response);
+  if (env.isError === true || env.is_error === true || env.success === false) return false;
+  const rows = responseRows(env);
+  if (rows) return rows.length > 0;
+  const body = responseText(response);
+  if (!body.trim() || EMPTY_RESULT.test(body)) return false;
+  return /\d/.test(body);
+}
 
 export function sessionsDir(): string {
   return path.join(ledgerHome(), "sessions");
@@ -322,11 +362,52 @@ function decisionsResolve(d: JournalEntry[]): string {
     `Rejecting the proposal with ledger_record_update(action: "reject") also settles it. Use the d: ID in capture_coverage.`;
 }
 
+/** Decision in force: analysis scope is an investigation record, bound or declared, never "just a thread on this repo". */
+export const BIND_DECISION_ID = "dec-20260917-multi-pm-continuity-bind-or-new-at-session-start-u44f";
+
+/** PostToolUse additional context on the first material pull of an unbound session (once per session). */
+export const GATE_TEXT =
+  `Ledger: analysis session is not bound to an investigation. Before more queries: ledger_investigations(q: "<question>") ` +
+  `then ledger_investigation_bind(record_id) or ledger_investigation_new(question). Non-repo work is fine; do not proceed as just a thread on this repo.`;
+
+/** Material pulls journaled in this session (see isMaterialPull), whatever their capture status. */
+export function materialQueries(j: Journal): JournalEntry[] {
+  return j.entries.filter((e) => e.kind === "query" && e.material === true);
+}
+
+/**
+ * Stop reason when material queries ran and no investigation is bound. Same once-per-fingerprint rule as the
+ * debt block; ledger_investigation_bind / ledger_investigation_new later in the session clears it.
+ */
+export function unboundReason(material: JournalEntry[]): string {
+  return (
+    `Ledger: this session ran ${material.length} material data quer${material.length === 1 ? "y" : "ies"} but is not bound to an investigation (${BIND_DECISION_ID}). ` +
+    `Resolve scope first: ledger_investigations(q: "<question>") then ledger_investigation_bind(record_id) or ledger_investigation_new(question). ` +
+    `Non-repo work is fine; do not proceed as just a thread on this repo. Binding clears this block; the queries below stay owed either way.`
+  );
+}
+
+/**
+ * The QUERY GRAIN: each material pull in the debt is one candidate finding, proposed with ledger_propose_finding
+ * against its own q: id. Non-material queries keep the RESOLVE wording.
+ */
+function queryGrain(d: JournalEntry[]): string {
+  const material = d.filter((e) => e.kind === "query" && e.material === true);
+  if (!material.length) return "";
+  return (
+    `QUERY GRAIN: ${material.length} of these returned material results; each is one finding at query grain:\n` +
+    material.map((e) => `- ${queryIdentity(e)} · ${e.tool}: ${e.summary}`).join("\n") +
+    `\nFor each, propose a finding at query grain with ledger_propose_finding({ population, metric, window, result, query_ref: "q:<id>" }) ` +
+    `(the bound investigation is attached automatically), or dismiss it with ledger_skip_record and a reason. Use the q: id in capture_coverage.\n\n`
+  );
+}
+
 function stopReason(d: JournalEntry[]): string {
   return (
     `Ledger: ${debtNoun(d)} still lack an explicitly scoped capture acknowledgment:\n` +
     debtText(d) +
     `\n\n` +
+    queryGrain(d) +
     RESOLVE + decisionsResolve(d) +
     `\nThis reminder fires once per batch of uncaptured work.`
   );
@@ -343,7 +424,7 @@ export function sessionStartContext(j: Journal): string {
     `Session ${j.session_id}: ${debtNoun(d)} have no explicitly scoped record. Context may have been compacted; ${d.some((e) => e.kind === "decision") ? "they are" : "the queries are"} still known:\n` +
     debtText(d) +
     `\n\n` +
-    RESOLVE + decisionsResolve(d) + pending
+    queryGrain(d) + RESOLVE + decisionsResolve(d) + pending
   );
 }
 
@@ -396,13 +477,41 @@ function handleHookLocked(event: string, input: any, opts: HookOpts = {}): HookR
         // A skip is recorded only through its validated successful acknowledgment below.
       } else if (SEARCH_TOOLS.test(tool)) {
         j.entries.push({ at: now, kind: "search", tool, summary: summarize(input?.tool_input) });
+      } else if (BIND_TOOL.test(tool)) {
+        // A successful bind/declare names the record in structuredContent; the journal remembers it across compactions.
+        const resp = responseEnvelope(input?.tool_response), sc = resp.structuredContent;
+        const recordId = typeof sc?.record_id === "string" ? sc.record_id : undefined;
+        if (recordId && !(resp.isError === true || resp.is_error === true || resp.success === false)) {
+          const title = typeof sc?.title === "string" ? clip(sc.title, 140) : undefined;
+          j.investigation = { record_id: recordId, ...(title ? { title } : {}), at: now };
+          j.entries.push({ at: now, kind: "bind", tool, id: recordId, summary: title ?? clip(String(input?.tool_input?.question ?? "")) });
+          saveJournal(j, dir);
+        }
+        return { exit: 0 };
       } else {
         const callId = input?.tool_use_id ? String(input.tool_use_id) : undefined;
         const calls = dataToolCalls(tool, input?.tool_input, callId ?? `legacy:${evidenceId(undefined, tool, now, summarize(input?.tool_input))}`, opts.dataTools ?? DEFAULT_DATA_TOOLS);
         if (!calls.length) return { exit: 0 };
+        let material = false;
         for (const call of calls) {
           const id = evidenceId(call.call_id, call.tool, now, call.input);
-          if (!j.entries.some(e => e.kind === "query" && queryIdentity(e) === id)) j.entries.push({ at: now, kind: "query", tool: call.tool, summary: summarize(call.input), evidence_id: id, input_complete: call.input_complete });
+          const isMaterial = isMaterialPull(call.tool, call.input, input?.tool_response);
+          material ||= isMaterial;
+          if (!j.entries.some(e => e.kind === "query" && queryIdentity(e) === id)) j.entries.push({ at: now, kind: "query", tool: call.tool, summary: summarize(call.input), evidence_id: id, input_complete: call.input_complete, material: isMaterial });
+        }
+        // The gate: the first material pull in a session with no investigation binding gets the bind-or-declare
+        // instruction once (decision dec-20260917-multi-pm-continuity-bind-or-new-at-session-start-u44f).
+        if (material && !j.investigation && !j.entries.some(e => e.kind === "gate")) {
+          j.entries.push({ at: now, kind: "gate", summary: "unbound material pull" });
+          saveJournal(j, dir);
+          const ctx = GATE_TEXT;
+          return {
+            // hookSpecificOutput.additionalContext is the Claude Code PostToolUse shape; the top-level copies and
+            // stderr are the plain text for hosts that read either. Exit 0: the tool already ran.
+            stdout: JSON.stringify({ additionalContext: ctx, systemMessage: ctx, hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: ctx } }),
+            stderr: ctx,
+            exit: 0,
+          };
         }
       }
       saveJournal(j, dir);
@@ -434,23 +543,28 @@ function handleHookLocked(event: string, input: any, opts: HookOpts = {}): HookR
       // continuity: end of turn is the primary `turn` checkpoint trigger; the helper does the work
       try { writeSignal(sessionId, "checkpoint"); } catch { /* best-effort */ }
       const d = debt(j);
-      if (!d.length) return { exit: 0 };
+      // material pulls with no investigation binding block too (BIND_DECISION_ID), once per session; a bind later
+      // in the session clears the condition, and never re-opens a debt nudge for the same queries
+      const unbound = j.investigation ? [] : materialQueries(j);
+      if (!d.length && !unbound.length) return { exit: 0 };
       const fp = fingerprint(d);
-      if (j.nudged === fp || input?.stop_hook_active) {
+      const debtDue = d.length > 0 && j.nudged !== fp;
+      const unboundDue = unbound.length > 0 && !j.unbound_nudged;
+      if (input?.stop_hook_active || (!debtDue && !unboundDue)) {
         // already nudged for this work (or we are inside a stop-hook continuation): let it go, count it
-        if (!j.entries.some((e) => e.kind === "unresolved" && e.summary === fp)) {
+        if (d.length && !j.entries.some((e) => e.kind === "unresolved" && e.summary === fp)) {
           j.entries.push({ at: now, kind: "unresolved", summary: fp });
           saveJournal(j, dir);
         }
         return { exit: 0 };
       }
-      j.nudged = fp;
-      j.entries.push({ at: now, kind: "nudge", summary: fp, evidence_ids: d.map(queryIdentity) });
+      if (debtDue) { j.nudged = fp; j.entries.push({ at: now, kind: "nudge", summary: fp, evidence_ids: d.map(queryIdentity) }); }
+      if (unboundDue) { j.unbound_nudged = true; j.entries.push({ at: now, kind: "nudge", summary: "unbound", evidence_ids: unbound.map(queryIdentity) }); }
       saveJournal(j, dir);
       // JSON on stdout, exit 0: the block form both Claude Code and Codex document.
       // Top-level decision/reason is the original Claude shape and the Codex shape;
       // hookSpecificOutput is the current Claude shape. Emit both.
-      const reason = `Session ${j.session_id}\n` + stopReason(d);
+      const reason = `Session ${j.session_id}\n` + [unbound.length ? unboundReason(unbound) : "", d.length ? stopReason(d) : ""].filter(Boolean).join("\n\n");
       return {
         stdout: JSON.stringify({ decision: "block", reason, hookSpecificOutput: { hookEventName: "Stop", decision: "block", reason } }),
         exit: 0,
@@ -466,8 +580,8 @@ function handleHookLocked(event: string, input: any, opts: HookOpts = {}): HookR
       const ctx =
         `Ledger: session ${j.session_id} is about to be compacted and ${debtNoun(d)} have no scoped record:\n` +
         debtText(d) +
-        `\n\nRecord it now, while the method and assumptions are still in context. ` +
-        RESOLVE + decisionsResolve(d);
+        `\n\nRecord it now, while the method and assumptions are still in context.\n` +
+        queryGrain(d) + RESOLVE + decisionsResolve(d);
       return {
         stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: "PreCompact", additionalContext: ctx } }),
         exit: 0,

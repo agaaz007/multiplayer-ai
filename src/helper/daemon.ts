@@ -16,6 +16,7 @@ import { addDecisionObligations } from "../hooks.js";
 import { autoBindEligible, forbiddenSnapshotRoot, threadTitleFor, transcriptRoots } from "../continuity/safety.js";
 import { writeHeartbeat, withDeadline, type HelperHeartbeat } from "./heartbeat.js";
 import { embeddingsConfigured, embedPendingEvents } from "../continuity/embeddings.js";
+import { boundSessionIds, extendBoundLink } from "../continuity/investigations.js";
 const putArtifact = S.putArtifact;
 
 /**
@@ -334,6 +335,9 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
   let lastSave = Date.now();
   /** sessions that had events inserted this pass; only their new events are embedded (backfill is the CLI's job) */
   const uploadedSessions = new Set<string>();
+  /** sessions bound to an investigation (ledger_investigation_bind/_new); one SELECT per pass, then one UPDATE per bound session below */
+  let boundSessions = new Set<string>();
+  try { boundSessions = new Set(await boundSessionIds(pool)); } catch (e: any) { sum.errors.push(`investigation bindings: ${String(e?.message ?? e).slice(0, 120)}`); }
 
   // ---- discover ----
   const files = [...walk(roots.claude, 3), ...walk(roots.codex, 5)];
@@ -461,6 +465,17 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
         if (res.inserted) uploadedSessions.add(sid);
         acked++;
         spoolAck(sid, acked);
+      }
+
+      // ---- investigation binding: the whole session accumulates on the bound record ----
+      // A session bound with ledger_investigation_bind/_new carries one explicit "bound by <author>" span from seq 1.
+      // Extend it to the current max seq (one UPDATE). Thread binding above is unchanged: an analysis session inside
+      // a repo still gets its repo thread as before. The classifier may still add `suggested` links on the same
+      // events; records.ts ranks explicit above suggested on overlapping spans (SOURCE_RANK) and counts explicit
+      // links as coverage, so a suggestion is lower authority and never overrides the binding.
+      if (boundSessions.has(sid)) {
+        try { if (await extendBoundLink(pool, sid)) log(`extended investigation span for ${sid.slice(0, 8)} to the session's current max seq`); }
+        catch (e: any) { log(`investigation span extension failed for ${sid.slice(0, 8)}: ${String(e?.message ?? e).slice(0, 120)}`); }
       }
 
       // ---- reconcile hook index vs parsed (pending → confirmed after 60 s) ----
