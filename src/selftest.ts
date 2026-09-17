@@ -11,7 +11,7 @@ import { findTranscript, parseTranscript, evidenceText } from "./transcript.js";
 import { brief, search, similarFindings, stats, renderFull } from "./query.js";
 import { regenerateViews } from "./views.js";
 import { agentRulesText, installGuides, upsertHooks, HOOK_EVENTS, isLedgerHookCommand, gitWorktreeOf, installSource, assertStableInstallSource, RELEASES_DIR } from "./install.js";
-import { handleHook, loadJournal, saveJournal, captureStats, debt } from "./hooks.js";
+import { handleHook, loadJournal, saveJournal, captureStats, debt, isMaterialPull, GATE_TEXT, materialQueries } from "./hooks.js";
 import { EVIDENCE_URI } from "./evidence.js";
 import { readReceipt, savedReceipt, syncReceipt, renderReceiptBox } from "./receipts.js";
 import { objectVersion } from "./authority.js";
@@ -446,6 +446,95 @@ const skippedEvidence = [{ session_id: sid, evidence_ids: debt(loadJournal(sid, 
 hook("PostToolUse", { tool_name: "mcp__ledger__ledger_skip_record", tool_input: { reason: "sanity check, no conclusion", capture_coverage: skippedEvidence }, tool_response: { structuredContent: { capture_ack: { schema: "ledger-capture/v1", action: "skip", status: "dismissed", reason: "sanity check, no conclusion", coverage: skippedEvidence } } } }, T(15));
 assert.equal(hook("Stop", {}, T(16)).exit, 0, "skip clears debt");
 hook("SessionEnd", { reason: "other" }, T(17));
+
+// ---- material pulls, the investigation gate, the unbound Stop block, and the query grain (2026-09-17) ----
+{
+  const numeric = { content: [{ type: "text", text: '[{"platform":"ios","trial_cvr":0.124,"n":41200}]' }] };
+  assert.equal(isMaterialPull("mcp__hiastro-clickhouse__run_query", { query: "select platform, countIf(trial)/count() from events group by platform" }, numeric), true, "SQL with a numeric result is material");
+  assert.equal(isMaterialPull("mcp__hiastro-clickhouse__list_tables", {}, { content: [{ type: "text", text: "events\nusers\n2 tables" }] }), false, "list_tables is metadata even when the response has digits");
+  assert.equal(isMaterialPull("mcp__hiastro-clickhouse__run_query", { query: "select table_name from information_schema.tables" }, numeric), false, "a schema query is metadata by its input");
+  assert.equal(isMaterialPull("mcp__amplitude__get_events", { projectId: 1 }, numeric), false, "get_events (property catalogue) is metadata");
+  assert.equal(isMaterialPull("mcp__amplitude__query_amplitude_data", { sql: "select count(*) from events where day = today()" }, { content: [{ type: "text", text: "[]" }] }), false, "a warehouse query with an empty result is not material");
+  assert.equal(isMaterialPull("mcp__amplitude__query_amplitude_data", { sql: "select ..." }, { structuredContent: { rows: [] } }), false, "structured empty rows are not material");
+  assert.equal(isMaterialPull("mcp__amplitude__query_amplitude_data", { sql: "select ..." }, { structuredContent: { rows: [{ users: 12 }] } }), true, "structured rows are material");
+  assert.equal(isMaterialPull("mcp__amplitude__query_amplitude_data", { sql: "select ..." }, undefined), false, "no response, nothing material");
+  assert.equal(isMaterialPull("mcp__amplitude__query_amplitude_data", { sql: "select ..." }, { isError: true, content: [{ type: "text", text: "error 500: timeout after 30s" }] }), false, "an error with digits is not material");
+  assert.equal(isMaterialPull("Bash", "psql -c 'select count(*) from subs'", "  count\n-------\n  4821\n(1 row)"), true, "a shell db client with a count is material");
+
+  const gdir = path.join(tmp, "sessions-gate");
+  const gsid = "sess-gate";
+  const gh = (event: string, input: any, at: string) => handleHook(event, { session_id: gsid, cwd: "/w", ...input }, { dir: gdir, now: new Date(at) });
+  assert.equal(gh("SessionStart", { source: "startup" }, T(30)).exit, 0);
+  // a metadata call first: journaled, not material, no gate
+  const meta = gh("PostToolUse", { tool_use_id: "t_meta", tool_name: "mcp__hiastro-clickhouse__list_tables", tool_input: {}, tool_response: { content: [{ type: "text", text: "events\nusers" }] } }, T(31));
+  assert.ok(!meta.stdout, "metadata call does not gate");
+  assert.ok(loadJournal(gsid, gdir).entries.some((e) => e.kind === "query" && e.material === false), "metadata query journaled as not material");
+  assert.equal(gh("Stop", {}, T(32)).exit, 0);
+  assert.ok(!gh("Stop", {}, T(32)).stdout || !gh("Stop", {}, T(32)).stdout!.includes("not bound"), "no material pull: no unbound block");
+  // the first material pull in an unbound session: additional context once
+  const gated = gh("PostToolUse", { tool_use_id: "t_q1", tool_name: "mcp__hiastro-clickhouse__run_query", tool_input: { query: "select platform, count() from trials group by platform" }, tool_response: numeric }, T(33));
+  assert.equal(gated.exit, 0, "the tool already ran: exit 0");
+  const gj = JSON.parse(gated.stdout!);
+  assert.equal(gj.hookSpecificOutput.hookEventName, "PostToolUse");
+  assert.equal(gj.hookSpecificOutput.additionalContext, GATE_TEXT);
+  assert.equal(gj.additionalContext, GATE_TEXT, "top-level copy for hosts that read it there");
+  assert.equal(gated.stderr, GATE_TEXT, "plain text on stderr");
+  for (const name of ["ledger_investigations", "ledger_investigation_bind", "ledger_investigation_new", "Non-repo work is fine", "not bound to an investigation"]) assert.ok(GATE_TEXT.includes(name), `gate names ${name}`);
+  assert.equal(loadJournal(gsid, gdir).entries.filter((e) => e.kind === "gate").length, 1, "gate entry journaled");
+  assert.equal(materialQueries(loadJournal(gsid, gdir)).length, 1);
+  // a second material pull: no second gate
+  const again = gh("PostToolUse", { tool_use_id: "t_q2", tool_name: "mcp__amplitude__query_amplitude_data", tool_input: { sql: "select intent, count(*) from paywall group by intent" }, tool_response: { structuredContent: { rows: [{ intent: "marriage", n: 41200 }] } } }, T(34));
+  assert.ok(!again.stdout && !again.stderr, "the gate fires once per session");
+  assert.equal(loadJournal(gsid, gdir).entries.filter((e) => e.kind === "gate").length, 1);
+  assert.equal(materialQueries(loadJournal(gsid, gdir)).length, 2);
+  // Stop: blocked, unbound condition first, the three tools named, and the query grain with the q: ids
+  const ub = gh("Stop", { stop_hook_active: false }, T(35));
+  const ubj = JSON.parse(ub.stdout!);
+  assert.equal(ubj.decision, "block");
+  assert.equal(ubj.hookSpecificOutput.decision, "block");
+  assert.ok(ubj.reason.includes("2 material data queries but is not bound to an investigation"), ubj.reason);
+  for (const name of ["ledger_investigations(q:", "ledger_investigation_bind(record_id)", "ledger_investigation_new(question)", "dec-20260917-multi-pm-continuity-bind-or-new-at-session-start-u44f"]) assert.ok(ubj.reason.includes(name), `stop names ${name}`);
+  assert.ok(ubj.reason.indexOf("not bound to an investigation") < ubj.reason.indexOf("lack an explicitly scoped capture acknowledgment"), "unbound reason precedes the debt reason");
+  assert.ok(ubj.reason.includes("QUERY GRAIN: 2 of these returned material results"), ubj.reason);
+  assert.ok(ubj.reason.includes("- q:t_q1 · mcp__hiastro-clickhouse__run_query: select platform, count() from trials group by platform"), "material q: id listed with tool and summary");
+  assert.ok(ubj.reason.includes("- q:t_q2 · mcp__amplitude__query_amplitude_data:"), "second material q: id listed");
+  assert.ok(ubj.reason.includes('ledger_propose_finding({ population, metric, window, result, query_ref: "q:<id>" })'), "query-grain proposal named");
+  assert.ok(ubj.reason.includes("ledger_record_finding") && ubj.reason.includes("ledger_skip_record"), "today's wording kept for the rest");
+  assert.ok(!ubj.reason.includes("q:t_meta ·") || ubj.reason.indexOf("q:t_meta") < ubj.reason.indexOf("QUERY GRAIN"), "the metadata query is debt but not query grain");
+  // same conditions again: passes (once per fingerprint / once per session), and inside a stop-hook continuation
+  assert.ok(!gh("Stop", { stop_hook_active: true }, T(36)).stdout, "never loops inside a stop-hook continuation");
+  assert.ok(!gh("Stop", {}, T(37)).stdout, "the same unbound condition and debt are not nudged twice");
+  // a later material pull while still unbound: no new gate, and Stop stays quiet for the unbound condition (once per session)
+  gh("PostToolUse", { tool_use_id: "t_q3", tool_name: "mcp__hiastro-clickhouse__run_query", tool_input: { query: "select count() from trials" }, tool_response: numeric }, T(38));
+  const third = gh("Stop", {}, T(39));
+  assert.ok(third.stdout && JSON.parse(third.stdout).reason.includes("q:t_q3") && JSON.parse(third.stdout).reason.includes("3 material data queries but is not bound"), "new debt nudges once more and restates the still-true unbound condition");
+  assert.equal(loadJournal(gsid, gdir).entries.filter((e) => e.kind === "nudge" && e.summary === "unbound").length, 1, "the unbound nudge itself is once per session");
+  // binding clears the unbound condition: a successful ledger_investigation_bind names the record
+  const recId = "0f1e2d3c-4b5a-4978-8a6b-5c4d3e2f1a0b";
+  const bindFail = gh("PostToolUse", { tool_name: "mcp__ledger__ledger_investigation_bind", tool_input: { record_id: recId }, tool_response: { isError: true, content: [{ type: "text", text: "record not found" }], structuredContent: { record_id: recId } } }, T(40));
+  assert.ok(!bindFail.stdout && !loadJournal(gsid, gdir).investigation, "a failed bind binds nothing");
+  gh("PostToolUse", { tool_name: "mcp__ledger__ledger_investigation_new", tool_input: { question: "Why did iOS trial CVR drop in September?" }, tool_response: { content: [{ type: "text", text: "Declared investigation" }], structuredContent: { record_id: recId, title: "Why did iOS trial CVR drop in September?" } } }, T(41));
+  const bj2 = loadJournal(gsid, gdir);
+  assert.deepEqual(bj2.investigation, { record_id: recId, title: "Why did iOS trial CVR drop in September?", at: T(41) });
+  assert.ok(bj2.entries.some((e) => e.kind === "bind" && e.id === recId), "bind entry journaled");
+  // a fresh unbound-and-material session that binds before Stop is never blocked for the binding
+  const bsid = "sess-bound-early";
+  const bh = (event: string, input: any, at: string) => handleHook(event, { session_id: bsid, cwd: "/w", ...input }, { dir: gdir, now: new Date(at) });
+  bh("PostToolUse", { tool_name: "mcp__ledger__ledger_investigation_bind", tool_input: { record_id: recId }, tool_response: { structuredContent: { record_id: recId } } }, T(42));
+  assert.ok(!bh("PostToolUse", { tool_use_id: "t_b1", tool_name: "mcp__hiastro-clickhouse__run_query", tool_input: { query: "select count() from trials" }, tool_response: numeric }, T(43)).stdout, "no gate once a bind entry exists");
+  const bstop = JSON.parse(bh("Stop", {}, T(44)).stdout!);
+  assert.ok(!bstop.reason.includes("not bound to an investigation") && bstop.reason.includes("q:t_b1") && bstop.reason.includes("ledger_propose_finding"), "bound session: only the query-grain debt blocks");
+  // after the bind in the gated session, its debt (already nudged) passes: binding clears the unbound block and re-opens nothing
+  assert.ok(!gh("Stop", {}, T(45)).stdout, "bound now; the same debt is not nudged again");
+  // ledger_propose_finding's draft receipt settles its q: id as pending_review through the existing acknowledgment path
+  const cov = [{ session_id: bsid, evidence_ids: ["q:t_b1"] }];
+  bh("PostToolUse", { tool_name: "mcp__ledger__ledger_propose_finding", tool_input: { population: "ios", metric: "trial_cvr", window: "2026-09", result: "12.4%", query_ref: "q:t_b1", capture_coverage: cov },
+    tool_response: { content: [{ type: "text", text: "Proposed finding fnd-20260917-ios-trial-cvr-q1 (draft)" }], structuredContent: { receipt: { action: "saved", record_id: "fnd-20260917-ios-trial-cvr-q1", records: [{ id: "fnd-20260917-ios-trial-cvr-q1", status: "draft" }] }, capture_ack: { schema: "ledger-capture/v1", action: "record", status: "pending_review", record_id: "fnd-20260917-ios-trial-cvr-q1", coverage: cov } } } }, T(46));
+  assert.equal(debt(loadJournal(bsid, gdir)).length, 0, "a query-grain draft settles its q: id");
+  assert.ok(loadJournal(bsid, gdir).entries.some((e) => e.kind === "record" && e.id === "fnd-20260917-ios-trial-cvr-q1" && e.capture_status === "pending_review"), "pending_review recorded for the propose_finding draft");
+  assert.equal(bh("Stop", {}, T(47)).exit, 0);
+  assert.ok(!bh("Stop", {}, T(47)).stdout, "nothing owed after the draft");
+}
 
 // the pilot can read all of it
 const cap = captureStats(365, jdir).join("\n");
