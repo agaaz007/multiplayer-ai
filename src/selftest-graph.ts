@@ -183,6 +183,13 @@ try {
   assert.match(conflictMermaid[0], /---\|"unresolved"\|/);
   assert.doesNotMatch(conflictMermaid[0], /-->|-\.->/);
   assert.match(conflicted.scope, /1 UNRESOLVED conflict/);
+  // The regression this guards: a conflict head must not fall back to mermaid's default node style,
+  // which would make it indistinguishable from an ordinary current record in the rendered picture.
+  const conflictMermaidAll = toMermaid(conflicted);
+  const headClass = conflictMermaidAll.split("\n").filter((l) => /^  class n\d+ currentAlarm$/.test(l));
+  assert.equal(headClass.length, 2, "both heads carry a single defined alarm class");
+  assert.match(conflictMermaidAll, /classDef currentAlarm[^\n]*stroke:#cf222e[^\n]*stroke-width:4px/);
+  assert.ok(conflictMermaidAll.split("\n").filter((l) => /^  class n\d+ /.test(l)).every((l) => !l.includes(",")));
   const onlyConflicts = buildGraph({ ...b, git_sync: false }, { conflictsOnly: true });
   assert.ok(onlyConflicts.nodes.some((n) => n.id === ca.id) && onlyConflicts.nodes.some((n) => n.id === cb.id));
   assert.ok(onlyConflicts.nodes.some((n) => n.id === base.id), "the shared predecessor is kept so the conflict is legible");
