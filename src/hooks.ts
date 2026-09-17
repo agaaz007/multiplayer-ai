@@ -479,7 +479,10 @@ function handleHookLocked(event: string, input: any, opts: HookOpts = {}): HookR
         j.entries.push({ at: now, kind: "search", tool, summary: summarize(input?.tool_input) });
       } else if (BIND_TOOL.test(tool)) {
         // A successful bind/declare names the record in structuredContent; the journal remembers it across compactions.
-        const resp = responseEnvelope(input?.tool_response), sc = resp.structuredContent;
+        // Read it at either depth: Claude Code hands PostToolUse the structuredContent already flattened
+        // (a JSON string of {record_id, title, ...}), so insisting on the MCP envelope left every bound
+        // session looking unbound — the gate fired and the Stop block held after a successful bind.
+        const resp = responseEnvelope(input?.tool_response), sc = resp.structuredContent ?? resp;
         const recordId = typeof sc?.record_id === "string" ? sc.record_id : undefined;
         if (recordId && !(resp.isError === true || resp.is_error === true || resp.success === false)) {
           const title = typeof sc?.title === "string" ? clip(sc.title, 140) : undefined;

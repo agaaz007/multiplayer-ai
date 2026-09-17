@@ -1,7 +1,10 @@
 import type pg from "pg";
 import path from "node:path";
 import type { Config } from "../store.js";
-import { tokens } from "../query.js";
+// Title matching lives in query.ts with the rest of the text similarity, so the classifier can reach it
+// without importing this module: investigations -> recordpack -> classify is already a cycle.
+import { matchScore, normalizeTitle, titleSimilarity } from "../query.js";
+export { matchScore, normalizeTitle, titleSimilarity };
 import { createRecord, getRecord, linkSpan } from "./records.js";
 import { upsertSession } from "./store.js";
 import { ago } from "./recordpack.js";
@@ -50,30 +53,6 @@ const LIVE = `u.status <> 'rejected' and not exists (select 1 from cont_state_up
 function clip(s: string, n: number): string {
   const t = s.replace(/\s+/g, " ").trim();
   return t.length > n ? t.slice(0, n - 1) + "…" : t;
-}
-
-export function normalizeTitle(s: string): string {
-  return s.toLowerCase().replace(/\s+/g, " ").trim();
-}
-
-/**
- * Fraction of the query's tokens found in the document, title hits counting fully and body hits half.
- * Range 0..1. Query-token stop words are removed by `tokens` (query.ts), so "how did trial CVR move"
- * matches on "trial", "cvr", "move".
- */
-export function matchScore(q: string, title: string, body = ""): number {
-  const qt = new Set(tokens(q));
-  if (!qt.size) return 0;
-  const t = new Set(tokens(title)), b = new Set(tokens(body));
-  let hits = 0;
-  for (const x of qt) { if (t.has(x)) hits += 1; else if (b.has(x)) hits += 0.5; }
-  return hits / qt.size;
-}
-
-/** Symmetric: both titles must cover each other's tokens. Used for the near-duplicate refusal. */
-export function titleSimilarity(a: string, b: string): number {
-  if (normalizeTitle(a) === normalizeTitle(b)) return 1;
-  return Math.min(matchScore(a, b), matchScore(b, a));
 }
 
 function harnessGuess(): string {
