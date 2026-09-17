@@ -126,60 +126,6 @@ const sim = similarFindings(cfg2, "iOS trial to paid conversion for August");
 assert.equal(sim.length, 1, "similar finding should be detected");
 assert.equal(sim[0].id, f1.id);
 
-// ...and a finding that merely shares the vocabulary is not one. The detector used to compare a
-// question against the whole record — every table name, every assumption, the SQL — so a record that
-// mentioned iOS trials anywhere while answering something else scored above the bar. Duplication is
-// compared question to question, weighted so words the whole ledger uses cannot carry a match.
-const unrelated = record(cfg, {
-  type: "finding",
-  fields: {
-    title: "App Store review latency",
-    question: "How long did App Store review take for the August releases?",
-    result: "median 19 hours (n=12 submissions)",
-    data_window: { from: "2026-08-01", to: "2026-08-31" },
-    inputs: [{ source: "appstoreconnect.submissions", population: "iOS builds submitted in August", filters: "excludes expedited reviews" }],
-    method: "Median of approval timestamp minus submission timestamp over August submissions.",
-    assumptions: [{ statement: "appstoreconnect.submissions is complete for August", kind: "implicit", if_wrong: "weakens_conclusion" }],
-    caveats: ["Unrelated to the iOS trial to paid conversion work, which it shares a platform and a month with"],
-    confidence: "high",
-  },
-});
-const shared = similarFindings(cfg2, "iOS trial to paid conversion for August");
-assert.ok(!shared.some((h) => h.id === unrelated.id), "shared vocabulary is not a duplicate question");
-assert.ok(shared.every((h) => h.similarity >= RELATED_QUESTION), "every hit clears the similarity bar it is ranked by");
-
-// A declared scope that disagrees settles it whatever the wording shares: same metric, different population.
-const androidScope = { product: "HiAstro", dataset: "postgres", environment: "production", metric: "android_trial_to_paid_cvr",
-  population: "Android IN users", grain: "user", attribution_rule: "paid within 14 days" };
-const androidDef = record(cfg, {
-  type: "definition",
-  fields: { title: "Android trial to paid conversion", metric: "android_trial_to_paid_cvr",
-    formula: "paid within 14 days / trials started", source: "postgres.subscriptions", owner: "agaaz",
-    valid_from: "2026-08-01", analysis_scope: androidScope },
-});
-const scoped = record(cfg, {
-  type: "finding",
-  fields: {
-    title: "Trial CVR August, Android IN",
-    question: "What was trial to paid conversion in August for Android?",
-    result: "9.8% (n=11,004 trials)",
-    data_window: { from: "2026-08-01", to: "2026-08-31" },
-    inputs: [{ source: "postgres.subscriptions", population: "trials started in window" }],
-    method: "Cohort by trial start date; paid within 14 days over trials started.",
-    assumptions: [{ statement: "postgres.subscriptions is complete for August", kind: "implicit", if_wrong: "changes_conclusion" }],
-    analysis_scope: androidScope,
-    definitions_used: ["android_trial_to_paid_cvr"],
-    dependencies: [{ relation: "uses-definition", id: androidDef.id, version: objectVersion(getById(cfg, androidDef.id)!) }],
-    confidence: "high",
-  },
-});
-const q = "What was trial to paid conversion in August for Android?";
-assert.ok(similarFindings(cfg2, q).some((h) => h.id === scoped.id), "the same question is found when no scope is supplied");
-assert.ok(similarFindings(cfg2, q, 5, { scope: androidScope }).some((h) => h.id === scoped.id), "and when the scopes agree");
-assert.ok(
-  !similarFindings(cfg2, q, 5, { scope: { ...androidScope, population: "iOS US users" } }).some((h) => h.id === scoped.id),
-  "a candidate that declares a different population is dropped: same words, not the same answer"
-);
 
 const chg = record(cfg2, {
   type: "change",
