@@ -268,7 +268,7 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
   const code = codeRepos(rec);
   const hasCode = code.length > 0;
   /** header "where": identity repo for code work; touched repos (capabilities, not identity) for an investigation; else non-code */
-  const whereLine = rec.repo ? `repo ${rec.repo}` : hasCode ? `repos touched ${code.join(", ")} (read as tools; identity is the question)` : "non-code work";
+  const whereLine = rec.repo ? `repo ${rec.repo}` : hasCode ? `repos touched ${code.join(", ")}` : "non-code work";
   let thread: ThreadRow | null = null;
   if (hasCode) {
     for (const s of sessions) {

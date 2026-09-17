@@ -343,7 +343,7 @@ let ra2: Awaited<ReturnType<typeof C.classifySession>>;
 
   // progress file
   const prog2 = C.readProgress(sidA)!;
-  assert.deepEqual({ last_seq: prog2.last_seq, runs: prog2.runs }, { last_seq: 13, runs: 1 });
+  assert.deepEqual({ last_seq: prog2.last_seq, runs: prog2.runs }, { last_seq: 13, runs: 2 }, "(a) and (a2)");
   assert.equal(prog2.last_at, T(16).toISOString());
   assert.ok(fs.existsSync(path.join(ledgerHome(), "classify", `${sidA}.json`)), "progress under ~/.ledger/classify/");
   ok("progress file records last_seq 13, runs 1, last_at");
