@@ -158,7 +158,10 @@ function allEdges(objects: LedgerObject[], opts: GraphOpts): { edges: GraphEdge[
 
   for (const o of objects) {
     const deps = (o.fields.dependencies as Dependency[] | undefined) ?? [];
-    const pinnedIds = new Set(deps.map((d) => d.id));
+    // Targets this object already reaches through a stronger claim. A `prior` or `based_on` line to
+    // the record you just superseded, or to the definition you pinned, restates the edge that is
+    // already drawn; two lines between one pair reads as two relationships.
+    const pinnedIds = new Set([...deps.map((d) => d.id), ...(o.supersedes ? [o.supersedes] : [])]);
 
     if (o.supersedes) {
       if (!byId.has(o.supersedes)) dangling.add(o.supersedes);
