@@ -545,7 +545,10 @@ function handleHookLocked(event: string, input: any, opts: HookOpts = {}): HookR
       const d = debt(j);
       // material pulls with no investigation binding block too (BIND_DECISION_ID), once per session; a bind later
       // in the session clears the condition, and never re-opens a debt nudge for the same queries
-      const unbound = j.investigation ? [] : materialQueries(j);
+      // Only material queries still owed count: a probe dismissed with ledger_skip_record (or covered by a
+      // recorded finding) must not force a bind on a session that is not doing analysis.
+      const owed = new Set(d.map(queryIdentity));
+      const unbound = j.investigation ? [] : materialQueries(j).filter((e) => owed.has(queryIdentity(e)));
       if (!d.length && !unbound.length) return { exit: 0 };
       const fp = fingerprint(d);
       const debtDue = d.length > 0 && j.nudged !== fp;

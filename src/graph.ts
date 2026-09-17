@@ -61,6 +61,12 @@ export interface GraphNode {
   unpinned_definitions: string[];
   /** Set by --impact: this object depends on the corrected record and needs review before reuse. */
   needs_review?: boolean;
+  /**
+   * Set by --impact: this object's lineage to the corrected record is unresolved (a bare id, a metric
+   * name, a pin that no longer matches), so it is neither confirmed affected nor safely excluded.
+   * Drawn as loudly as needs_review on purpose: an unknown blast radius is not a clean bill of health.
+   */
+  lineage_unresolved?: string;
 }
 
 export interface GraphEdge {
@@ -152,7 +158,10 @@ function allEdges(objects: LedgerObject[], opts: GraphOpts): { edges: GraphEdge[
 
   for (const o of objects) {
     const deps = (o.fields.dependencies as Dependency[] | undefined) ?? [];
-    const pinnedIds = new Set(deps.map((d) => d.id));
+    // Targets this object already reaches through a stronger claim. A `prior` or `based_on` line to
+    // the record you just superseded, or to the definition you pinned, restates the edge that is
+    // already drawn; two lines between one pair reads as two relationships.
+    const pinnedIds = new Set([...deps.map((d) => d.id), ...(o.supersedes ? [o.supersedes] : [])]);
 
     if (o.supersedes) {
       if (!byId.has(o.supersedes)) dangling.add(o.supersedes);
@@ -287,7 +296,11 @@ export function buildGraph(cfg: Config, opts: GraphOpts = {}): Graph {
     keep = new Set([...keep].filter((id) => reach.has(id)));
     for (const id of reach) if (byNodeId.has(id)) keep.add(id);
     const needsReview = new Set(impact.affected.map((a) => a.id));
-    for (const n of nodes) if (needsReview.has(n.id)) n.needs_review = true;
+    const unresolved = new Map(impact.incomplete.map((x) => [x.id, x.reason]));
+    for (const n of nodes) {
+      if (needsReview.has(n.id)) n.needs_review = true;
+      else if (unresolved.has(n.id)) n.lineage_unresolved = unresolved.get(n.id);
+    }
   }
   if (opts.conflictsOnly) keep = new Set([...keep].filter((id) => conflictOf.has(id)));
   if (opts.unpinnedOnly) keep = new Set([...keep].filter((id) => byNodeId.get(id)?.unpinned_definitions.length));
@@ -301,7 +314,11 @@ export function buildGraph(cfg: Config, opts: GraphOpts = {}): Graph {
       adjacency.set(e.from, [...(adjacency.get(e.from) ?? []), e.to]);
       adjacency.set(e.to, [...(adjacency.get(e.to) ?? []), e.from]);
     }
-    const depth = opts.depth ?? (opts.id ? 2 : 1);
+    // Defaults per selection, because the useful neighbourhood differs. An ego graph wants two hops.
+    // A conflict wants one: the shared predecessor is most of the story, as the heads alone do not
+    // show that they replace the same record. An unpinned-definition set wants none: it is a list of
+    // 60+ findings in a real ledger, and expanding it produces a hairball that answers nothing.
+    const depth = opts.depth ?? (opts.id ? 2 : opts.conflictsOnly ? 1 : 0);
     const reached = new Set<string>(seeds.filter((s) => byNodeId.has(s)));
     let frontier = [...reached];
     for (let d = 0; d < depth && frontier.length; d++) {
@@ -375,10 +392,16 @@ function badges(n: GraphNode): string[] {
     n.label,
     n.conflict ? "UNRESOLVED CONFLICT" : null,
     n.needs_review ? "NEEDS REVIEW" : null,
+    n.lineage_unresolved ? `LINEAGE UNRESOLVED: ${clip(n.lineage_unresolved, 60)}` : null,
     n.verification === "contested" ? "contested" : n.verification === "reproduced" ? "reproduced" : null,
     n.correction ? `correction: ${n.correction}` : null,
     n.unpinned_definitions.length ? `unpinned: ${n.unpinned_definitions.join(", ")}` : null,
   ].filter(truthy);
+}
+
+/** The markers that change what a reader should do with the node, rather than merely describe it. */
+function isAlarm(n: GraphNode): boolean {
+  return n.conflict || n.verification === "contested" || Boolean(n.needs_review) || Boolean(n.lineage_unresolved);
 }
 
 const DOT_SHAPE: Record<LedgerType, string> = {
@@ -395,7 +418,7 @@ function dotNode(n: GraphNode): string {
     : n.tier === 2
       ? { color: "#9a6700", fill: "#fff8e5", font: "#24292f", style: "filled,dashed", pen: 1.4 }
       : { color: "#8c959f", fill: "#f6f8fa", font: "#6e7781", style: "filled,dotted", pen: 1.0 };
-  const alarm = n.conflict || n.verification === "contested" || n.needs_review;
+  const alarm = isAlarm(n);
   const label = [clip(n.title), `(${n.id})`, ...badges(n)].join("\\n");
   const attrs = [
     `label="${label.replace(/"/g, '\\"')}"`,
@@ -476,8 +499,7 @@ export function toMermaid(g: Graph, legend = false): string {
     const label = [clip(n.title), `${n.id}`, ...badges(n)].map(text).join("<br/>");
     lines.push(`  ${MERMAID_SHAPE[n.type](alias.get(n.id)!, label)}`);
     const tier = n.tier === 3 ? "current" : n.tier === 2 ? "draft" : "retired";
-    const alarm = n.conflict || n.verification === "contested" || n.needs_review;
-    lines.push(`  class ${alias.get(n.id)} ${tier}${alarm ? ",alarm" : ""}`);
+    lines.push(`  class ${alias.get(n.id)} ${tier}${isAlarm(n) ? ",alarm" : ""}`);
   }
   for (const e of g.edges) {
     const a = alias.get(e.from)!;

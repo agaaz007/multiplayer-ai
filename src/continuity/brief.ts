@@ -19,7 +19,13 @@ export async function openThreadsText(cfg: Config, opts: { cwd?: string; hours?:
   if (!continuityConfigured(cfg)) return "";
   const hours = opts.hours ?? 48;
   const limit = opts.limit ?? 5;
-  const work = (async () => {
+  const budget = opts.timeoutMs ?? 4000;
+  // Each section races the budget on its own and the three run in parallel: a slow Neon connect for one
+  // section (seen 2026-09-17: 7-8 s connects) must not drop the others, and a sequential chain of three
+  // connects cannot fit any sane budget. A section that loses its race is omitted, never partially printed.
+  const raced = (p: Promise<string>): Promise<string> =>
+    Promise.race([p.catch(() => ""), new Promise<string>((res) => setTimeout(() => res(""), budget))]);
+  const threads = raced((async () => {
     const pool = getPool(cfg);
     const root = opts.cwd ? repoRoot(opts.cwd) : null;
     const repo = root ? repoIdentity(root) : null;
@@ -29,34 +35,27 @@ export async function openThreadsText(cfg: Config, opts: { cwd?: string; hours?:
       const more = await listThreads(pool, { ...filt, limit: limit - rows.length });
       for (const m of more) if (!rows.some((r) => r.id === m.id)) rows.push(m);
     }
-    const notes = takeLocalNotifications();
     const out: string[] = [];
-    if (notes.length) {
-      out.push(`## Ledger notices`);
-      for (const n of notes) out.push(`- ${n}`);
-      out.push(``);
-    }
     if (rows.length) {
       out.push(`## Open threads${repo ? ` (this repo first)` : ""}, last ${hours}h`);
       out.push(`Teammates' work you can continue. Continue with ledger_resume(thread_id, mode: "continue"); explore in parallel with mode: "fork"; read only with mode: "inspect". A claim is advisory and protects the shared record, not the other machine.`);
       for (const r of rows) out.push(threadLine(r));
     }
-    // Open investigations sit before the work records: an analysis session must bind to one (or declare a new
-    // question) before its first data query, whatever repo it is in, or none.
-    const investigations = await openInvestigationsText(cfg, { timeoutMs: opts.timeoutMs });
-    if (investigations) {
-      if (out.length) out.push(``);
-      out.push(investigations);
-    }
-    const records = await openWorkText(cfg, { cwd: opts.cwd, timeoutMs: opts.timeoutMs });
-    if (records) {
-      if (out.length) out.push(``);
-      out.push(records);
-    }
     return out.join("\n");
-  })();
-  const timeout = new Promise<string>((res) => setTimeout(() => res(""), opts.timeoutMs ?? 4000));
-  try { return await Promise.race([work, timeout]); } catch { return ""; }
+  })());
+  // Open investigations sit before the work records: an analysis session must bind to one (or declare a new
+  // question) before its first data query, whatever repo it is in, or none.
+  const investigations = raced(openInvestigationsText(cfg, { timeoutMs: budget }));
+  const records = raced(openWorkText(cfg, { cwd: opts.cwd, timeoutMs: budget }));
+  const [t, i, r] = await Promise.all([threads, investigations, records]);
+  const out: string[] = [];
+  const notes = takeLocalNotifications();
+  if (notes.length) {
+    out.push(`## Ledger notices`);
+    for (const n of notes) out.push(`- ${n}`);
+  }
+  for (const section of [t, i, r]) if (section) { if (out.length) out.push(``); out.push(section); }
+  return out.join("\n");
 }
 
 /** The contract sentence under "Open investigations"; the hooks' gate and Stop block name the same three tools. */
