@@ -28,7 +28,7 @@ import { DEFAULT_DATA_TOOLS } from "./capture-tools.js";
  * pilot can count how often the nudge was ignored.
  */
 
-export type EntryKind = "query" | "decision" | "record" | "skip" | "search" | "nudge" | "unresolved" | "compact" | "end";
+export type EntryKind = "query" | "decision" | "record" | "skip" | "search" | "nudge" | "unresolved" | "compact" | "end" | "bind" | "gate";
 
 export interface JournalEntry {
   at: string;
@@ -42,6 +42,8 @@ export interface JournalEntry {
   input_complete?: boolean;
   /** decision entries: the work record the classifier proposed the decision on */
   record_title?: string;
+  /** query entries: a material pull (not a metadata call, and the response carried numbers or rows). Absent on entries journaled before 2026-09-17. */
+  material?: boolean;
 }
 
 export interface CaptureCoverage { session_id: string; evidence_ids: string[] }
@@ -63,6 +65,8 @@ export interface Journal {
   entries: JournalEntry[];
   /** fingerprint of the debt last nudged; same debt is never nudged twice */
   nudged?: string;
+  /** the open investigation this analysis session is bound to (ledger_investigation_bind / ledger_investigation_new) */
+  investigation?: { record_id: string; title?: string; at: string };
   /** Latest fallback batch. Coverage is explicit; a resumed session can accrue new debt. */
   extracted?: { at: string; result: "none" | "drafts" | "skipped" | "error"; reason: string; draft_ids: string[]; attempts?: number; evidence_ids?: string[] };
   extractions?: NonNullable<Journal["extracted"]>[];
@@ -82,9 +86,43 @@ export interface HookOpts {
   now?: Date;
 }
 
-const RECORD_TOOL = /^mcp__ledger__ledger_record_(finding|decision|change|definition)$/;
+/** ledger_propose_finding (query-grain draft, 2026-09-17) saves a draft with a pending_review capture_ack; the same acknowledgment path applies. */
+const RECORD_TOOL = /^mcp__ledger__ledger_(record_(finding|decision|change|definition)|propose_finding)$/;
 const SKIP_TOOL = "mcp__ledger__ledger_skip_record";
-const SEARCH_TOOLS = /^mcp__ledger__ledger_(search|brief|get)$/;
+const SEARCH_TOOLS = /^mcp__ledger__ledger_(search|brief|get|investigations)$/;
+/** Binding an analysis session to an investigation record; the success envelope carries structuredContent.record_id. */
+const BIND_TOOL = /^mcp__ledger__ledger_investigation_(bind|new)$/;
+
+/**
+ * A metadata call (schemas, table lists, property catalogues, health checks) is not analysis; neither is a query
+ * whose result carried no numbers or rows. Only material pulls gate on an investigation binding and are proposed
+ * at query grain.
+ */
+const METADATA_CALL = /list_|describe|schema|tables|databases|get_properties|get_events$|whoami|health/i;
+const EMPTY_RESULT = /^\s*(\[\s*\]|\{\s*\}|null|no (rows|results|data)( returned| found)?\.?|0 rows?( returned)?\.?|empty( result)?\.?)\s*$/i;
+
+function responseRows(r: any): unknown[] | null {
+  if (!r || typeof r !== "object") return null;
+  for (const k of ["rows", "data", "results", "records", "series"]) if (Array.isArray(r[k])) return r[k];
+  const sc = r.structuredContent;
+  if (sc && typeof sc === "object") for (const k of ["rows", "data", "results", "records", "series"]) if (Array.isArray(sc[k])) return sc[k];
+  return null;
+}
+
+/** Pure: is this journaled data-tool call a material pull (see METADATA_CALL). No response, an error, or an empty result is not. */
+export function isMaterialPull(tool: string, input: unknown, response: unknown): boolean {
+  if (METADATA_CALL.test(canonicalToolName(tool))) return false;
+  const text = typeof input === "string" ? input : summarize(input, 2000);
+  if (METADATA_CALL.test(text)) return false;
+  if (response == null) return false;
+  const env = responseEnvelope(response);
+  if (env.isError === true || env.is_error === true || env.success === false) return false;
+  const rows = responseRows(env);
+  if (rows) return rows.length > 0;
+  const body = responseText(response);
+  if (!body.trim() || EMPTY_RESULT.test(body)) return false;
+  return /\d/.test(body);
+}
 
 export function sessionsDir(): string {
   return path.join(ledgerHome(), "sessions");
