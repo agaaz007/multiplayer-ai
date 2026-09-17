@@ -64,9 +64,9 @@ const ledgerDir = path.join(tmp, "ledger");
 initLedger(ledgerDir, "test");
 const cfg: Config = { ledger_dir: ledgerDir, git_sync: false, author: "agaaz", continuity: { database_url: DB, machine: "agaaz-mac" } };
 const pool = getPool(cfg);
-await pool.query(`drop table if exists cont_state_updates, cont_record_links, cont_records, cont_notifications, cont_artifacts, cont_claims, cont_checkpoints, cont_events, cont_sessions, cont_threads cascade`);
+await pool.query(`drop table if exists cont_session_bindings, cont_state_updates, cont_record_links, cont_records, cont_notifications, cont_artifacts, cont_claims, cont_checkpoints, cont_events, cont_sessions, cont_threads cascade`);
 await migrate(pool);
-assert.equal((await tableList(pool)).length, 10, "all ten cont_* tables present");
+assert.equal((await tableList(pool)).length, 11, "all eleven cont_* tables present (cont_session_bindings added 2026-09-17)");
 ok(`schema reset on ${DB.replace(/\/\/[^@]*@/, "//…@")}`);
 
 // ---------- fixture: agaaz (Claude Code) then rachit (Codex) on one repo ----------
