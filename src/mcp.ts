@@ -2,13 +2,14 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { registerAppTool, registerAppResource, RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/server";
 import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { z } from "zod";
-import { loadConfig, loadAll, record, getById, discardDraft, type Config } from "./store.js";
+import { loadConfig, loadAll, record, getById, discardDraft, proposeFinding, reviewFinding, type Config } from "./store.js";
 import { brief, search, similarFindings, renderFull, stats, objectScopeLine } from "./query.js";
-import { AnalyticalDateSchema, AnalysisScopeSchema, ChangeSchema, DecisionSchema, DefinitionSchema, FindingSchema, TYPES, type LedgerObject } from "./schema.js";
+import { AnalyticalDateSchema, AnalysisScopeSchema, ChangeSchema, DecisionSchema, DefinitionSchema, FindingSchema, WindowInputSchema, TYPES, type LedgerObject } from "./schema.js";
 import { correctionImpact, objectVersion, resolveAccepted, verification } from './authority.js';
 import { investigation } from './investigation.js';
-import { validateCaptureCoverage, acknowledgeCapture, type CaptureAck } from './hooks.js';
+import { validateCaptureCoverage, acknowledgeCapture, loadJournal, type CaptureAck, type CaptureCoverage } from './hooks.js';
 import { verifyAcceptanceEvidence } from './acceptance-evidence.js';
 import { validateRecordCoverage, acknowledgeLocalCapture, reconcileSharedCapture } from './capture-boundary.js';
 import { EVIDENCE_URI, ReferenceSchema, evidenceResult, contributionResult } from "./evidence.js";
@@ -26,11 +27,76 @@ import { addStateUpdate, asOfRecordSummaries, confirmStateUpdate, createRecord, 
 import { acceptanceLabel } from "./continuity/packsections.js";
 
 const text = (s: string) => ({ content: [{ type: "text" as const, text: s }] });
+const refused = (s: string) => ({ ...text(s), isError: true as const });
+
+// ---------- investigation binding (dec-20260917 bind-or-new) ----------
+// src/continuity/investigations.ts is owned by the continuity side and may not be on disk in every
+// build; the contract below is what it exports. Loaded on demand so a missing module refuses
+// clearly at call time instead of failing the whole server at import.
+type AnyPool = ReturnType<typeof getPool>;
+interface InvestigationsModule {
+  listInvestigations(pool: AnyPool, cfg: Config, o: { q?: string; author?: string; hours?: number; limit?: number }): Promise<{ text: string; items: unknown[] }>;
+  bindInvestigation(pool: AnyPool, cfg: Config, o: { record_id: string; session_id: string; question?: string }): Promise<{ text: string; record_id: string; title: string; already_bound: boolean }>;
+  declareInvestigation(pool: AnyPool, cfg: Config, o: { question: string; goal?: string; session_id: string; repo?: string }): Promise<{ text: string; record_id: string }>;
+  sessionBinding(pool: AnyPool, session_id: string): Promise<unknown>;
+}
+const INVESTIGATIONS_MODULE: string = "./continuity/investigations.js";
+async function investigationsModule(): Promise<InvestigationsModule> {
+  try { return (await import(INVESTIGATIONS_MODULE)) as InvestigationsModule; }
+  catch (e: any) { throw new Error(`investigation binding is not available in this build (${INVESTIGATIONS_MODULE}: ${String(e?.message ?? e).slice(0, 120)})`); }
+}
+/** Whatever shape sessionBinding returns, the bound work record id is what a proposal needs. */
+function boundRecordId(binding: unknown): string | undefined {
+  if (!binding) return undefined;
+  if (typeof binding === "string") return binding;
+  const o = binding as Record<string, unknown>;
+  for (const k of ["record_id", "investigation_record_id", "id"]) if (typeof o[k] === "string" && o[k]) return o[k] as string;
+  return undefined;
+}
+/**
+ * The retained query input for a capture evidence id, hash-checked: the helper stores each data-tool
+ * call's full input as a cont_artifacts row and stamps input_artifact_id/sha256 on its tool.requested
+ * event (materializeArtifacts). Null when the event, the artifact or the hash is missing; acceptance
+ * then pins the reviewed draft only and says so.
+ */
+async function locateQueryArtifact(pool: AnyPool, queryRef: string): Promise<{ artifact_id: string; sha256: string } | null> {
+  const ev = await pool.query<{ id: string | null; sha: string | null }>(
+    `select payload->>'input_artifact_id' as id, payload->>'input_artifact_sha256' as sha from cont_events
+      where kind='tool.requested' and payload->'evidence_ids' ? $1 and payload->>'input_artifact_id' is not null order by received_at desc limit 1`, [queryRef]);
+  const row = ev.rows[0];
+  if (!row?.id || !row.sha || !/^[a-f0-9]{64}$/.test(row.sha)) return null;
+  const art = await pool.query<{ inline: Buffer | null }>(`select inline from cont_artifacts where id::text = $1 and sha256 = $2`, [row.id, row.sha]);
+  const inline = art.rows[0]?.inline;
+  if (!inline || createHash("sha256").update(inline).digest("hex") !== row.sha) return null;
+  return { artifact_id: row.id, sha256: row.sha };
+}
+function coverageOf(fields: Record<string, unknown>): CaptureCoverage[] {
+  const raw = fields.capture_coverage;
+  return Array.isArray(raw) ? raw.filter((c): c is CaptureCoverage => c && typeof c.session_id === "string" && Array.isArray(c.evidence_ids) && c.evidence_ids.length > 0) : [];
+}
 
 export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) {
   const server = new McpServer({ name: "ledger", version: "0.1.0" });
   const evidenceUi = { ui: { resourceUri: EVIDENCE_URI } };
   const readOnly = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
+  // An explicit session_id, else a harness env id with a local transcript. Never a synthetic id: the helper
+  // looks bindings up by the transcript's id, so a claim written for `mcp:<author>:<pid>` split the successor's
+  // work onto another thread (2026-09-13 review). Claude Code exports CLAUDE_CODE_SESSION_ID.
+  const sessionOf = (given?: string): string => {
+    const r = resolveHarnessSession(given, process.env, (id) => localTranscriptExists(id));
+    if (!r.ok) throw new Error(r.error);
+    return r.id;
+  };
+  const poolIfAny = (): AnyPool | null => (continuityConfigured(cfg) ? getPool(cfg) : null);
+  /** Additive: append a Ledger object to the investigation record's ledger_refs so the pack's decisions/refs machinery sees it. */
+  const linkToInvestigation = async (pool: AnyPool, recordId: string, ref: { id: string; version?: string }): Promise<string> => {
+    const rec = await getRecord(pool, recordId);
+    if (!rec) return ` Investigation ${recordId} was not found among the work records; the finding carries investigation_record_id but the record's ledger_refs were not updated.`;
+    const merged = [...(rec.ledger_refs ?? [])];
+    if (!merged.some((r) => r.id === ref.id)) merged.push(ref);
+    await updateRecordMeta(pool, rec.id, { ledger_refs: merged });
+    return ` Linked to investigation "${rec.title}" (${rec.id}) as a ledger ref.`;
+  };
 
   registerAppResource(server, "Ledger evidence card", EVIDENCE_URI, { mimeType: RESOURCE_MIME_TYPE }, async () => ({
     contents: [{
@@ -273,6 +339,126 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
     }
   );
 
+  // ---------- query-grain findings (dec-20260917 bind-or-new): agent proposes, a person accepts or discards ----------
+  server.registerTool(
+    "ledger_propose_finding",
+    {
+      title: "Propose a query-grain finding",
+      description:
+        "After each material data pull, propose a finding at QUERY grain: on this population, this metric, this window, the result was Y, read from query_ref (the q:<tool_use_id> evidence id the checkpoint prints). Writes a DRAFT finding with stance PROPOSED inside the session's investigation (bound with ledger_investigation_bind / ledger_investigation_new, or passed as investigation_record_id) and covers that query as pending_review. It never accepts: a person reviews with ledger_review_finding. Refuses when the session is unbound and no investigation_record_id is given, so no orphan finding is created. A PROPOSED finding is not law; the next agent reuses it only as a proposal. For a full argued finding use ledger_record_finding." + RECEIPT_GUIDANCE,
+      inputSchema: {
+        population: z.string().min(1).describe("Who is in the denominator, e.g. 'Android IN users shown subscription_paywall'"),
+        metric: z.string().min(1).describe("The metric measured; use the ledger definition's metric name when one exists"),
+        window: WindowInputSchema.describe("{from, to} ISO dates, or free text containing them ('2026-08-01..2026-08-31'); text without two dates is kept but data_window stays unset until a person supplies it at accept"),
+        result: z.string().min(1).describe("The headline number(s) with units, exactly as the query returned them"),
+        query_ref: z.string().regex(/^q:.+/, 'pass the evidence id exactly as printed: "q:<tool_use_id>"').describe("Capture evidence id of the data-tool call this result was read from"),
+        investigation_record_id: z.string().optional().describe("Work record (investigation) id; defaults to the one this session is bound to"),
+        title: z.string().min(3).max(140).optional().describe("Defaults to '<metric> · <population> · <window>: <result>'"),
+        caveats: z.array(z.string()).optional(),
+        session_id: z.string().optional().describe('Your harness session id (SessionStart prints it as "Ledger session: <id>"); read from CLAUDE_CODE_SESSION_ID / CODEX_THREAD_ID when a local transcript matches'),
+      },
+    },
+    async ({ population, metric, window, result, query_ref, investigation_record_id, title, caveats, session_id }) => {
+      let sid: string;
+      try { sid = sessionOf(session_id); } catch (e: any) { return refused(`ledger_propose_finding refused: ${e.message} A proposal covers the query it was read from, so it needs the session that ran it.`); }
+      const pool = poolIfAny();
+      let recordId = investigation_record_id;
+      if (!recordId && pool) {
+        try { recordId = boundRecordId(await (await investigationsModule()).sessionBinding(pool, sid)); }
+        catch (e: any) { return refused(`ledger_propose_finding refused: could not read this session's investigation binding (${e.message}). Pass investigation_record_id explicitly, or bind first.`); }
+      }
+      if (!recordId) return refused(`ledger_propose_finding refused: session ${sid} is not bound to an investigation and no investigation_record_id was given. Bind or declare new first: ledger_investigations lists open investigations; ledger_investigation_bind({ record_id }) continues one; ledger_investigation_new({ question }) declares one. An unbound proposal would be an orphan finding, which is never created.`);
+      const coverage: CaptureCoverage[] = [{ session_id: sid, evidence_ids: [query_ref] }];
+      try { await validateRecordCoverage(cfg, { capture_coverage: coverage }); }
+      catch (e: any) { return refused(`ledger_propose_finding refused: ${e.message}`); }
+      let source: string | undefined;
+      try { source = loadJournal(sid).entries.find((e) => e.kind === "query" && e.evidence_id === query_ref)?.tool; } catch { /* remote session: the source stays unrecorded */ }
+      let res;
+      try { res = proposeFinding(cfg, { population, metric, window, result, query_ref, investigation_record_id: recordId, title, caveats, source }, { session: sid }); }
+      catch (e: any) { return refused(`ledger_propose_finding failed: ${e.message}`); }
+      const ack: CaptureAck = { schema: "ledger-capture/v1", action: "record", status: "pending_review", coverage, record_id: res.id };
+      let captureWarning = "";
+      let captureAck: CaptureAck | undefined;
+      try {
+        const applied = acknowledgeLocalCapture(ack); captureAck = ack;
+        if (applied.remote_pending) captureWarning = `\n${applied.remote_pending} remote evidence acknowledgment(s) saved in this draft; the source machine reconciles on its next brief.`;
+      } catch (error) { captureWarning = `\nProposal saved, but local capture acknowledgment failed: ${String(error)}. Do not duplicate it; the query remains outstanding until reviewed.`; }
+      let refsNote = "";
+      if (pool) { try { refsNote = await linkToInvestigation(pool, recordId, { id: res.id, ...(res.content_version ? { version: res.content_version } : {}) }); } catch (e: any) { refsNote = ` Investigation ledger_refs not updated: ${e.message}.`; } }
+      let objects: LedgerObject[] | null = null;
+      try { objects = loadAll(cfg, TYPES, false); } catch { /* receipt reports unavailable details */ }
+      const receipt = savedReceipt("finding", { ...res.fields, status: "draft" }, res, objects, cfg.git_sync);
+      const details =
+        `Proposed finding ${res.id} (draft, stance PROPOSED, pending review) in investigation ${recordId}, covering ${query_ref}${res.git ? ` — ${res.git}` : ""}.` +
+        (res.content_version ? `\ncontent_version: ${res.content_version}` : "") +
+        `\nNot accepted: a person accepts with ledger_review_finding({ id: "${res.id}", action: "accept" }) or discards with a reason.` +
+        (res.fields.data_window ? "" : `\nwindow ${JSON.stringify(window)} did not map to data_window {from, to}; accept will need window: {from, to}.`) +
+        refsNote + captureWarning;
+      return { content: [receiptText(receipt, details)], structuredContent: { receipt, ...(res.content_version ? { content_version: res.content_version } : {}), investigation_record_id: recordId, stance: "PROPOSED", ...(captureAck ? { capture_ack: captureAck } : {}) } };
+    }
+  );
+
+  server.registerTool(
+    "ledger_review_finding",
+    {
+      title: "Accept or discard a proposed finding (a person's act)",
+      description:
+        "A person's review of a query-grain finding proposed with ledger_propose_finding (stance PROPOSED). accept writes a NEW stable finding under the configured Ledger author with stance accepted, supersedes the draft, and an acceptance pinned to the draft's content_version (role review) plus the retained query artifact when it can be located (role query); the result reads 'Accepted by <person>'. discard requires a reason and keeps the draft as a discarded cut: deprecated, stance discarded, reason kept, listed by ledger_search(include_superseded) as 'discarded cut'. Acceptance is never automatic: call accept only when the person you work for has reviewed the number, or when they asked you to. Refuses anything that is not a PROPOSED draft." + RECEIPT_GUIDANCE,
+      inputSchema: {
+        id: z.string().describe("The proposed finding id (fnd-…)"),
+        action: z.enum(["accept", "discard"]),
+        reason: z.string().optional().describe("discard: required; why the cut is not durable knowledge (kept in history)"),
+        window: z.object({ from: AnalyticalDateSchema, to: AnalyticalDateSchema }).optional().describe("accept: supply when the proposal's free-text window did not map to data_window"),
+      },
+    },
+    async ({ id, action, reason, window }) => {
+      const draft = getById(cfg, id);
+      if (!draft) return refused(`Not found: ${id}`);
+      const pool = poolIfAny();
+      let queryEvidence: { artifact_id: string; sha256: string } | undefined;
+      let queryNote = "";
+      const queryRef = typeof draft.fields.query_ref === "string" ? draft.fields.query_ref : undefined;
+      if (action === "accept" && queryRef) {
+        if (pool) {
+          try { queryEvidence = (await locateQueryArtifact(pool, queryRef)) ?? undefined; } catch (e: any) { queryNote = ` Query artifact lookup failed (${e.message}).`; }
+          queryNote += queryEvidence ? ` Acceptance also pins the retained query artifact ${queryEvidence.artifact_id} (role query).` : ` The retained query artifact for ${queryRef} was not located; acceptance pins the reviewed draft's content_version only.`;
+        } else queryNote = ` No continuity database: acceptance pins the reviewed draft's content_version only.`;
+      }
+      let r;
+      try { r = reviewFinding(cfg, id, action, { actor: cfg.author, reason, window, queryEvidence }); }
+      catch (e: any) { return refused(`ledger_review_finding refused: ${e.message}`); }
+      const coverage = coverageOf(draft.fields);
+      if (action === "discard") {
+        let ack: CaptureAck | undefined;
+        if (coverage.length) {
+          const a: CaptureAck = { schema: "ledger-capture/v1", action: "skip", status: "dismissed", reason: `discarded cut: ${r.reason}`, coverage };
+          try { acknowledgeLocalCapture(a); ack = a; } catch { /* the covering session is not on this machine */ }
+        }
+        return { ...text(`Discarded cut kept: ${r.reason}\n${id} is now deprecated with stance discarded, by ${r.by}${r.git ? ` — ${r.git}` : ""}. It leaves the review queue and stays in history; ledger_search(include_superseded: true) labels it "discarded cut".`),
+          structuredContent: { review: { action, draft_id: id, by: r.by, stance: "discarded", reason: r.reason }, ...(ack ? { capture_ack: ack } : {}) } };
+      }
+      let captureAck: CaptureAck | undefined;
+      let captureWarning = "";
+      if (coverage.length) {
+        const a: CaptureAck = { schema: "ledger-capture/v1", action: "record", status: "recorded", coverage, record_id: r.id! };
+        try { acknowledgeLocalCapture(a); captureAck = a; } catch (error) { captureWarning = `\nAccepted, but local capture acknowledgment failed: ${String(error)}.`; }
+      }
+      let refsNote = "";
+      const rid = typeof draft.fields.investigation_record_id === "string" ? draft.fields.investigation_record_id : undefined;
+      if (pool && rid) { try { refsNote = await linkToInvestigation(pool, rid, { id: r.id!, ...(r.content_version ? { version: r.content_version } : {}) }); } catch (e: any) { refsNote = ` Investigation ledger_refs not updated: ${e.message}.`; } }
+      let objects: LedgerObject[] | null = null;
+      try { objects = loadAll(cfg, TYPES, false); } catch { /* receipt reports unavailable details */ }
+      const receipt = savedReceipt("finding", { title: draft.title, status: "stable" }, { id: r.id!, path: r.path!, git: r.git, superseded: id }, objects, cfg.git_sync);
+      const roles = r.acceptance?.evidence_refs.map((e) => `${e.role}:${e.artifact_id}`).join(", ") ?? "";
+      const details =
+        `Accepted by ${r.by} — a person's review under the configured Ledger author, not the agent's. ${r.id} (stable, stance accepted) supersedes ${id}${r.git ? ` — ${r.git}` : ""}.` +
+        (r.content_version ? `\ncontent_version: ${r.content_version} — pin dependencies to this value.` : "") +
+        `\nacceptance: actor ${r.acceptance?.actor}, expected_predecessor ${id} @ ${r.acceptance?.expected_predecessor?.version}, evidence_refs [${roles}].` +
+        queryNote + refsNote + captureWarning;
+      return { content: [receiptText(receipt, details)], structuredContent: { receipt, ...(r.content_version ? { content_version: r.content_version } : {}), review: { action, draft_id: id, id: r.id, by: r.by, stance: "accepted", acceptance: r.acceptance }, ...(captureAck ? { capture_ack: captureAck } : {}) } };
+    }
+  );
+
   server.registerTool(
     "ledger_stats",
     {
@@ -287,14 +473,6 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
   // ---------- execution continuity (spec §8) ----------
   if (continuityConfigured(cfg)) {
     const pool = () => getPool(cfg);
-    // An explicit session_id, else a harness env id with a local transcript. Never a synthetic id: the helper
-    // looks bindings up by the transcript's id, so a claim written for `mcp:<author>:<pid>` split the successor's
-    // work onto another thread (2026-09-13 review). Claude Code exports CLAUDE_CODE_SESSION_ID.
-    const sessionOf = (given?: string): string => {
-      const r = resolveHarnessSession(given, process.env, (id) => localTranscriptExists(id));
-      if (!r.ok) throw new Error(r.error);
-      return r.id;
-    };
     // Scope is decided before any query runs: "repo" whenever cwd is given (or explicitly asked for, from the
     // server's cwd), "all" otherwise. A repo that cannot be resolved is an error, never a silent widening.
     const scopeOf = (cwd: string | undefined, scope: "repo" | "all" | undefined) => resolveSearchScope({ cwd, scope, fallbackCwd: process.cwd() }, { repoRoot, repoIdentity });
@@ -490,6 +668,71 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
     const RECORD_STATUSES = ["open", "done", "archived"] as const;
     const UPDATE_KINDS = ["progress", "decision", "hypothesis", "blocker", "next", "contradiction", "note"] as const;
     const failed = (tool: string, e: any) => text(`${tool} failed: ${e?.message ?? String(e)}`);
+
+    // ---------- investigations (dec-20260917 bind-or-new): bind this session to one, or declare a new one ----------
+    server.registerTool(
+      "ledger_investigations",
+      {
+        title: "Open investigations",
+        description: "List open investigations (work records of kind investigation) before starting analytical work: title, question, author, last activity, proposed/accepted findings, id. Continue one with ledger_investigation_bind({ record_id }); if nothing matches, declare one with ledger_investigation_new. Every ledger_propose_finding must land inside a bound investigation.",
+        inputSchema: {
+          q: z.string().optional().describe("Case-insensitive substring over title, goal and question"),
+          author: z.string().optional(),
+          hours: z.number().int().min(1).max(24 * 365).optional(),
+          limit: z.number().int().min(1).max(50).optional(),
+        },
+        annotations: readOnly,
+      },
+      async ({ q, author, hours, limit }) => {
+        try {
+          const r = await (await investigationsModule()).listInvestigations(pool(), cfg, { q, author, hours, limit });
+          return { ...text(r.text), structuredContent: { items: r.items } };
+        } catch (e: any) { return failed("ledger_investigations", e); }
+      }
+    );
+
+    server.registerTool(
+      "ledger_investigation_bind",
+      {
+        title: "Bind this session to an investigation",
+        description: "Continue an existing investigation: binds the caller session to the work record so ledger_propose_finding lands its query-grain findings there. Returns structuredContent.record_id on success. Say what question this session is pursuing if it differs from the record's.",
+        inputSchema: {
+          record_id: z.string().describe("Investigation (work record) id from ledger_investigations"),
+          question: z.string().max(2000).optional().describe("The question this session pursues inside the investigation"),
+          session_id: z.string().optional().describe('Your harness session id (SessionStart prints it as "Ledger session: <id>")'),
+        },
+      },
+      async ({ record_id, question, session_id }) => {
+        let sid: string;
+        try { sid = sessionOf(session_id); } catch (e: any) { return refused(`ledger_investigation_bind refused: ${e.message}`); }
+        try {
+          const r = await (await investigationsModule()).bindInvestigation(pool(), cfg, { record_id, session_id: sid, question });
+          return { ...text(r.text), structuredContent: { record_id: r.record_id, title: r.title, already_bound: r.already_bound, session_id: sid } };
+        } catch (e: any) { return { ...failed("ledger_investigation_bind", e), isError: true }; }
+      }
+    );
+
+    server.registerTool(
+      "ledger_investigation_new",
+      {
+        title: "Declare a new investigation",
+        description: "No open investigation matches: declare one (a work record of kind investigation) with the question it pursues and bind the caller session to it. Returns structuredContent.record_id. Check ledger_investigations first so two people do not open the same investigation twice.",
+        inputSchema: {
+          question: z.string().min(3).max(2000).describe("The question this investigation answers, stated so it could later be false"),
+          goal: z.string().max(2000).optional(),
+          repo: z.string().optional().describe("A path inside the repo this investigation belongs to; defaults to the server's cwd repo when resolvable"),
+          session_id: z.string().optional().describe('Your harness session id (SessionStart prints it as "Ledger session: <id>")'),
+        },
+      },
+      async ({ question, goal, repo, session_id }) => {
+        let sid: string;
+        try { sid = sessionOf(session_id); } catch (e: any) { return refused(`ledger_investigation_new refused: ${e.message}`); }
+        try {
+          const r = await (await investigationsModule()).declareInvestigation(pool(), cfg, { question, goal, session_id: sid, repo });
+          return { ...text(r.text), structuredContent: { record_id: r.record_id, session_id: sid } };
+        } catch (e: any) { return { ...failed("ledger_investigation_new", e), isError: true }; }
+      }
+    );
 
     server.registerTool(
       "ledger_records",
