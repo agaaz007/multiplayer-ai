@@ -160,6 +160,8 @@ const base = {
   correction: CorrectionSchema.optional(),
   acceptance: AcceptanceSchema.optional().describe("Explicit review assertion; caller must separately authorize the actor."),
   capture_coverage: z.array(z.object({ session_id: scopeText, evidence_ids: z.array(scopeText).min(1) })).optional(),
+  /** Written by discardDraft / reviewFinding(discard): who rejected the draft, when, and why. Kept in history. */
+  discarded: z.object({ by: scopeText, at: isoDate, reason: scopeText }).optional(),
 };
 
 export const DefinitionSchema = z.object({
@@ -193,8 +195,26 @@ export const ReproductionSchema = z.object({
 });
 export type Reproduction = z.infer<typeof ReproductionSchema>;
 
+/**
+ * Query-grain stance (dec-20260917 bind-or-new). A material data pull proposes a finding at query
+ * grain: {population, metric, window, result, query_ref}. It is written as a draft with stance
+ * PROPOSED; a person accepts (a new stable finding with stance accepted supersedes it) or discards
+ * (stance discarded, kept as a discarded cut with the reason). Absent on legacy findings.
+ */
+export const FINDING_STANCES = ["PROPOSED", "accepted", "discarded"] as const;
+export type FindingStance = (typeof FINDING_STANCES)[number];
+const uuid = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i, "work record id (uuid) from ledger_investigations / ledger_investigation_new");
+/** A window as an agent states it: exact {from,to}, or free text mapped into data_window when two ISO dates can be read from it. */
+export const WindowInputSchema = z.union([z.string().trim().min(1), z.object({ from: isoDate, to: isoDate })]);
+
 export const FindingSchema = z.object({
   ...base,
+  population: z.string().min(1).optional().describe("Query grain: who is in the denominator. Mirrors inputs[0].population."),
+  metric: z.string().min(1).optional().describe("Query grain: the metric measured; matches a definition's metric name when one exists."),
+  window: WindowInputSchema.optional().describe("Query grain: the window as stated; data_window carries the parsed {from,to}."),
+  stance: z.enum(FINDING_STANCES).optional().describe("PROPOSED (agent proposal, draft) · accepted (a person reviewed it) · discarded (kept as a discarded cut). Absent on legacy findings."),
+  query_ref: z.string().regex(/^q:.+/, "capture evidence id, exactly as printed: q:<tool_use_id>").optional().describe("The retained data-tool call this result was read from."),
+  investigation_record_id: uuid.optional().describe("The work record (investigation) this finding was proposed inside."),
   claim_type: z.enum(CLAIM_TYPES).optional().describe("measurement (a quantity), comparison (A beats B), or explanation (why). Each requires different supporting fields."),
   question: z.string().min(3).describe("The question that was actually answered"),
   result: z.string().min(1).describe("The claim: headline number(s) with units, or the comparison"),
