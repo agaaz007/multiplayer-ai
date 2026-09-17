@@ -97,6 +97,30 @@ export function scopesConflict(a: unknown, b: unknown): boolean {
   return Boolean(a && b && scopeIdentity(a) !== scopeIdentity(b));
 }
 
+export function normalizeTitle(s: string): string {
+  return s.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Fraction of the query's tokens found in the document, title hits counting fully and body hits half.
+ * Range 0..1. Query-token stop words are removed by `tokens` (query.ts), so "how did trial CVR move"
+ * matches on "trial", "cvr", "move".
+ */
+export function matchScore(q: string, title: string, body = ""): number {
+  const qt = new Set(tokens(q));
+  if (!qt.size) return 0;
+  const t = new Set(tokens(title)), b = new Set(tokens(body));
+  let hits = 0;
+  for (const x of qt) { if (t.has(x)) hits += 1; else if (b.has(x)) hits += 0.5; }
+  return hits / qt.size;
+}
+
+/** Symmetric title coverage: both titles must cover each other's tokens. The declare-time near-duplicate refusal in continuity/investigations.ts and the classifier anti-twin check both read it. */
+export function titleSimilarity(a: string, b: string): number {
+  if (normalizeTitle(a) === normalizeTitle(b)) return 1;
+  return Math.min(matchScore(a, b), matchScore(b, a));
+}
+
 export interface SearchOpts {
   types?: LedgerType[];
   limit?: number;

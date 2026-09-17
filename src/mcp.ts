@@ -720,7 +720,7 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
         inputSchema: {
           question: z.string().min(3).max(2000).describe("The question this investigation answers, stated so it could later be false"),
           goal: z.string().max(2000).optional(),
-          repo: z.string().optional().describe("A path inside the repo this investigation belongs to; defaults to the server's cwd repo when resolvable"),
+          repo: z.string().optional().describe("Optional: a path inside a repo this investigation may read. Recorded as a touched repo (a capability), never as the record's identity; an investigation is keyed by its question and is complete with no repo at all"),
           session_id: z.string().optional().describe('Your harness session id (SessionStart prints it as "Ledger session: <id>")'),
         },
       },
@@ -728,7 +728,8 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
         let sid: string;
         try { sid = sessionOf(session_id); } catch (e: any) { return refused(`ledger_investigation_new refused: ${e.message}`); }
         try {
-          const r = await (await investigationsModule()).declareInvestigation(pool(), cfg, { question, goal, session_id: sid, repo });
+          const repoRootOf = repo ? repoRoot(repo) : null;
+          const r = await (await investigationsModule()).declareInvestigation(pool(), cfg, { question, goal, session_id: sid, repo: repoRootOf ? repoIdentity(repoRootOf) : repo });
           return { ...text(r.text), structuredContent: { record_id: r.record_id, session_id: sid } };
         } catch (e: any) { return { ...failed("ledger_investigation_new", e), isError: true }; }
       }
@@ -883,7 +884,7 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
       "ledger_record_start",
       {
         title: "Start a work record",
-        description: "Create a work record for a goal that will span sessions or teammates: an investigation, an implementation, a piece of writing, a decision in progress. Pass cwd inside a git repo for code work (the record gets that repo identity) or omit it for non-code work (hiring, copy, planning). Optionally link the span of your current session that already belongs to it.",
+        description: "Create a work record for a goal that will span sessions or teammates: an investigation, an implementation, a piece of writing, a decision in progress. Pass cwd inside a git repo for code work (the record gets that repo identity) or omit it for non-code work (hiring, copy, planning). An investigation is keyed by its question: cwd becomes a touched repo it may read, never its identity (prefer ledger_investigation_new, which also binds this session). Optionally link the span of your current session that already belongs to it.",
         inputSchema: {
           kind: z.enum(RECORD_KINDS),
           title: z.string().min(3).max(200),
@@ -903,7 +904,8 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
             const l = await linkSpan(pool(), { record_id: rec.id, session_id: link.session_id, from_seq: link.from_seq, to_seq: link.to_seq, source: "explicit", created_by: cfg.author });
             linked = ` Linked session ${link.session_id} seq ${link.from_seq}..${link.to_seq} (link ${l.id}).`;
           }
-          return text(`Record ${rec.id} "${rec.title}" (${rec.kind}) created${repo ? ` on ${repo}` : " as non-code work"} by ${cfg.author}.${linked} Propose state with ledger_record_update; link further spans with ledger_record_link.`);
+          const where = rec.repo ? ` on ${rec.repo}` : rec.touched_repos?.length ? ` keyed by its question (repos it may read: ${rec.touched_repos.join(", ")})` : " as non-code work";
+          return text(`Record ${rec.id} "${rec.title}" (${rec.kind}) created${where} by ${cfg.author}.${linked} Propose state with ledger_record_update; link further spans with ledger_record_link.`);
         } catch (e: any) {
           return failed("ledger_record_start", e);
         }

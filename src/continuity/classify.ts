@@ -7,8 +7,8 @@ import { runExtractorAsync } from "../extract.js";
 import * as S from "./store.js";
 import * as R from "./records.js";
 import type { RecordKind, UpdateKind, Span, WorkRecord, StateUpdate } from "./records.js";
-import { idfOver, questionSimilarity } from "../query.js";
-import { titleSimilarity } from "./investigations.js";
+import { idfOver, questionSimilarity, titleSimilarity } from "../query.js";
+
 
 /**
  * Classifier (spec v1.2 §13a, D-009): runs at each `turn` checkpoint. Given the
@@ -51,6 +51,12 @@ export interface ClassifyResult {
   records_created: number;
   /** proposed new investigations that restated an open one and were linked to it instead of created */
   twins_linked: number;
+  /**
+   * proposed new investigations that matched nothing open and were NOT created: the classifier links analysis
+   * work to an investigation a session declared or bound (bind-or-new), it never opens one from cwd. The span
+   * stays unassigned with that reason.
+   */
+  investigations_declined: number;
   updates_proposed: number;
   /** state updates this session already proposed with the same kind and text (idempotent re-run) */
   updates_skipped: number;
@@ -177,7 +183,9 @@ function candidateLines(cands: Candidate[]): string {
   if (!cands.length) return "(none: no linked, relevant or open records in this scope)";
   return cands.map((c, i) => {
     const r = c.record;
-    const bits = [`[${i + 1}] ${r.id}`, `kind: ${r.kind}`, `title: ${r.title}`, `repo: ${r.repo ?? "none (non-code work)"}`, `status: ${r.status}`];
+    const touched = Array.isArray(r.touched_repos) ? r.touched_repos : [];
+    const where = r.repo ?? (r.kind === "investigation" ? `none (investigation keyed by its question${touched.length ? `; repos touched: ${touched.join(", ")}` : ""})` : "none (non-code work)");
+    const bits = [`[${i + 1}] ${r.id}`, `kind: ${r.kind}`, `title: ${r.title}`, `repo: ${where}`, `status: ${r.status}`];
     if (r.goal) bits.push(`goal: ${oneLine(r.goal, 300)}`);
     if (c.linked_here) bits.push(`already linked to this session`);
     bits.push(`state: ${c.state_summary || "no updates yet"}`);
@@ -324,7 +332,7 @@ export async function classifySession(cfg: Config, pool: pg.Pool, sessionId: str
   const dryRun = Boolean(opts.dryRun);
   const maxEvents = Math.max(1, opts.maxEvents ?? DEFAULT_MAX_EVENTS);
   const res: ClassifyResult = {
-    session_id: sessionId, events_considered: 0, candidates: 0, candidate_pool_size: 0, candidates_omitted: 0, assignments_applied: 0, assignments_skipped: 0, records_created: 0, twins_linked: 0, updates_proposed: 0, updates_skipped: 0,
+    session_id: sessionId, events_considered: 0, candidates: 0, candidate_pool_size: 0, candidates_omitted: 0, assignments_applied: 0, assignments_skipped: 0, records_created: 0, twins_linked: 0, investigations_declined: 0, updates_proposed: 0, updates_skipped: 0,
     unassigned: [], rejected: [], prompt_chars: 0, model_ok: false, notes: [], since_seq: 0, through_seq: 0, dry_run: dryRun, proposed: [],
   };
   const fail = (msg: string): ClassifyResult => { res.error = msg; return res; };
@@ -408,6 +416,11 @@ export async function classifySession(cfg: Config, pool: pg.Pool, sessionId: str
   const proposesInvestigation = out.assignments.some((a: any) => a?.new_record?.kind === "investigation");
   const openInv = proposesInvestigation ? await R.openInvestigations(pool) : [];
   const invIdf = idfOver(openInv.map((r) => `${r.title} ${r.goal ?? ""}`.trim()));
+  // Investigations the model wanted to open and this run declined: identity is the question a session declared or
+  // bound, never the folder the chat ran in. Their spans stay unassigned, split out with this reason.
+  const declined: { from_seq: number; to_seq: number; reason: string }[] = [];
+  const declinedTitles = new Set<string>();
+  const declineReason = (title: string) => `investigation "${title}" was not opened by the classifier: an investigation is declared by a session (ledger_investigation_new) or bound (ledger_investigation_bind), never created from cwd; the span stays unassigned until a session binds it`;
 
   for (const raw of out.assignments) {
     const a = raw as any;
@@ -441,6 +454,16 @@ export async function classifySession(cfg: Config, pool: pg.Pool, sessionId: str
           const why = `linked proposed investigation "${title}" to open ${twin.record.id} "${twin.record.title}" (title ${twin.title_similarity.toFixed(2)}, question ${twin.question_similarity.toFixed(2)}) instead of creating a new record; the link is suggested and a person can reject it`;
           res.notes.push(why);
           log(`classify ${sessionId.slice(0, 8)}: ${why}`);
+        } else if (kind === "investigation") {
+          // Never mint: a repo-stamped investigation opened because cwd was a git root is how thirteen open
+          // investigations came to have zero bound sessions. The span is reported unassigned with the reason.
+          const rangeOk = isInt(a.from_seq) && isInt(a.to_seq);
+          if (rangeOk) declined.push({ from_seq: a.from_seq, to_seq: a.to_seq, reason: declineReason(title) });
+          declinedTitles.add(title.toLowerCase());
+          res.investigations_declined++;
+          log(`classify ${sessionId.slice(0, 8)}: declined to open investigation "${title}" (bind-or-new owns analysis scope)`);
+          reject(raw, declineReason(title));
+          continue;
         } else new_record = { kind: kind as RecordKind, title, goal };
       }
     }
@@ -474,6 +497,7 @@ export async function classifySession(cfg: Config, pool: pg.Pool, sessionId: str
     if (byId.has(ref)) target = { record_id: ref, new_title: null };
     else if (byTitle.has(ref.toLowerCase())) target = { record_id: byTitle.get(ref.toLowerCase())!.record.id, new_title: null };
     else if (newTitles.has(ref.toLowerCase())) target = { record_id: null, new_title: newTitles.get(ref.toLowerCase())!.new_record!.title };
+    if (!target && declinedTitles.has(ref.toLowerCase())) { reject(raw, `${declineReason(ref)}; the update has no record to land on`); continue; }
     if (!target) { reject(raw, `record_ref "${ref.slice(0, 80)}" is neither a candidate id nor the title of an accepted new_record`); continue; }
     if (!UPDATE_KINDS.has(u.kind)) { reject(raw, `kind must be one of ${[...UPDATE_KINDS].join(", ")}, got ${String(u.kind)}`); continue; }
     const text = oneLine(u.text ?? "", 1000);
@@ -518,6 +542,9 @@ export async function classifySession(cfg: Config, pool: pg.Pool, sessionId: str
           }
           record_id = rec.id;
         }
+        // The folder this session ran in is a capability of an investigation it serves (touched_repos), not its
+        // identity; a no-op for other kinds, whose repo is their identity already.
+        if (session.repo) await R.touchRepo(pool, record_id, session.repo);
         if (a.existing) { res.assignments_skipped++; continue; }
         await R.linkSpan(pool, { record_id, session_id: sessionId, from_seq: a.from_seq, to_seq: a.to_seq, source: "suggested", confidence: a.confidence, note: a.why || null, created_by: CREATED_BY });
         res.assignments_applied++;
@@ -554,14 +581,19 @@ export async function classifySession(cfg: Config, pool: pg.Pool, sessionId: str
 
   // 9. unassigned: content events in the window not covered by existing links or accepted spans, grouped like records.unassignedSpans
   const cover: { from_seq: number; to_seq: number }[] = [...covering, ...accepted.filter((a) => !a.existing)];
+  // a declined investigation's span is its own unassigned span, so its reason is not lost inside a neighbour
+  const edges = new Set<number>();
+  for (const d of declined) { edges.add(d.from_seq); edges.add(d.to_seq + 1); }
   let cur: (Span & { reason?: string }) | null = null;
   for (const e of events) {
     if (cover.some((l) => e.seq >= l.from_seq && e.seq <= l.to_seq)) continue;
-    const split = !cur || cover.some((l) => l.from_seq > cur!.to_seq && l.to_seq < e.seq);
+    const split = !cur || edges.has(e.seq) || cover.some((l) => l.from_seq > cur!.to_seq && l.to_seq < e.seq);
     if (split) { cur = { session_id: sessionId, from_seq: e.seq, to_seq: e.seq }; res.unassigned.push(cur); }
     cur!.to_seq = e.seq;
   }
   for (const u of res.unassigned) {
+    const d = declined.find((x) => overlaps(x, u));
+    if (d) { u.reason = d.reason; continue; }
     const m = modelUnassigned.find((x) => overlaps(x, u));
     if (m?.reason) u.reason = m.reason;
   }

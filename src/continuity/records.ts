@@ -1,3 +1,4 @@
+import path from "node:path";
 import type pg from "pg";
 import type { EventRow } from "./store.js";
 import { resolveSessionId } from "./evidence.js";
@@ -37,7 +38,9 @@ export interface WorkRecord {
   kind: RecordKind;
   title: string;
   goal: string | null;
-  repo: string | null;              // canonical repo identity, or null for non-code work (hiring, copy)
+  repo: string | null;              // canonical repo identity, or null for non-code work (hiring, copy); always null for an investigation
+  /** repos a bound or linked session ran inside (investigations only): capabilities the work may read, never its identity */
+  touched_repos: string[];
   status: RecordStatus;
   created_by: string;
   ledger_refs: { id: string; version?: string }[];   // decisions/findings/definitions this record depends on
@@ -219,17 +222,54 @@ export async function openInvestigations(q: Q): Promise<WorkRecord[]> {
   )).rows;
 }
 
-export async function createRecord(q: Q, r: { kind: RecordKind; title: string; goal?: string | null; repo?: string | null; created_by: string; ledger_refs?: { id: string; version?: string }[] }): Promise<WorkRecord> {
+/**
+ * An investigation is identified by its question. A repo passed for one is not its identity: it becomes a touched
+ * repo (a capability the work may read) and the record's `repo` stays null, whoever the caller is. Other kinds keep
+ * repo affinity: an implementation record is work on that codebase.
+ */
+export async function createRecord(q: Q, r: { kind: RecordKind; title: string; goal?: string | null; repo?: string | null; touched_repos?: string[]; created_by: string; ledger_refs?: { id: string; version?: string }[] }): Promise<WorkRecord> {
   assertOneOf(RECORD_KINDS, r.kind, "record kind");
   const title = requireText(r.title, "record title", TITLE_MAX);
   const createdBy = requireText(r.created_by, "created_by");
   const refs = r.ledger_refs ?? [];
   if (!Array.isArray(refs) || refs.some((x) => !x || typeof x.id !== "string" || !x.id)) throw new Error("ledger_refs must be an array of { id, version? }");
+  const touched = [...new Set((r.touched_repos ?? []).filter((x): x is string => typeof x === "string" && x.trim().length > 0))];
+  let repo = r.repo ?? null;
+  if (r.kind === "investigation") {
+    if (repo && !touched.includes(repo)) touched.push(repo);
+    repo = null;
+  }
   const res = await q.query<WorkRecord>(
-    `insert into cont_records (kind, title, goal, repo, created_by, ledger_refs) values ($1,$2,$3,$4,$5,$6::jsonb) returning *`,
-    [r.kind, title, r.goal ?? null, r.repo ?? null, createdBy, JSON.stringify(refs)]
+    `insert into cont_records (kind, title, goal, repo, touched_repos, created_by, ledger_refs) values ($1,$2,$3,$4,$5::text[],$6,$7::jsonb) returning *`,
+    [r.kind, title, r.goal ?? null, repo, touched, createdBy, JSON.stringify(refs)]
   );
   return res.rows[0];
+}
+
+/**
+ * Record that a session of this investigation ran inside `repo`. Idempotent; a no-op for other kinds (their repo
+ * is their identity) and for null. Returns true when the repo was newly added.
+ */
+export async function touchRepo(q: Q, record_id: string, repo: string | null | undefined): Promise<boolean> {
+  if (!repo || !isUuid(record_id)) return false;
+  const r = await q.query(
+    `update cont_records set touched_repos = array_append(touched_repos, $2) where id = $1 and kind = 'investigation' and not ($2 = any(touched_repos))`,
+    [record_id, repo]
+  );
+  return (r.rowCount ?? 0) > 0;
+}
+
+/** The repos whose code this record's evidence may carry: the identity repo for code work, the touched repos for an investigation. */
+export function codeRepos(rec: Pick<WorkRecord, "repo" | "touched_repos">): string[] {
+  if (rec.repo) return [rec.repo];
+  return Array.isArray(rec.touched_repos) ? rec.touched_repos : [];
+}
+
+/** Short "where" label for one-line listings: repo basename, `touched a+b` for an investigation, or `non-code`. */
+export function recordWhere(rec: Pick<WorkRecord, "repo" | "touched_repos">, nonCode = "non-code"): string {
+  if (rec.repo) return path.basename(rec.repo);
+  const touched = Array.isArray(rec.touched_repos) ? rec.touched_repos : [];
+  return touched.length ? `touched ${touched.map((r) => path.basename(r)).join("+")}` : nonCode;
 }
 
 export async function getRecord(q: Q, id: string): Promise<WorkRecord | null> {
@@ -241,9 +281,10 @@ export async function getRecord(q: Q, id: string): Promise<WorkRecord | null> {
 export async function listRecords(q: Q, f: { repo?: string | null; kind?: RecordKind; status?: RecordStatus; author?: string; sinceHours?: number; q?: string; limit?: number } = {}): Promise<WorkRecord[]> {
   const params: unknown[] = [];
   const where: string[] = [];
-  // repo: undefined = any; null = records with no repo (non-code work); string = that repo
-  if (f.repo === null) where.push(`r.repo is null`);
-  else if (f.repo) { params.push(f.repo); where.push(`r.repo = $${params.length}`); }
+  // repo: undefined = any; null = records with no repo (non-code work); string = that repo, plus the
+  // investigations whose sessions touched it (repos are capabilities of an investigation, so it shows where it read)
+  if (f.repo === null) where.push(`r.repo is null and cardinality(r.touched_repos) = 0`);
+  else if (f.repo) { params.push(f.repo); where.push(`(r.repo = $${params.length} or $${params.length} = any(r.touched_repos))`); }
   if (f.kind) { assertOneOf(RECORD_KINDS, f.kind, "record kind"); params.push(f.kind); where.push(`r.kind = $${params.length}`); }
   if (f.status) { assertOneOf(RECORD_STATUSES, f.status, "record status"); params.push(f.status); where.push(`r.status = $${params.length}`); }
   if (f.author) { params.push(f.author); where.push(`r.created_by = $${params.length}`); }

@@ -518,6 +518,20 @@ hook("SessionEnd", { reason: "other" }, T(17));
   const bj2 = loadJournal(gsid, gdir);
   assert.deepEqual(bj2.investigation, { record_id: recId, title: "Why did iOS trial CVR drop in September?", at: T(41) });
   assert.ok(bj2.entries.some((e) => e.kind === "bind" && e.id === recId), "bind entry journaled");
+  // The shape the harness actually sends (2026-09-17): Claude Code hands PostToolUse the MCP
+  // structuredContent already flattened, as a JSON string. Reading only resp.structuredContent left a
+  // successfully bound session looking unbound, so the gate fired and Stop held after a real bind.
+  {
+    const fsid = "sess-flat-bind", fdir = path.join(tmp, "sessions-flat");
+    const fh = (event: string, input: any, at: string) => handleHook(event, { session_id: fsid, cwd: "/w", ...input }, { dir: fdir, now: new Date(at) });
+    fh("SessionStart", { source: "startup" }, T(55));
+    fh("PostToolUse", { tool_name: "mcp__ledger__ledger_investigation_bind", tool_input: { record_id: recId },
+      tool_response: JSON.stringify({ record_id: recId, title: "Analyze live paywall variant performance", already_bound: false, session_id: fsid }) }, T(56));
+    const fj = loadJournal(fsid, fdir);
+    assert.deepEqual(fj.investigation, { record_id: recId, title: "Analyze live paywall variant performance", at: T(56) }, "a flattened bind response binds the session");
+    assert.ok(!fh("PostToolUse", { tool_use_id: "t_f1", tool_name: "mcp__hiastro-clickhouse__run_query", tool_input: { query: "select count() from trials" }, tool_response: numeric }, T(57)).stdout,
+      "and the bound session's first material pull is not gated");
+  }
   // a fresh unbound-and-material session that binds before Stop is never blocked for the binding
   const bsid = "sess-bound-early";
   const bh = (event: string, input: any, at: string) => handleHook(event, { session_id: bsid, cwd: "/w", ...input }, { dir: gdir, now: new Date(at) });

@@ -235,9 +235,11 @@ Decision in force (dec-20260917 bind-or-new): an analysis session is bound to on
 
 | tool | when |
 |---|---|
-| `ledger_investigations({ q?, author?, hours?, limit? })` | list open investigations on this repo before starting one |
+| `ledger_investigations({ q?, author?, hours?, limit? })` | list open investigations across every repo and non-repo work, ranked by match to your question, before starting one |
 | `ledger_investigation_bind({ record_id, question? })` | continue an existing investigation: binds this session to it |
 | `ledger_investigation_new({ question, goal?, repo? })` | nothing matches: declare a new investigation and bind to it |
+
+**Identity is the question; repos are tools.** An investigation is keyed by the question it pursues, never by the folder a chat ran in: match and bind on the question, whichever checkout you are sitting in, and a warehouse-only or sheets-only investigation with no repo is complete. A repo a bound session runs inside is recorded on the record as a *touched repo*, a capability the work may read, not its identity. The classifier links analysis spans to an open investigation whose question matches; it never opens one, so an unbound analysis session leaves its spans unassigned until a session binds or declares.
 
 **After each material pull**, call `ledger_propose_finding({ population, metric, window, result, query_ref: "q:<tool_use_id>", investigation_record_id?, title?, caveats? })`. `query_ref` is the evidence id the checkpoint prints. The tool writes a DRAFT finding with `stance: PROPOSED`, linked to the investigation and covering that query (`capture_ack.status: pending_review`). If the session is unbound and no `investigation_record_id` is given, it refuses: bind or declare first. It never creates an orphan and never accepts anything.
 

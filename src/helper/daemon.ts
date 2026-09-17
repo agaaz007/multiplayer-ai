@@ -16,7 +16,7 @@ import { addDecisionObligations } from "../hooks.js";
 import { autoBindEligible, forbiddenSnapshotRoot, threadTitleFor, transcriptRoots } from "../continuity/safety.js";
 import { writeHeartbeat, withDeadline, type HelperHeartbeat } from "./heartbeat.js";
 import { embeddingsConfigured, embedPendingEvents } from "../continuity/embeddings.js";
-import { boundSessionIds, extendBoundLink } from "../continuity/investigations.js";
+import { boundSessionIds, extendBoundLink, touchBoundRepo } from "../continuity/investigations.js";
 const putArtifact = S.putArtifact;
 
 /**
@@ -476,6 +476,9 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
       if (boundSessions.has(sid)) {
         try { if (await extendBoundLink(pool, sid)) log(`extended investigation span for ${sid.slice(0, 8)} to the session's current max seq`); }
         catch (e: any) { log(`investigation span extension failed for ${sid.slice(0, 8)}: ${String(e?.message ?? e).slice(0, 120)}`); }
+        // the repo the session sits in is a capability of the investigation (touched_repos), never its identity
+        try { if (await touchBoundRepo(pool, sid)) log(`investigation bound to ${sid.slice(0, 8)} now lists the session's repo as touched`); }
+        catch (e: any) { log(`investigation touched-repo update failed for ${sid.slice(0, 8)}: ${String(e?.message ?? e).slice(0, 120)}`); }
       }
 
       // ---- reconcile hook index vs parsed (pending → confirmed after 60 s) ----
