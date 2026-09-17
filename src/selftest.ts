@@ -524,12 +524,12 @@ hook("SessionEnd", { reason: "other" }, T(17));
   {
     const fsid = "sess-flat-bind", fdir = path.join(tmp, "sessions-flat");
     const fh = (event: string, input: any, at: string) => handleHook(event, { session_id: fsid, cwd: "/w", ...input }, { dir: fdir, now: new Date(at) });
-    fh("SessionStart", { source: "startup" }, T(60));
+    fh("SessionStart", { source: "startup" }, T(55));
     fh("PostToolUse", { tool_name: "mcp__ledger__ledger_investigation_bind", tool_input: { record_id: recId },
-      tool_response: JSON.stringify({ record_id: recId, title: "Analyze live paywall variant performance", already_bound: false, session_id: fsid }) }, T(61));
+      tool_response: JSON.stringify({ record_id: recId, title: "Analyze live paywall variant performance", already_bound: false, session_id: fsid }) }, T(56));
     const fj = loadJournal(fsid, fdir);
-    assert.deepEqual(fj.investigation, { record_id: recId, title: "Analyze live paywall variant performance", at: T(61) }, "a flattened bind response binds the session");
-    assert.ok(!fh("PostToolUse", { tool_use_id: "t_f1", tool_name: "mcp__hiastro-clickhouse__run_query", tool_input: { query: "select count() from trials" }, tool_response: numeric }, T(62)).stdout,
+    assert.deepEqual(fj.investigation, { record_id: recId, title: "Analyze live paywall variant performance", at: T(56) }, "a flattened bind response binds the session");
+    assert.ok(!fh("PostToolUse", { tool_use_id: "t_f1", tool_name: "mcp__hiastro-clickhouse__run_query", tool_input: { query: "select count() from trials" }, tool_response: numeric }, T(57)).stdout,
       "and the bound session's first material pull is not gated");
   }
   // a fresh unbound-and-material session that binds before Stop is never blocked for the binding
