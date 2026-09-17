@@ -30,6 +30,7 @@
     "test:capture": "npm run build && node dist/selftest-capture.js && node dist/selftest-capture-boundary.js",
     "test:investigation": "npm run build && node dist/selftest-investigation.js",
     "test:claims": "npm run build && node dist/selftest-claims.js",
+    "test:graph": "npm run build && node dist/selftest-graph.js",
     "test:findings": "npm run build && LEDGER_SELFTEST=1 node dist/selftest-findings.js",
     "test:analytical": "npm run build && node dist/eval/analytical-selftest.js",
     "test:sequences": "npm run build && node dist/eval/sequence-selftest.js",

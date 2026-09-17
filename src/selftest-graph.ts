@@ -54,6 +54,15 @@ try {
   assert.ok(g.summary.unpinned.includes(named.id) && !g.summary.unpinned.includes(pinned.id));
   assert.equal(edge(buildGraph(cfg, { names: true }), named.id, d1.id)?.strength, "named", "--names draws the name edge, dashed");
 
+
+  // A second metric family, unrelated to trial_cvr. It is the control for --impact below: a
+  // correction's blast radius must stop somewhere, and a test that cannot show where proves nothing.
+  const other: AnalysisScope = { ...scope, metric: "paid_cvr", dataset: "fixture-paid-v1" };
+  const d3 = get(record(cfg, { type: "definition", fields: definition({ title: "Paid conversion", metric: "paid_cvr", analysis_scope: other }) }).id);
+  const pinsD3 = get(record(cfg, { type: "finding", fields: finding("Pinned to paid conversion", [dep(d3)],
+    { analysis_scope: other, definitions_used: ["paid_cvr"] }) }).id);
+  assert.equal(edge(buildGraph(cfg), pinsD3.id, d3.id)?.strength, "pinned");
+
   // ---- authority tier is on the node, and it drives the rendered style ----
   const draft = recordDraft(cfg, { type: "finding", fields: finding("Unreviewed cut", []),
     capture: { method: "transcript_fallback", session: "synthetic-claude", reason: "review" } });
@@ -104,17 +113,18 @@ try {
   const impact = buildGraph(cfg, { impact: d2.id });
   assert.ok(impact.nodes.some((n) => n.id === d2.id) && impact.nodes.some((n) => n.id === d1.id));
   assert.equal(node(impact, pinned.id).needs_review, true, "a result pinned to the corrected record needs review");
-  assert.equal(impact.nodes.find((n) => n.id === decision.id), undefined, "the blast radius is not the whole ledger");
+  // An unpinned reference is not absence of impact, it is unknown impact, and it is drawn as loudly.
+  assert.match(String(node(impact, decision.id).lineage_unresolved), /no pinned version/);
+  assert.match(String(node(impact, named.id).lineage_unresolved), /does not identify an exact definition version/);
+  assert.equal(node(impact, decision.id).needs_review, undefined);
+  assert.equal(impact.nodes.find((n) => n.id === d3.id), undefined, "the blast radius stops at an unrelated metric family");
+  assert.equal(impact.nodes.find((n) => n.id === pinsD3.id), undefined);
   assert.match(toDot(impact).split("\n").find((l) => l.includes(`"${pinned.id}" [`))!, /color="#cf222e"/);
+
 
 
   // ---- a pin that stopped matching: only reachable by editing bytes outside the write path,
   // which is exactly when a reader most needs to see that the exactness claim expired ----
-  const other: AnalysisScope = { ...scope, metric: "paid_cvr", dataset: "fixture-paid-v1" };
-  const d3 = get(record(cfg, { type: "definition", fields: definition({ title: "Paid conversion", metric: "paid_cvr", analysis_scope: other }) }).id);
-  const pinsD3 = get(record(cfg, { type: "finding", fields: finding("Pinned to paid conversion", [dep(d3)],
-    { analysis_scope: other, definitions_used: ["paid_cvr"] }) }).id);
-  assert.equal(edge(buildGraph(cfg), pinsD3.id, d3.id)?.strength, "pinned");
   fs.appendFileSync(d3.path, "\nHand-edited outside the write path.\n");
   const drifted = buildGraph(cfg);
   assert.equal(edge(drifted, pinsD3.id, d3.id)?.strength, "stale");
@@ -125,7 +135,9 @@ try {
 
   // ---- ego graph ----
   const ego = buildGraph(cfg, { id: d1.id, depth: 1 });
-  assert.deepEqual(new Set(ego.nodes.map((n) => n.id)), new Set([d1.id, d2.id, pinned.id]), "depth 1 is d1 and its direct neighbours");
+  assert.deepEqual(new Set(ego.nodes.map((n) => n.id)), new Set([d1.id, d2.id, pinned.id, repro.id]),
+    "depth 1 is d1 plus everything with an edge to it, in either direction");
+  assert.equal(buildGraph(cfg, { id: d1.id, depth: 0 }).nodes.length, 1, "depth 0 is the object alone");
   assert.ok(ego.summary.clipped_edges > 0, "a clipped picture says how much it cut");
   assert.throws(() => buildGraph(cfg, { id: "fnd-not-here" }), /not in the ledger/);
 
