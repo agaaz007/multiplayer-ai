@@ -135,7 +135,9 @@ try {
 
   // ---- ego graph ----
   const ego = buildGraph(cfg, { id: d1.id, depth: 1 });
-  assert.deepEqual(new Set(ego.nodes.map((n) => n.id)), new Set([d1.id, d2.id, pinned.id]), "depth 1 is d1 and its direct neighbours");
+  assert.deepEqual(new Set(ego.nodes.map((n) => n.id)), new Set([d1.id, d2.id, pinned.id, repro.id]),
+    "depth 1 is d1 plus everything with an edge to it, in either direction");
+  assert.equal(buildGraph(cfg, { id: d1.id, depth: 0 }).nodes.length, 1, "depth 0 is the object alone");
   assert.ok(ego.summary.clipped_edges > 0, "a clipped picture says how much it cut");
   assert.throws(() => buildGraph(cfg, { id: "fnd-not-here" }), /not in the ledger/);
 
