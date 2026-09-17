@@ -5,7 +5,7 @@ import type { Config } from "../store.js";
 // without importing this module: investigations -> recordpack -> classify is already a cycle.
 import { matchScore, normalizeTitle, titleSimilarity } from "../query.js";
 export { matchScore, normalizeTitle, titleSimilarity };
-import { createRecord, getRecord, linkSpan } from "./records.js";
+import { createRecord, getRecord, linkSpan, touchRepo } from "./records.js";
 import { upsertSession } from "./store.js";
 import { ago } from "./recordpack.js";
 
@@ -16,6 +16,11 @@ import { ago } from "./recordpack.js";
  * resolves its scope at session start to an existing open `investigation` work record, or declares a new
  * question, before it runs data queries. Repo is optional: several investigations share one repo, and much
  * PM work is warehouse SQL or sheets with no checkout at all, so a "thread on this repo" is the wrong unit.
+ *
+ * Identity is the question. An investigation record never carries a `repo`; the repos its bound sessions ran
+ * inside accumulate in `touched_repos` (records.ts touchRepo) as capabilities the work may read, so a session
+ * sitting in the SDK checkout can bind to "lab-diagnostics ads" and a warehouse-only investigation is complete
+ * with no repo at all. Nothing here matches or creates on cwd.
  *
  * Storage: cont_session_bindings (session → record, one row per session) plus one EXPLICIT cont_record_links
  * span per binding, noted "bound by <author>", covering the session from seq 1. The helper extends that span's
@@ -30,7 +35,10 @@ export interface InvestigationItem {
   record_id: string;
   title: string;
   goal: string | null;
+  /** always null for an investigation; kept on the item so callers reading `repo` see the identity is not a repo */
   repo: string | null;
+  /** repos bound or linked sessions ran inside: capabilities, not identity */
+  touched_repos: string[];
   status: string;
   created_by: string;
   updated_at: string;
@@ -62,7 +70,8 @@ function harnessGuess(): string {
 const BIND_INSTRUCTION = `Bind this session to one with ledger_investigation_bind(record_id) or declare a new question with ledger_investigation_new(question); non-repo work is fine. Do not proceed as just a thread on this repo.`;
 
 export function investigationLine(it: InvestigationItem, now = new Date()): string {
-  const where = it.repo ? path.basename(it.repo) : "non-repo";
+  const touched = it.touched_repos ?? [];
+  const where = touched.length ? `touched ${touched.map((r) => path.basename(r)).join("+")}` : "non-repo";
   return `- ${it.title} · ${it.created_by} · updated ${ago(it.updated_at, now)} · ${it.proposed}/${it.confirmed} updates · ${it.bound_sessions} bound session${it.bound_sessions === 1 ? "" : "s"} · ${where} · ${it.record_id}`;
 }
 
@@ -72,8 +81,8 @@ async function openInvestigationRows(q: Q, opts: { author?: string; hours?: numb
   if (opts.author) { params.push(opts.author); where.push(`r.created_by = $${params.length}`); }
   if (opts.hours != null && Number.isFinite(opts.hours) && opts.hours > 0) { params.push(opts.hours); where.push(`r.updated_at > now() - ($${params.length}::float8 * interval '1 hour')`); }
   const cap = Math.min(Math.max(1, Math.floor(opts.cap ?? 200)), 500);
-  const r = await q.query<{ record_id: string; title: string; goal: string | null; repo: string | null; status: string; created_by: string; updated_at: Date; proposed: number; confirmed: number; bound_sessions: number; state_text: string }>(
-    `select r.id as record_id, r.title, r.goal, r.repo, r.status, r.created_by, r.updated_at,
+  const r = await q.query<{ record_id: string; title: string; goal: string | null; repo: string | null; touched_repos: string[]; status: string; created_by: string; updated_at: Date; proposed: number; confirmed: number; bound_sessions: number; state_text: string }>(
+    `select r.id as record_id, r.title, r.goal, r.repo, r.touched_repos, r.status, r.created_by, r.updated_at,
             (select count(*) from cont_state_updates u where u.record_id = r.id and u.status = 'proposed' and ${LIVE})::int as proposed,
             (select count(*) from cont_state_updates u where u.record_id = r.id and u.status = 'confirmed' and ${LIVE})::int as confirmed,
             (select count(*) from cont_session_bindings b where b.record_id = r.id)::int as bound_sessions,
@@ -84,7 +93,7 @@ async function openInvestigationRows(q: Q, opts: { author?: string; hours?: numb
       limit ${cap}`,
     params
   );
-  return r.rows.map((x) => ({ ...x, updated_at: new Date(x.updated_at).toISOString(), match: 0 }));
+  return r.rows.map((x) => ({ ...x, touched_repos: Array.isArray(x.touched_repos) ? x.touched_repos : [], updated_at: new Date(x.updated_at).toISOString(), match: 0 }));
 }
 
 /**
@@ -145,6 +154,8 @@ export async function bindInvestigation(pool: pg.Pool, cfg: Config, opts: { reco
   const from = existing ? Math.max(1, m) : 1;
   const to = Math.max(from, m);
   await linkSpan(pool, { record_id: rec.id, session_id, from_seq: from, to_seq: to, source: "explicit", note: `${BOUND_NOTE_PREFIX}${cfg.author}`, created_by: cfg.author });
+  // the repo this session runs in (if the helper has seen one) becomes a capability of the investigation, not its identity
+  await touchBoundRepo(pool, session_id);
   const rebound = existing ? ` (rebound from ${existing.record_id})` : "";
   return {
     text: `Bound session ${session_id.slice(0, 8)} to investigation "${rec.title}" (${rec.id})${rebound}. Data queries in this session now accumulate on this record; propose findings at query grain with ledger_propose_finding (the bound investigation is attached automatically).`,
@@ -157,6 +168,8 @@ export async function bindInvestigation(pool: pg.Pool, cfg: Config, opts: { reco
 /**
  * Create an investigation record from a question and bind the session to it. Refuses when an open investigation
  * already carries a near-identical question, naming it so the agent binds instead of forking the same work.
+ * `repo`, when given, is recorded as a touched repo (a capability); the record's identity is the question and its
+ * `repo` column stays null.
  */
 export async function declareInvestigation(pool: pg.Pool, cfg: Config, opts: { question: string; goal?: string; session_id: string; repo?: string | null }): Promise<{ text: string; record_id: string }> {
   const question = String(opts.question ?? "").replace(/\s+/g, " ").trim();
@@ -167,10 +180,12 @@ export async function declareInvestigation(pool: pg.Pool, cfg: Config, opts: { q
   if (dup) {
     throw new Error(`An open investigation with a near-identical question already exists: "${dup.r.title}" (${dup.r.record_id}, by ${dup.r.created_by}, match ${dup.s.toFixed(2)}). Bind to it with ledger_investigation_bind(record_id: "${dup.r.record_id}") instead of declaring a new one; if the question is genuinely different, reword it so the difference is in the title.`);
   }
-  const rec = await createRecord(pool, { kind: "investigation", title, goal: opts.goal?.trim() || null, repo: opts.repo ?? null, created_by: cfg.author });
+  const rec = await createRecord(pool, { kind: "investigation", title, goal: opts.goal?.trim() || null, touched_repos: opts.repo ? [opts.repo] : [], created_by: cfg.author });
   const bound = await bindInvestigation(pool, cfg, { record_id: rec.id, session_id: opts.session_id, question });
+  const touched = (await getRecord(pool, rec.id))?.touched_repos ?? rec.touched_repos;
+  const where = touched.length ? ` (keyed by its question; repos it may read: ${touched.map((r) => path.basename(r)).join(", ")})` : " as non-repo work (keyed by its question; no repo touched yet)";
   return {
-    text: `Declared investigation "${rec.title}" (${rec.id})${rec.repo ? ` on ${path.basename(rec.repo)}` : " as non-repo work"}${rec.goal ? `; goal: ${clip(rec.goal, 120)}` : ""}. ${bound.text}`,
+    text: `Declared investigation "${rec.title}" (${rec.id})${where}${rec.goal ? `; goal: ${clip(rec.goal, 120)}` : ""}. ${bound.text}`,
     record_id: rec.id,
   };
 }
@@ -210,6 +225,20 @@ export async function extendBoundLink(pool: Q, session_id: string): Promise<bool
     [session_id, `${BOUND_NOTE_PREFIX}%`]
   );
   return (r.rowCount ?? 0) > 0;
+}
+
+/**
+ * Helper step and bind-time step: if the bound session's row carries a repo, add it to the investigation's
+ * touched_repos (idempotent, one statement). The repo is where the session sat, not what the investigation is.
+ */
+export async function touchBoundRepo(pool: Q, session_id: string): Promise<boolean> {
+  const r = await pool.query<{ record_id: string; repo: string | null }>(
+    `select b.record_id, s.repo from cont_session_bindings b join cont_sessions s on s.id = b.session_id where b.session_id = $1`,
+    [session_id]
+  );
+  const row = r.rows[0];
+  if (!row?.repo) return false;
+  return touchRepo(pool, row.record_id, row.repo);
 }
 
 /** All sessions with a binding, for the helper's per-pass extension step. */
