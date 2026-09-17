@@ -507,7 +507,8 @@ hook("SessionEnd", { reason: "other" }, T(17));
   // a later material pull while still unbound: no new gate, and Stop stays quiet for the unbound condition (once per session)
   gh("PostToolUse", { tool_use_id: "t_q3", tool_name: "mcp__hiastro-clickhouse__run_query", tool_input: { query: "select count() from trials" }, tool_response: numeric }, T(38));
   const third = gh("Stop", {}, T(39));
-  assert.ok(third.stdout && JSON.parse(third.stdout).reason.includes("q:t_q3") && !JSON.parse(third.stdout).reason.includes("Resolve scope first"), "new debt nudges once more; the unbound block itself is once per session");
+  assert.ok(third.stdout && JSON.parse(third.stdout).reason.includes("q:t_q3") && JSON.parse(third.stdout).reason.includes("3 material data queries but is not bound"), "new debt nudges once more and restates the still-true unbound condition");
+  assert.equal(loadJournal(gsid, gdir).entries.filter((e) => e.kind === "nudge" && e.summary === "unbound").length, 1, "the unbound nudge itself is once per session");
   // binding clears the unbound condition: a successful ledger_investigation_bind names the record
   const recId = "0f1e2d3c-4b5a-4978-8a6b-5c4d3e2f1a0b";
   const bindFail = gh("PostToolUse", { tool_name: "mcp__ledger__ledger_investigation_bind", tool_input: { record_id: recId }, tool_response: { isError: true, content: [{ type: "text", text: "record not found" }], structuredContent: { record_id: recId } } }, T(40));
