@@ -21,6 +21,7 @@ import { buildResumePack, threadLine } from "./continuity/resume.js";
 import { queryEvents, getArtifact } from "./continuity/evidence.js";
 import { checkoutWip, repoRoot, repoIdentity } from "./continuity/shadow.js";
 import { openThreadsText } from "./continuity/brief.js";
+import { bindInvestigation, declareInvestigation, listInvestigations, sessionBinding } from "./continuity/investigations.js";
 import { buildRecordPack, listRecordSummaries, recordLine, unassignedLine } from "./continuity/recordpack.js";
 import { addStateUpdate, confirmStateUpdate, createRecord, getRecord, linkSpan, rejectStateUpdate, unassignedSpans, type RecordKind, type RecordStatus, type UpdateKind } from "./continuity/records.js";
 import { helperOnce, helperLoop, loadState } from "./helper/daemon.js";
@@ -76,6 +77,14 @@ const USAGE = `ledger — shared definitions, findings, changes, decisions for y
   ledger record link <id> <session> <from> <to> [--note n]
   ledger record propose <id> <kind> <text…> --evidence <session>:<seq>[,…] [--supersedes <update>]
   ledger record confirm <update-id> | ledger record reject <update-id> --reason "..."
+  ledger investigation list [--q text] [--author a] [--hours N] [--limit N]
+                                         open investigation records across all repos (repo-less included), ranked by match to --q
+  ledger investigation bind <record-id> [--session <id>] [--question q]
+                                         bind an analysis session to an open investigation (explicit span from seq 1; the helper extends it)
+  ledger investigation new "<question>" [--goal g] [--session <id>] [--repo <identity>]
+                                         declare a new investigation and bind the session; refused when a near-identical open one exists
+  ledger investigation show --session <id>
+                                         which investigation a session is bound to
   ledger unassigned [--hours N] [--session id] [--author a] [--limit N]
                                          spans no record claims: preview, seq range, author, harness, time
   ledger events --thread <id> | --session <id> [--kinds a,b] [--path p] [--q text] [--after N] [--before N] [--limit N] [--chars N]
@@ -548,6 +557,37 @@ async function main() {
           limit: Number(flag(args, "--limit") ?? 20),
         });
         console.log(rows.length ? rows.map((r) => recordLine(r)).join("\n") : "no records");
+        await closePools();
+        return;
+      }
+      case "investigation": {
+        // analysis-session scope (dec-20260917-multi-pm-continuity-bind-or-new-at-session-start-u44f): bind or declare, any repo or none
+        const cfg = loadConfig();
+        const pool = getPool(cfg);
+        const pos = positionals(args);
+        const sub = pos[0];
+        const usage = `usage: ledger investigation list [--q text] [--author a] [--hours N] [--limit N] | bind <record-id> [--session <id>] [--question q] | new "<question>" [--goal g] [--session <id>] [--repo <identity>] | show --session <id>`;
+        const sessionArg = flag(args, "--session") ?? process.env.LEDGER_SESSION_ID;
+        if (sub === "list") {
+          const hours = flag(args, "--hours"), limit = flag(args, "--limit");
+          const r = await listInvestigations(pool, cfg, { q: flag(args, "--q"), author: flag(args, "--author"), hours: hours ? Number(hours) : undefined, limit: limit ? Number(limit) : undefined });
+          console.log(r.text);
+        } else if (sub === "bind") {
+          if (!pos[1]) throw new Error(usage);
+          if (!sessionArg) throw new Error(`${usage}\nbind needs the session to bind: --session <id> (or LEDGER_SESSION_ID)`);
+          const r = await bindInvestigation(pool, cfg, { record_id: pos[1], session_id: sessionArg, question: flag(args, "--question") });
+          console.log(r.text);
+        } else if (sub === "new") {
+          const question = pos.slice(1).join(" ");
+          if (!question) throw new Error(usage);
+          // without a live session the CLI binds a synthetic one, as `ledger resume` does, so the record exists and the declaration is attributed
+          const r = await declareInvestigation(pool, cfg, { question, goal: flag(args, "--goal"), session_id: sessionArg ?? `cli:${cfg.author}:${Date.now()}`, repo: flag(args, "--repo") ?? null });
+          console.log(r.text);
+        } else if (sub === "show") {
+          if (!sessionArg) throw new Error(usage);
+          const b = await sessionBinding(pool, sessionArg);
+          console.log(b ? `session ${sessionArg} → investigation ${b.record_id} (bound by ${b.bound_by} at ${b.bound_at}${b.question ? `; question: ${b.question}` : ""})` : `session ${sessionArg} is not bound to an investigation`);
+        } else throw new Error(usage);
         await closePools();
         return;
       }
