@@ -57,8 +57,12 @@ export function score(query: string, o: LedgerObject): number {
  * at {@link NEAR_DUPLICATE}.
  */
 export const NEAR_DUPLICATE = 0.5;
-/** The write-path nudge is advisory and capped, so it reaches lower: a refresh of the same metric over a later window lands here. */
-export const RELATED_QUESTION = 0.35;
+/**
+ * The write-path nudge is advisory, ranked and capped, so it reaches lower than the bar for asserting
+ * that two records duplicate each other: a refresh of the same metric over a later window lands here.
+ * Below this, the pilot ledger's pairs stop being the same question and start being the same subject.
+ */
+export const RELATED_QUESTION = 0.3;
 
 /** What a record claims, not everything it says: the question a finding answers, the metric a definition names. Falls back to the title when a legacy record has neither. */
 export function claimText(o: LedgerObject): string {
