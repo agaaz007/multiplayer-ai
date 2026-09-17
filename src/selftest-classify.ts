@@ -708,7 +708,9 @@ let ra2: Awaited<ReturnType<typeof C.classifySession>>;
   for(let i=0;i<45;i++) await R.addStateUpdate(pool,{record_id:closed.id,kind:i%2?'progress':'decision',text:`Recent proposed unrelated alternative ${i}`,status:'proposed',created_by:'classifier'});
   await R.updateRecordMeta(pool,closed.id,{status:'done'});
   await pool.query("update cont_records set updated_at=now()-interval '100 days' where id=any($1::uuid[])",[[older.id,closed.id]]);
-  const foreign = await R.createRecord(pool,{kind:'investigation',title:'HiAstro conversion denominator',goal:'Correct eligible population',repo:'fixture/forbidden-scope',created_by:'other'});
+  // Code work keeps repo affinity, so an implementation record from another repository stays out of scope. (An
+  // investigation would not: it is keyed by its question and is a candidate from every repo, by design.)
+  const foreign = await R.createRecord(pool,{kind:'implementation',title:'HiAstro conversion denominator',goal:'Correct eligible population',repo:'fixture/forbidden-scope',created_by:'other'});
   for(let i=0;i<80;i++) {
     const item=await R.createRecord(pool,{kind:'other',title:`Unrelated recent update ${i}`,repo,created_by:'third-agent'});
     if(i<45) await R.linkSpan(pool,{record_id:item.id,session_id:sessionId,from_seq:1,to_seq:1,source:'explicit',created_by:'agaaz'});
