@@ -35,7 +35,8 @@ try {
   const pinned = get(record(cfg, { type: "finding", fields: finding("Pinned to the definition", [dep(d1)]) }).id);
   // The write path refuses a new *scoped* stable finding that names a metric without pinning it, so
   // an unpinned name only exists in the legacy (unscoped) shape. That is the shape --unpinned hunts.
-  const named = get(record(cfg, { type: "finding", fields: finding("Definition by name only", [], { analysis_scope: undefined }) }).id);
+  const unscoped = (() => { const f: Record<string, unknown> = finding("Definition by name only", []); delete f.analysis_scope; return f; })();
+  const named = get(record(cfg, { type: "finding", fields: unscoped }).id);
   const decision = get(record(cfg, { type: "decision", fields: { title: "Target marriage intent on Android",
     decision: "Run the next paywall test on marriage intent", context: "One experiment slot this cycle and two candidate cohorts.",
     options_considered: [{ option: "Marriage / Android", chosen: true }, { option: "Do nothing", rationale: "slot unused" }],

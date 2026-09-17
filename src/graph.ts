@@ -160,16 +160,20 @@ function allEdges(objects: LedgerObject[], opts: GraphOpts): { edges: GraphEdge[
         detail: (o.fields.correction as Correction | undefined)?.effect });
     }
 
-    for (const d of deps) {
-      const { strength, detail } = pinStrength(d.id, d.version);
-      push({ from: o.id, to: d.id, kind: d.relation, strength, detail });
-    }
-
+    // A reproduction pins its target twice by design (reproduction_of, plus derived-from in
+    // dependencies). One line, not two: the reproduction edge carries the outcome, which is the
+    // part a reader needs, so the duplicate derived-from is folded into it.
     const rep = o.fields.reproduction_of as Reproduction | undefined;
     if (rep) {
       const { strength, detail } = pinStrength(rep.id, rep.version);
       push({ from: o.id, to: rep.id, kind: "reproduction", strength,
         detail: [rep.outcome, detail].filter(truthy).join(", ") });
+    }
+
+    for (const d of deps) {
+      if (rep && d.id === rep.id && d.relation === "derived-from") continue;
+      const { strength, detail } = pinStrength(d.id, d.version);
+      push({ from: o.id, to: d.id, kind: d.relation, strength, detail });
     }
 
     // Bare-id compatibility fields. They carry no version, so they are drawn as unresolved lineage
