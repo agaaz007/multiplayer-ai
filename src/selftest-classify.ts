@@ -217,7 +217,9 @@ const cannedA = {
 setCanned([{ marker: "Add a greeting banner to the app", output: cannedA }]);
 clearPrompt();
 const ra = await C.classifySession(cfg, pool, sidA, { now: T(16) });
+const promptA = lastPrompt()!;
 let recLatency: import("./continuity/records.js").WorkRecord;
+let ra2: Awaited<ReturnType<typeof C.classifySession>>;
 {
   assert.equal(ra.model_ok, true, ra.error ?? "");
   assert.equal(ra.error, undefined);
@@ -225,29 +227,56 @@ let recLatency: import("./continuity/records.js").WorkRecord;
   assert.equal(ra.through_seq, 13);
   assert.equal(ra.events_considered, 11, "content events only: tool results excluded");
   assert.equal(ra.candidates, 4, "banner + search reindex + older open investigation + launch email");
-  assert.equal(ra.assignments_applied, 2);
-  assert.equal(ra.records_created, 1);
-  assert.equal(ra.updates_proposed, 3);
-  assert.deepEqual(ra.rejected, []);
-  assert.deepEqual(spans(ra.unassigned), [[6, 7], [12, 13]]);
+  assert.equal(ra.assignments_applied, 1, "the banner span links; the investigation span is declined");
+  assert.equal(ra.records_created, 0, "the classifier never opens an investigation: bind-or-new owns analysis scope");
+  assert.equal(ra.investigations_declined, 1);
+  assert.equal(ra.updates_proposed, 2, "the hypothesis on the declined investigation has no record to land on");
+  assert.equal(ra.rejected.length, 2, ra.rejected.map((r) => r.reason).join("\n"));
+  assert.ok(ra.rejected.every((r) => /"Checkout latency spike" was not opened by the classifier/.test(r.reason) && /ledger_investigation_new/.test(r.reason) && /never created from cwd/.test(r.reason)), ra.rejected.map((r) => r.reason).join("\n"));
+  assert.deepEqual(spans(ra.unassigned), [[6, 7], [8, 11], [12, 13]], "the declined span is its own unassigned span, not merged into its neighbours");
   assert.equal(ra.unassigned[0].reason, "one-off question, not a piece of work");
+  assert.match(ra.unassigned[1].reason ?? "", /"Checkout latency spike" was not opened by the classifier/);
+  assert.equal(ra.unassigned[2].reason, "pending build with no result; compaction spans topics");
   assert.ok(ra.notes.some((n) => n.startsWith("model: three topics")), ra.notes.join(" | "));
 
-  const links = await R.sessionLinks(pool, sidA);
-  assert.equal(links.length, 2);
+  let links = await R.sessionLinks(pool, sidA);
+  assert.equal(links.length, 1);
   assert.ok(links.every((l) => l.source === "suggested" && l.created_by === "classifier"));
-  assert.deepEqual(spans(links), [[1, 5], [8, 11]]);
+  assert.deepEqual(spans(links), [[1, 5]]);
   assert.equal(links[0].record_id, recBanner.id);
   assert.ok(Math.abs((links[0].confidence ?? 0) - 0.95) < 1e-6);
   assert.equal(links[0].note, "instruction names the banner; patch and message carry it out");
-  recLatency = (await R.getRecord(pool, links[1].record_id))!;
-  assert.equal(recLatency.title, "Checkout latency spike");
-  assert.equal(recLatency.kind, "investigation");
-  assert.equal(recLatency.goal, "Why did checkout latency spike on 2026-09-07?");
-  assert.equal(recLatency.repo, REPO, "new record inherits the session's repo");
-  assert.equal(recLatency.created_by, "classifier");
+  assert.equal(await recordCount(), recordsBefore, "no record minted because the session sat in a git root");
+  assert.deepEqual((await R.listRecords(pool, { kind: "investigation", status: "open" })).map((r) => r.title), ["Stale investigation"], "open investigations unchanged");
+  ok("(a) three topics: seq 1..5 → existing Greeting banner; 8..11 declined (an investigation is declared or bound by a session, never minted by the classifier) and unassigned with that reason; 6..7 and 12..13 unassigned with the model's reasons");
+
+  // A person declares the investigation (what ledger_investigation_new does). The repo it is declared from is a
+  // touched repo, a capability the work may read; the record's identity is the question and its repo stays null.
+  recLatency = await R.createRecord(pool, { kind: "investigation", title: "Checkout latency spike", goal: "Why did checkout latency spike on 2026-09-07?", repo: REPO, created_by: "rachit" });
+  assert.equal(recLatency.repo, null, "an investigation never carries a repo identity");
+  assert.deepEqual(recLatency.touched_repos, [REPO], "the repo passed at creation is folded into touched_repos");
   assert.equal(await recordCount(), recordsBefore + 1);
-  ok("(a) three topics: seq 1..5 → existing Greeting banner, 8..11 → new investigation record, 6..7 and 12..13 unassigned with the model's reasons");
+  // The same model output over the same window now links 8..11 to the declared investigation by title.
+  clearPrompt();
+  ra2 = await C.classifySession(cfg, pool, sidA, { now: T(16), sinceSeq: 0 });
+  assert.equal(ra2.model_ok, true, ra2.error ?? "");
+  assert.equal(ra2.candidates, 5, "the declared investigation is repo-null, so it is a candidate from every scope");
+  assert.equal(ra2.assignments_applied, 1);
+  assert.equal(ra2.assignments_skipped, 1, "the banner link already exists");
+  assert.equal(ra2.records_created, 0);
+  assert.equal(ra2.investigations_declined, 0, "a new_record naming an open candidate's title is that candidate");
+  assert.equal(ra2.updates_proposed, 1, "the hypothesis lands on the declared investigation");
+  assert.equal(ra2.updates_skipped, 2);
+  assert.deepEqual(ra2.rejected, []);
+  assert.deepEqual(spans(ra2.unassigned), [[6, 7], [12, 13]]);
+  links = await R.sessionLinks(pool, sidA);
+  assert.equal(links.length, 2);
+  assert.ok(links.every((l) => l.source === "suggested" && l.created_by === "classifier"));
+  assert.deepEqual(spans(links), [[1, 5], [8, 11]]);
+  assert.equal(links[1].record_id, recLatency.id);
+  assert.deepEqual((await R.getRecord(pool, recLatency.id))!.touched_repos, [REPO], "linking a session on an already-touched repo adds nothing (idempotent)");
+  assert.equal(await recordCount(), recordsBefore + 1);
+  ok("(a2) once a session has declared the investigation, the classifier links the same span to it by title and proposes the hypothesis there; touched_repos stays idempotent");
 
   // (f) proposed, with evidence, never confirmed
   const stB = (await R.recordState(pool, recBanner.id))!;
@@ -279,12 +308,12 @@ let recLatency: import("./continuity/records.js").WorkRecord;
 
   // (h) unassigned spans equal the records API after apply
   const api = await R.unassignedSpans(pool, { session_id: sidA });
-  assert.deepEqual(spans(api), spans(ra.unassigned));
+  assert.deepEqual(spans(api), spans(ra2.unassigned));
   assert.equal(api[0].preview, "Quick one: what is the git command to list remote refs?");
   ok("(h) result.unassigned equals unassignedSpans() from the records API: [6..7], [12..13]");
 
-  // (g) prompt content and size
-  const p = lastPrompt()!;
+  // (g) prompt content and size (the first run's prompt: four candidates, before the investigation was declared)
+  const p = promptA;
   assert.ok(p, "prompt captured");
   assert.equal(p.length, ra.prompt_chars);
   assert.ok(p.length < C.PROMPT_CHAR_CAP, `prompt under cap: ${p.length}`);
@@ -314,7 +343,7 @@ let recLatency: import("./continuity/records.js").WorkRecord;
 
   // progress file
   const prog2 = C.readProgress(sidA)!;
-  assert.deepEqual({ last_seq: prog2.last_seq, runs: prog2.runs }, { last_seq: 13, runs: 1 });
+  assert.deepEqual({ last_seq: prog2.last_seq, runs: prog2.runs }, { last_seq: 13, runs: 2 }, "(a) and (a2)");
   assert.equal(prog2.last_at, T(16).toISOString());
   assert.ok(fs.existsSync(path.join(ledgerHome(), "classify", `${sidA}.json`)), "progress under ~/.ledger/classify/");
   ok("progress file records last_seq 13, runs 1, last_at");
@@ -345,7 +374,7 @@ let recLatency: import("./continuity/records.js").WorkRecord;
   assert.equal((await R.sessionLinks(pool, sidA)).length, 2, "zero new links");
   assert.equal(await updatesFor(sidA), 3, "zero new updates");
   assert.equal(await recordCount(), recordsBefore + 1, "zero new records");
-  assert.equal(C.readProgress(sidA)!.runs, 2);
+  assert.equal(C.readProgress(sidA)!.runs, 3, "(a), (a2) and this forced re-run");
   ok("(d) re-run without new events makes no model call; forced re-run over the same window writes zero links, updates, or records");
 }
 
@@ -598,6 +627,9 @@ let recLatency: import("./continuity/records.js").WorkRecord;
     { marker: "Pricing analysis: we will keep the annual plan", dynamic: { kind: "investigation", title: "Pricing analysis", goal: "Decide the plan lineup" }, decision: "Keep the annual plan until the pricing test reads out" },
     { marker: "Also check whether monthly-only hurts trial starts", dynamic: { kind: "investigation", title: "Pricing analysis", goal: null } },
   ]);
+  // bind-or-new owns analysis scope: the investigation exists because a person declared it (as ledger_investigation_new
+  // does); the classifier links the plain-folder session to it by title and never mints one of its own.
+  const pricing = await R.createRecord(pool, { kind: "investigation", title: "Pricing analysis", goal: "Decide the plan lineup", repo: null, created_by: "agaaz" });
   const logs: string[] = [];
   const log = (m: string) => logs.push(m);
 
@@ -618,7 +650,8 @@ let recLatency: import("./continuity/records.js").WorkRecord;
   const links = await R.sessionLinks(pool, sid);
   assert.equal(links.length, 1);
   const rec = (await R.getRecord(pool, links[0].record_id))!;
-  assert.deepEqual({ title: rec.title, repo: rec.repo }, { title: "Pricing analysis", repo: null });
+  assert.equal(rec.id, pricing.id, "linked to the declared investigation, not a classifier-minted twin");
+  assert.deepEqual({ title: rec.title, repo: rec.repo, touched: rec.touched_repos }, { title: "Pricing analysis", repo: null, touched: [] });
   const st = (await R.recordState(pool, rec.id))!;
   assert.deepEqual(st.decisions.map((u) => [u.status, u.text]), [["proposed", "Keep the annual plan until the pricing test reads out"]]);
   const dId = `d:${st.decisions[0].id}`;
@@ -675,7 +708,9 @@ let recLatency: import("./continuity/records.js").WorkRecord;
   for(let i=0;i<45;i++) await R.addStateUpdate(pool,{record_id:closed.id,kind:i%2?'progress':'decision',text:`Recent proposed unrelated alternative ${i}`,status:'proposed',created_by:'classifier'});
   await R.updateRecordMeta(pool,closed.id,{status:'done'});
   await pool.query("update cont_records set updated_at=now()-interval '100 days' where id=any($1::uuid[])",[[older.id,closed.id]]);
-  const foreign = await R.createRecord(pool,{kind:'investigation',title:'HiAstro conversion denominator',goal:'Correct eligible population',repo:'fixture/forbidden-scope',created_by:'other'});
+  // Code work keeps repo affinity, so an implementation record from another repository stays out of scope. (An
+  // investigation would not: it is keyed by its question and is a candidate from every repo, by design.)
+  const foreign = await R.createRecord(pool,{kind:'implementation',title:'HiAstro conversion denominator',goal:'Correct eligible population',repo:'fixture/forbidden-scope',created_by:'other'});
   for(let i=0;i<80;i++) {
     const item=await R.createRecord(pool,{kind:'other',title:`Unrelated recent update ${i}`,repo,created_by:'third-agent'});
     if(i<45) await R.linkSpan(pool,{record_id:item.id,session_id:sessionId,from_seq:1,to_seq:1,source:'explicit',created_by:'agaaz'});

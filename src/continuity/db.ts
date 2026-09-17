@@ -226,6 +226,14 @@ create table if not exists cont_session_bindings (
 );
 create index if not exists cont_session_bindings_record_idx on cont_session_bindings(record_id);
 
+-- Investigations are keyed by their question, never by a repo (2026-09-17): repo is a capability the work may read,
+-- recorded as touched_repos when a bound or linked session ran inside one. An investigation's repo column is always
+-- null; the one-time move below turns the repo the classifier stamped from cwd into a touched repo.
+alter table cont_records add column if not exists touched_repos text[] not null default '{}';
+update cont_records set touched_repos = array_append(touched_repos, repo), repo = null
+ where kind = 'investigation' and repo is not null and not (repo = any(touched_repos));
+update cont_records set repo = null where kind = 'investigation' and repo is not null;
+
 create index if not exists cont_records_repo_idx on cont_records(repo, status, updated_at desc);
 create index if not exists cont_records_updated_idx on cont_records(updated_at desc);
 create index if not exists cont_record_links_record_idx on cont_record_links(record_id);

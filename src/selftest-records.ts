@@ -672,7 +672,9 @@ const byT = (hits: Awaited<ReturnType<typeof R.searchEvents>>) => Object.fromEnt
   assert.ok(maxR > 1);
   const dec2 = await I.declareInvestigation(pool, { ...cfg, author: "rachit" }, { question: "Checkout latency spike on 2026-09-07", session_id: sidR, repo: REPO });
   const rec2 = (await R.getRecord(pool, dec2.record_id))!;
-  assert.equal(rec2.repo, REPO);
+  assert.equal(rec2.repo, null, "an investigation is keyed by its question, never by a repo");
+  assert.deepEqual(rec2.touched_repos, [REPO], "the repo it was declared from is a capability it may read");
+  assert.ok(dec2.text.includes("repos it may read: demo"), dec2.text);
   const lR = (await R.recordLinks(pool, dec2.record_id)).find((l) => l.session_id === sidR)!;
   assert.deepEqual([lR.source, lR.from_seq, lR.to_seq, lR.note], ["explicit", 1, maxR, "bound by rachit"], "explicit span from seq 1 to the current max seq");
   assert.equal((await I.sessionBinding(pool, sidR))!.record_id, dec2.record_id);
@@ -688,6 +690,24 @@ const byT = (hits: Awaited<ReturnType<typeof R.searchEvents>>) => Object.fromEnt
   assert.equal((await R.recordLinks(pool, dec.record_id)).length, 1, "no second span for the same binding");
   const re = await I.bindInvestigation(pool, cfgA, { record_id: dec2.record_id, session_id: sidP, question: "same driver on checkout?" });
   assert.equal(re.already_bound, false); assert.ok(re.text.includes("rebound from " + dec.record_id), re.text);
+
+  // repo is a capability, not a filing cabinet: a session sitting in another checkout binds to a non-repo investigation
+  // and that checkout becomes a touched repo; the identity (repo column) stays null and touching is idempotent
+  const SITE = "github.com/tranzmit/site";
+  const dec3 = await I.declareInvestigation(pool, cfgA, { question: "Which SDK host fallback fires most on Jio?", session_id: "agaaz-claude-pm-5" });
+  assert.deepEqual((await R.getRecord(pool, dec3.record_id))!.touched_repos, [], "declared from a sheets session: nothing touched yet");
+  assert.ok(dec3.text.includes("no repo touched yet"), dec3.text);
+  await S.upsertSession(pool, { id: "rachit-codex-sdk-1", author: "rachit", harness: "codex", machine: "rachit-mac", repo: SITE, branch: "main", started_at: T(0), last_seen_at: T(10) });
+  await I.bindInvestigation(pool, { ...cfg, author: "rachit" }, { record_id: dec3.record_id, session_id: "rachit-codex-sdk-1" });
+  const rec3 = (await R.getRecord(pool, dec3.record_id))!;
+  assert.equal(rec3.repo, null); assert.deepEqual(rec3.touched_repos, [SITE], "the bound session's checkout is a touched repo");
+  assert.equal(await I.touchBoundRepo(pool, "rachit-codex-sdk-1"), false, "idempotent");
+  assert.equal(await R.touchRepo(pool, dec3.record_id, SITE), false, "idempotent by repo");
+  assert.equal(await R.touchRepo(pool, impl.id, SITE), false, "a no-op for code work: its repo is its identity");
+  assert.deepEqual((await R.getRecord(pool, impl.id))!.touched_repos, []);
+  assert.ok((await R.listRecords(pool, { repo: SITE })).some((r) => r.id === dec3.record_id), "an investigation that touched a repo is listed from that repo's scope");
+  assert.ok(!(await R.listRecords(pool, { repo: null })).some((r) => r.id === dec3.record_id), "and no longer counts as non-code");
+  ok("touched repos: declare from a sheets session, bind from the SDK checkout → touched_repos [site], repo null; idempotent; visible from the repo's scope");
   const bP = (await I.sessionBinding(pool, sidP))!;
   assert.equal(bP.record_id, dec2.record_id); assert.equal(bP.question, "same driver on checkout?");
   assert.equal((await R.recordLinks(pool, dec.record_id)).length, 1, "the earlier investigation keeps its span");
@@ -718,7 +738,7 @@ const byT = (hits: Awaited<ReturnType<typeof R.searchEvents>>) => Object.fromEnt
 
   // listing: all repos incl. repo-null, ranked by match to q over title + goal + confirmed state, then updated_at desc
   const all = await I.listInvestigations(pool, cfg, {});
-  assert.ok(all.items.some((i) => i.record_id === dec.record_id && i.repo === null) && all.items.some((i) => i.record_id === dec2.record_id && i.repo === REPO), "repo-null and repo investigations listed together");
+  assert.ok(all.items.some((i) => i.record_id === dec.record_id && i.repo === null && i.touched_repos.length === 0) && all.items.some((i) => i.record_id === dec2.record_id && i.repo === null && i.touched_repos.includes(REPO)), "untouched and repo-touching investigations listed together, neither keyed by a repo");
   assert.ok(all.items.every((i) => i.status === "open" && i.match === 0));
   assert.ok(all.text.includes(dec.record_id) && all.text.includes(dec2.record_id) && all.text.includes("ledger_investigation_bind(record_id)") && all.text.includes("ledger_investigation_new(question)"), all.text);
   for (let i = 1; i < all.items.length; i++) assert.ok(all.items[i - 1].updated_at >= all.items[i].updated_at, "updated_at desc without q");
@@ -748,7 +768,8 @@ const byT = (hits: Awaited<ReturnType<typeof R.searchEvents>>) => Object.fromEnt
   const B = await import("./continuity/brief.js");
   const inv = await B.openInvestigationsText(cfg, {});
   assert.ok(inv.startsWith("## Open investigations (all repos, last 14 days)\n" + B.INVESTIGATIONS_CONTRACT + "\n"), inv.split("\n").slice(0, 2).join(" | "));
-  assert.ok(inv.includes(`· rachit · updated `) && inv.includes(`· 2 bound sessions · demo · ${dec2.record_id}`) && !inv.includes(dec.record_id), inv);
+  assert.ok(inv.includes(`· rachit · updated `) && inv.includes(`· 2 bound sessions · touched demo · ${dec2.record_id}`) && !inv.includes(dec.record_id), inv);
+  assert.ok(inv.includes(`· touched site · ${dec3.record_id}`), inv);
   for (const name of ["ledger_investigations", "ledger_investigation_bind", "ledger_investigation_new", "before running data queries"]) assert.ok(B.INVESTIGATIONS_CONTRACT.includes(name));
   const start = await B.openThreadsText(cfg, {});
   assert.ok(start.includes("## Open investigations (all repos") && start.includes("## Open work (records)") && start.indexOf("## Open investigations") < start.indexOf("## Open work (records)"), "SessionStart context lists open investigations before open work");
