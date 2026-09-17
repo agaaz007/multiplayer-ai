@@ -49,6 +49,8 @@ export interface ClassifyResult {
   /** assignments whose exact suggested link already existed (idempotent re-run) */
   assignments_skipped: number;
   records_created: number;
+  /** proposed new investigations that restated an open one and were linked to it instead of created */
+  twins_linked: number;
   updates_proposed: number;
   /** state updates this session already proposed with the same kind and text (idempotent re-run) */
   updates_skipped: number;
@@ -322,7 +324,7 @@ export async function classifySession(cfg: Config, pool: pg.Pool, sessionId: str
   const dryRun = Boolean(opts.dryRun);
   const maxEvents = Math.max(1, opts.maxEvents ?? DEFAULT_MAX_EVENTS);
   const res: ClassifyResult = {
-    session_id: sessionId, events_considered: 0, candidates: 0, candidate_pool_size: 0, candidates_omitted: 0, assignments_applied: 0, assignments_skipped: 0, records_created: 0, updates_proposed: 0, updates_skipped: 0,
+    session_id: sessionId, events_considered: 0, candidates: 0, candidate_pool_size: 0, candidates_omitted: 0, assignments_applied: 0, assignments_skipped: 0, records_created: 0, twins_linked: 0, updates_proposed: 0, updates_skipped: 0,
     unassigned: [], rejected: [], prompt_chars: 0, model_ok: false, notes: [], since_seq: 0, through_seq: 0, dry_run: dryRun, proposed: [],
   };
   const fail = (msg: string): ClassifyResult => { res.error = msg; return res; };
@@ -402,6 +404,11 @@ export async function classifySession(cfg: Config, pool: pg.Pool, sessionId: str
     if (o.from_seq < minSeq || o.to_seq > maxSeq) return `seq range ${o.from_seq}..${o.to_seq} outside the events shown (${minSeq}..${maxSeq})`;
     return null;
   };
+  // Anti-twin pool: fetched once, across every repo, only when the model actually proposes a new investigation.
+  const proposesInvestigation = out.assignments.some((a: any) => a?.new_record?.kind === "investigation");
+  const openInv = proposesInvestigation ? await R.openInvestigations(pool) : [];
+  const invIdf = idfOver(openInv.map((r) => `${r.title} ${r.goal ?? ""}`.trim()));
+
   for (const raw of out.assignments) {
     const a = raw as any;
     if (!a || typeof a !== "object") { reject(raw, "assignment is not an object"); continue; }
@@ -422,9 +429,20 @@ export async function classifySession(cfg: Config, pool: pg.Pool, sessionId: str
       const title = oneLine(a.new_record.title ?? "", TITLE_MAX);
       if (!RECORD_KINDS.has(kind as RecordKind)) { reject(raw, `new_record.kind must be one of ${[...RECORD_KINDS].join(", ")}, got ${kind || "(empty)"}`); continue; }
       if (!title) { reject(raw, "new_record.title is required"); continue; }
+      const goal = a.new_record.goal == null ? null : oneLine(a.new_record.goal, 500) || null;
       const dup = byTitle.get(title.toLowerCase());
       if (dup) record_id = dup.record.id; // a "new" record that already exists by title is that record
-      else new_record = { kind: kind as RecordKind, title, goal: a.new_record.goal == null ? null : oneLine(a.new_record.goal, 500) || null };
+      else {
+        // An investigation that restates one already open is that investigation, whatever repo it was opened in.
+        const twin = kind === "investigation" ? twinInvestigation({ title, goal }, openInv, invIdf) : null;
+        if (twin) {
+          record_id = twin.record.id;
+          res.twins_linked++;
+          const why = `linked proposed investigation "${title}" to open ${twin.record.id} "${twin.record.title}" (title ${twin.title_similarity.toFixed(2)}, question ${twin.question_similarity.toFixed(2)}) instead of creating a new record; the link is suggested and a person can reject it`;
+          res.notes.push(why);
+          log(`classify ${sessionId.slice(0, 8)}: ${why}`);
+        } else new_record = { kind: kind as RecordKind, title, goal };
+      }
     }
     const span = { from_seq: a.from_seq as number, to_seq: a.to_seq as number };
     const clash = accepted.find((x) => overlaps(x, span));
