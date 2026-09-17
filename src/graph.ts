@@ -493,13 +493,17 @@ export function toMermaid(g: Graph, legend = false): string {
     "  classDef current stroke:#1a7f37,fill:#f2fbf4,color:#24292f,stroke-width:2px",
     "  classDef draft stroke:#9a6700,fill:#fff8e5,color:#24292f,stroke-width:2px,stroke-dasharray:5 4",
     "  classDef retired stroke:#8c959f,fill:#f6f8fa,color:#6e7781,stroke-width:1px,stroke-dasharray:2 4",
-    "  classDef alarm stroke:#cf222e,fill:#fff0ef,color:#24292f,stroke-width:4px",
+    "  classDef currentAlarm stroke:#cf222e,fill:#fff0ef,color:#24292f,stroke-width:4px",
+    "  classDef draftAlarm stroke:#cf222e,fill:#fff8e5,color:#24292f,stroke-width:4px,stroke-dasharray:5 4",
+    "  classDef retiredAlarm stroke:#cf222e,fill:#f6f8fa,color:#6e7781,stroke-width:4px,stroke-dasharray:2 4",
   ];
   for (const n of g.nodes) {
     const label = [clip(n.title), `${n.id}`, ...badges(n)].map(text).join("<br/>");
     lines.push(`  ${MERMAID_SHAPE[n.type](alias.get(n.id)!, label)}`);
+    // Exactly one class token per node. `class <node> a,b` would be read as a node list plus the
+    // single class name "b", silently dropping the styling a conflict head depends on.
     const tier = n.tier === 3 ? "current" : n.tier === 2 ? "draft" : "retired";
-    lines.push(`  class ${alias.get(n.id)} ${tier}${isAlarm(n) ? ",alarm" : ""}`);
+    lines.push(`  class ${alias.get(n.id)} ${isAlarm(n) ? `${tier}Alarm` : tier}`);
   }
   for (const e of g.edges) {
     const a = alias.get(e.from)!;
@@ -518,7 +522,7 @@ export function toMermaid(g: Graph, legend = false): string {
       "    L1[\"current: accepted head\"]", "    class L1 current",
       "    L2[\"draft: never in force\"]", "    class L2 draft",
       "    L3[\"superseded / deprecated\"]", "    class L3 retired",
-      "    L4[\"unresolved conflict · contested · needs review\"]", "    class L4 alarm",
+      "    L4[\"unresolved conflict · contested · needs review\"]", "    class L4 currentAlarm",
       "    L5[\"solid = pinned content_version\"] -.->|\"dashed = name or bare id, unresolved lineage\"| L6[\" \"]",
       "  end"
     );
