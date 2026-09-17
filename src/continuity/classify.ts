@@ -7,8 +7,8 @@ import { runExtractorAsync } from "../extract.js";
 import * as S from "./store.js";
 import * as R from "./records.js";
 import type { RecordKind, UpdateKind, Span, WorkRecord, StateUpdate } from "./records.js";
-import { idfOver, questionSimilarity } from "../query.js";
-import { titleSimilarity } from "./investigations.js";
+import { idfOver, questionSimilarity, titleSimilarity } from "../query.js";
+
 
 /**
  * Classifier (spec v1.2 §13a, D-009): runs at each `turn` checkpoint. Given the
