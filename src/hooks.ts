@@ -28,7 +28,7 @@ import { DEFAULT_DATA_TOOLS } from "./capture-tools.js";
  * pilot can count how often the nudge was ignored.
  */
 
-export type EntryKind = "query" | "decision" | "record" | "skip" | "search" | "nudge" | "unresolved" | "compact" | "end";
+export type EntryKind = "query" | "decision" | "record" | "skip" | "search" | "nudge" | "unresolved" | "compact" | "end" | "bind" | "gate";
 
 export interface JournalEntry {
   at: string;
@@ -42,6 +42,8 @@ export interface JournalEntry {
   input_complete?: boolean;
   /** decision entries: the work record the classifier proposed the decision on */
   record_title?: string;
+  /** query entries: a material pull (not a metadata call, and the response carried numbers or rows). Absent on entries journaled before 2026-09-17. */
+  material?: boolean;
 }
 
 export interface CaptureCoverage { session_id: string; evidence_ids: string[] }
