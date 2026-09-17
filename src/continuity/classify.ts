@@ -7,6 +7,8 @@ import { runExtractorAsync } from "../extract.js";
 import * as S from "./store.js";
 import * as R from "./records.js";
 import type { RecordKind, UpdateKind, Span, WorkRecord, StateUpdate } from "./records.js";
+import { idfOver, questionSimilarity } from "../query.js";
+import { titleSimilarity } from "./investigations.js";
 
 /**
  * Classifier (spec v1.2 §13a, D-009): runs at each `turn` checkpoint. Given the
@@ -47,6 +49,8 @@ export interface ClassifyResult {
   /** assignments whose exact suggested link already existed (idempotent re-run) */
   assignments_skipped: number;
   records_created: number;
+  /** proposed new investigations that restated an open one and were linked to it instead of created */
+  twins_linked: number;
   updates_proposed: number;
   /** state updates this session already proposed with the same kind and text (idempotent re-run) */
   updates_skipped: number;
@@ -181,6 +185,47 @@ function candidateLines(cands: Candidate[]): string {
   }).join("\n");
 }
 
+// ---------- anti-twin: a "new" investigation that restates an open one links to it instead ----------
+
+/**
+ * Thirteen open investigations, none bound, was not thirteen questions: it was one question restated by
+ * successive sessions. The only guard was `byTitle`, which collapses a proposed new record into a candidate
+ * only when the titles are byte-identical, and the candidate list is both capped and scoped to this repo —
+ * so a restatement, or the same question opened while working in another repo, became a new record.
+ *
+ * Two measures, either sufficient, because they fail in different places. Title coverage catches a
+ * reordering or a synonym-free rewrite and is blind when the goal carries the meaning; IDF cosine over
+ * title and goal catches a rewording and is weak on a 13-record corpus where nothing is rare. On the
+ * thirteen real open investigations the most similar *distinct* pair scores 0.43 title / 0.17 cosine, while
+ * hand-written restatements of three of them score 1.00/0.40, 0.50/0.32 and 0.80/0.57.
+ *
+ * Linking is the safe error. A link is `suggested` and a person confirms or rejects it; a wrong create is
+ * silent and permanent, and it is the one that has been growing.
+ */
+export const TWIN_TITLE = 0.5;
+export const TWIN_QUESTION = 0.3;
+
+const investigationText = (r: { title: string; goal?: string | null }) => `${r.title} ${r.goal ?? ""}`.trim();
+
+/** The open investigation a proposed new one restates, or null. `idf` comes from {@link idfOver} over the same pool. */
+export function twinInvestigation(
+  proposed: { title: string; goal: string | null },
+  open: WorkRecord[],
+  idf: (t: string) => number
+): { record: WorkRecord; title_similarity: number; question_similarity: number } | null {
+  const scored = open.map((record) => ({
+    record,
+    title_similarity: titleSimilarity(proposed.title, record.title),
+    question_similarity: questionSimilarity(investigationText(proposed), investigationText(record), idf),
+  }));
+  const hits = scored.filter((x) => x.title_similarity >= TWIN_TITLE || x.question_similarity >= TWIN_QUESTION);
+  if (!hits.length) return null;
+  // Rank on the pair, not on one measure: the strongest evidence of the same question wins.
+  return hits.sort((a, b) =>
+    Math.max(b.title_similarity, b.question_similarity) - Math.max(a.title_similarity, a.question_similarity) ||
+    b.title_similarity - a.title_similarity || a.record.id.localeCompare(b.record.id))[0];
+}
+
 const QUERY_STOP_WORDS = new Set('the and this that with from into for was were are have has will then only also what when why how not but its keep use using now'.split(' '));
 
 /** Rank against the full allowed record scope before applying the prompt cap. No recency/closed filter on relevant records. */
@@ -279,7 +324,7 @@ export async function classifySession(cfg: Config, pool: pg.Pool, sessionId: str
   const dryRun = Boolean(opts.dryRun);
   const maxEvents = Math.max(1, opts.maxEvents ?? DEFAULT_MAX_EVENTS);
   const res: ClassifyResult = {
-    session_id: sessionId, events_considered: 0, candidates: 0, candidate_pool_size: 0, candidates_omitted: 0, assignments_applied: 0, assignments_skipped: 0, records_created: 0, updates_proposed: 0, updates_skipped: 0,
+    session_id: sessionId, events_considered: 0, candidates: 0, candidate_pool_size: 0, candidates_omitted: 0, assignments_applied: 0, assignments_skipped: 0, records_created: 0, twins_linked: 0, updates_proposed: 0, updates_skipped: 0,
     unassigned: [], rejected: [], prompt_chars: 0, model_ok: false, notes: [], since_seq: 0, through_seq: 0, dry_run: dryRun, proposed: [],
   };
   const fail = (msg: string): ClassifyResult => { res.error = msg; return res; };
@@ -359,6 +404,11 @@ export async function classifySession(cfg: Config, pool: pg.Pool, sessionId: str
     if (o.from_seq < minSeq || o.to_seq > maxSeq) return `seq range ${o.from_seq}..${o.to_seq} outside the events shown (${minSeq}..${maxSeq})`;
     return null;
   };
+  // Anti-twin pool: fetched once, across every repo, only when the model actually proposes a new investigation.
+  const proposesInvestigation = out.assignments.some((a: any) => a?.new_record?.kind === "investigation");
+  const openInv = proposesInvestigation ? await R.openInvestigations(pool) : [];
+  const invIdf = idfOver(openInv.map((r) => `${r.title} ${r.goal ?? ""}`.trim()));
+
   for (const raw of out.assignments) {
     const a = raw as any;
     if (!a || typeof a !== "object") { reject(raw, "assignment is not an object"); continue; }
@@ -379,9 +429,20 @@ export async function classifySession(cfg: Config, pool: pg.Pool, sessionId: str
       const title = oneLine(a.new_record.title ?? "", TITLE_MAX);
       if (!RECORD_KINDS.has(kind as RecordKind)) { reject(raw, `new_record.kind must be one of ${[...RECORD_KINDS].join(", ")}, got ${kind || "(empty)"}`); continue; }
       if (!title) { reject(raw, "new_record.title is required"); continue; }
+      const goal = a.new_record.goal == null ? null : oneLine(a.new_record.goal, 500) || null;
       const dup = byTitle.get(title.toLowerCase());
       if (dup) record_id = dup.record.id; // a "new" record that already exists by title is that record
-      else new_record = { kind: kind as RecordKind, title, goal: a.new_record.goal == null ? null : oneLine(a.new_record.goal, 500) || null };
+      else {
+        // An investigation that restates one already open is that investigation, whatever repo it was opened in.
+        const twin = kind === "investigation" ? twinInvestigation({ title, goal }, openInv, invIdf) : null;
+        if (twin) {
+          record_id = twin.record.id;
+          res.twins_linked++;
+          const why = `linked proposed investigation "${title}" to open ${twin.record.id} "${twin.record.title}" (title ${twin.title_similarity.toFixed(2)}, question ${twin.question_similarity.toFixed(2)}) instead of creating a new record; the link is suggested and a person can reject it`;
+          res.notes.push(why);
+          log(`classify ${sessionId.slice(0, 8)}: ${why}`);
+        } else new_record = { kind: kind as RecordKind, title, goal };
+      }
     }
     const span = { from_seq: a.from_seq as number, to_seq: a.to_seq as number };
     const clash = accepted.find((x) => overlaps(x, span));
