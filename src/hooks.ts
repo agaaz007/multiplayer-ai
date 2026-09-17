@@ -434,13 +434,42 @@ function handleHookLocked(event: string, input: any, opts: HookOpts = {}): HookR
         // A skip is recorded only through its validated successful acknowledgment below.
       } else if (SEARCH_TOOLS.test(tool)) {
         j.entries.push({ at: now, kind: "search", tool, summary: summarize(input?.tool_input) });
+      } else if (BIND_TOOL.test(tool)) {
+        // A successful bind/declare names the record in structuredContent; the journal remembers it across compactions.
+        const resp = responseEnvelope(input?.tool_response), sc = resp.structuredContent;
+        const recordId = typeof sc?.record_id === "string" ? sc.record_id : undefined;
+        if (recordId && !(resp.isError === true || resp.is_error === true || resp.success === false)) {
+          const title = typeof sc?.title === "string" ? clip(sc.title, 140) : undefined;
+          j.investigation = { record_id: recordId, ...(title ? { title } : {}), at: now };
+          j.entries.push({ at: now, kind: "bind", tool, id: recordId, summary: title ?? clip(String(input?.tool_input?.question ?? "")) });
+          saveJournal(j, dir);
+        }
+        return { exit: 0 };
       } else {
         const callId = input?.tool_use_id ? String(input.tool_use_id) : undefined;
         const calls = dataToolCalls(tool, input?.tool_input, callId ?? `legacy:${evidenceId(undefined, tool, now, summarize(input?.tool_input))}`, opts.dataTools ?? DEFAULT_DATA_TOOLS);
         if (!calls.length) return { exit: 0 };
+        let material = false;
         for (const call of calls) {
           const id = evidenceId(call.call_id, call.tool, now, call.input);
-          if (!j.entries.some(e => e.kind === "query" && queryIdentity(e) === id)) j.entries.push({ at: now, kind: "query", tool: call.tool, summary: summarize(call.input), evidence_id: id, input_complete: call.input_complete });
+          const isMaterial = isMaterialPull(call.tool, call.input, input?.tool_response);
+          material ||= isMaterial;
+          if (!j.entries.some(e => e.kind === "query" && queryIdentity(e) === id)) j.entries.push({ at: now, kind: "query", tool: call.tool, summary: summarize(call.input), evidence_id: id, input_complete: call.input_complete, material: isMaterial });
+        }
+        // The gate: the first material pull in a session with no investigation binding gets the bind-or-declare
+        // instruction once (decision dec-20260917-multi-pm-continuity-bind-or-new-at-session-start-u44f).
+        if (material && !j.investigation && !j.entries.some(e => e.kind === "gate")) {
+          j.entries.push({ at: now, kind: "gate", summary: "unbound material pull" });
+          saveJournal(j, dir);
+          const question = calls.map(c => summarize(c.input, 80)).find(Boolean) ?? "<question>";
+          const ctx = gateText(question);
+          return {
+            // hookSpecificOutput.additionalContext is the Claude Code PostToolUse shape; the top-level copies and
+            // stderr are the plain text for hosts that read either. Exit 0: the tool already ran.
+            stdout: JSON.stringify({ additionalContext: ctx, systemMessage: ctx, hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: ctx } }),
+            stderr: ctx,
+            exit: 0,
+          };
         }
       }
       saveJournal(j, dir);
