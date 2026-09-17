@@ -7,6 +7,8 @@ import { runExtractorAsync } from "../extract.js";
 import * as S from "./store.js";
 import * as R from "./records.js";
 import type { RecordKind, UpdateKind, Span, WorkRecord, StateUpdate } from "./records.js";
+import { idfOver, questionSimilarity } from "../query.js";
+import { titleSimilarity } from "./investigations.js";
 
 /**
  * Classifier (spec v1.2 §13a, D-009): runs at each `turn` checkpoint. Given the
@@ -179,6 +181,47 @@ function candidateLines(cands: Candidate[]): string {
     bits.push(`state: ${c.state_summary || "no updates yet"}`);
     return bits.join(" · ");
   }).join("\n");
+}
+
+// ---------- anti-twin: a "new" investigation that restates an open one links to it instead ----------
+
+/**
+ * Thirteen open investigations, none bound, was not thirteen questions: it was one question restated by
+ * successive sessions. The only guard was `byTitle`, which collapses a proposed new record into a candidate
+ * only when the titles are byte-identical, and the candidate list is both capped and scoped to this repo —
+ * so a restatement, or the same question opened while working in another repo, became a new record.
+ *
+ * Two measures, either sufficient, because they fail in different places. Title coverage catches a
+ * reordering or a synonym-free rewrite and is blind when the goal carries the meaning; IDF cosine over
+ * title and goal catches a rewording and is weak on a 13-record corpus where nothing is rare. On the
+ * thirteen real open investigations the most similar *distinct* pair scores 0.43 title / 0.17 cosine, while
+ * hand-written restatements of three of them score 1.00/0.40, 0.50/0.32 and 0.80/0.57.
+ *
+ * Linking is the safe error. A link is `suggested` and a person confirms or rejects it; a wrong create is
+ * silent and permanent, and it is the one that has been growing.
+ */
+export const TWIN_TITLE = 0.5;
+export const TWIN_QUESTION = 0.3;
+
+const investigationText = (r: { title: string; goal?: string | null }) => `${r.title} ${r.goal ?? ""}`.trim();
+
+/** The open investigation a proposed new one restates, or null. `idf` comes from {@link idfOver} over the same pool. */
+export function twinInvestigation(
+  proposed: { title: string; goal: string | null },
+  open: WorkRecord[],
+  idf: (t: string) => number
+): { record: WorkRecord; title_similarity: number; question_similarity: number } | null {
+  const scored = open.map((record) => ({
+    record,
+    title_similarity: titleSimilarity(proposed.title, record.title),
+    question_similarity: questionSimilarity(investigationText(proposed), investigationText(record), idf),
+  }));
+  const hits = scored.filter((x) => x.title_similarity >= TWIN_TITLE || x.question_similarity >= TWIN_QUESTION);
+  if (!hits.length) return null;
+  // Rank on the pair, not on one measure: the strongest evidence of the same question wins.
+  return hits.sort((a, b) =>
+    Math.max(b.title_similarity, b.question_similarity) - Math.max(a.title_similarity, a.question_similarity) ||
+    b.title_similarity - a.title_similarity || a.record.id.localeCompare(b.record.id))[0];
 }
 
 const QUERY_STOP_WORDS = new Set('the and this that with from into for was were are have has will then only also what when why how not but its keep use using now'.split(' '));
