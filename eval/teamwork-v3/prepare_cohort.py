@@ -17,7 +17,7 @@ RETAINED_PER_SEQUENCE=GIB//2
 PEAK_PER_LANE=GIB//4
 SHARED_OVERHEAD=GIB//2
 MARGIN=2*GIB
-BATCHES={'all':ALL_ARMS,'six-arm':ALL_ARMS,'products':PRODUCT_ARMS,'controls':CONTROL_ARMS,'ledger-vs-controls':('ledger',)+CONTROL_ARMS}
+BATCHES={'all':ALL_ARMS,'six-arm':ALL_ARMS,'products':PRODUCT_ARMS,'controls':CONTROL_ARMS,'ledger-vs-controls':('ledger',)+CONTROL_ARMS,'ledger-replay':('ledger',)}
 DEFAULT_AUTHORIZATION='Decision 7A (2026-09-13 review): compare the four native products against the control-git and handoff-note baseline controls; preserve the original shared USD30 ceiling.'
 SIX_ARM_SCORED_BASIS='Six-arm scored cohort aggregate: 12 x 512 MiB retained + 6 x 256 MiB peak + 512 MiB shared + 2 GiB margin = 10 GiB.'
 

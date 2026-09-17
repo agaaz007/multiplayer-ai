@@ -2,7 +2,7 @@
 /** Produce private native configs after the controller has created owned sequence roots. */
 import fs from'node:fs';import path from'node:path';import crypto from'node:crypto';import{fileURLToPath}from'node:url';import{execFileSync}from'node:child_process';import{guideFor}from'./native-guides.mjs';import{isTransportControl,CONTROL_VERSIONS}from'./native-controls.mjs';
 const here=path.dirname(fileURLToPath(import.meta.url));const hash=f=>crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex');
-export function setup({root,arm,runtime,budget_file,proxy_config,proxy_ready_file,provider_env={},version,readiness_receipt,ca_file,native_versions,supermemory_template,supermemory_env_file}){
+export function setup({root,arm,runtime,budget_file,proxy_config,proxy_ready_file,provider_env={},version,readiness_receipt,ca_file,native_versions,supermemory_template,supermemory_env_file,ledger_tool_manifest}){
  const versions=native_versions??path.resolve('.context/teamwork-v3-live-20260912/native-versions');const gb=path.join(versions,'bin/gbrain');
  root=fs.realpathSync(root);const guide=path.join(root,'native-guide.md');fs.writeFileSync(guide,guideFor(arm,root),{mode:0o600});
  const control=isTransportControl(arm);if(control){version=version??CONTROL_VERSIONS[arm];readiness_receipt=readiness_receipt??path.join(root,'native-readiness.json');proxy_config=undefined;proxy_ready_file=undefined;}
@@ -19,7 +19,15 @@ export function setup({root,arm,runtime,budget_file,proxy_config,proxy_ready_fil
   ca_file,readiness_receipt,classifier_subscription_authorized:arm==='ledger',artifact_limits:{maxFileBytes:67108864,maxBytes:268435456},
   read_paths:arm==='gbrain'?[path.join(versions,'gbrain-0.50.0.0'),path.join(versions,'bin'),path.join(versions,'bun-darwin-aarch64')]:arm==='graphify'?[path.join(versions,'uv-tools/graphifyy'),path.join(versions,'bin')]:[],
   native_capabilities:control?{transport:arm==='control-git'?'bare shared Git remote; agent fetch/push only':'HANDOFF.md copied to handoff-notes/<stage>.md after each stage',mcp_memory_servers:false,hooks:false,paid_provider_path:false,controller_semantic_summaries:false,restoration:'agent reads git history or handoff notes only'}:{complete_workspace_artifacts:arm!=='supermemory',file_support:arm==='supermemory'?'original UTF8 file upload/download configured; arbitrary binary unsupported, live readiness pending':'bounded original files',original_transcript_ingestion:arm==='ledger'?'native helper':'configured original-file ingestion into native backend',controller_semantic_summaries:false,restoration:'agent uses native product/bootstrap only',automatic_classifier:arm==='ledger'}};
- if(arm==='ledger'){const source=path.resolve('.context/teamwork-v2-live-20260912/scored/sequences/engineering-ledger/native-config.json');if(fs.existsSync(source))config.operation_bounds=JSON.parse(fs.readFileSync(source)).operation_bounds;}
+ if(arm==='ledger'){
+  // The budget gate denies every MCP call absent from operation_bounds. On 2026-09-14 the relative
+  // richmond-v1 path below did not exist in another worktree, the allowlist came out empty and every
+  // Ledger call in a readiness run was denied. Prefer an explicit manifest (the tools/list the runtime
+  // serves) and refuse to write a Ledger config with no allowlist.
+  if(ledger_tool_manifest){const m=JSON.parse(fs.readFileSync(ledger_tool_manifest,'utf8'));const names=Array.isArray(m)?m:m.tools;if(!Array.isArray(names)||!names.length)throw new Error('ledger_tool_manifest holds no tool names');config.operation_bounds={ledger:Object.fromEntries(names.map(n=>[n,op]))};config.ledger_tool_manifest=path.resolve(ledger_tool_manifest);}
+  else{const source=path.resolve('.context/teamwork-v2-live-20260912/scored/sequences/engineering-ledger/native-config.json');if(fs.existsSync(source))config.operation_bounds=JSON.parse(fs.readFileSync(source)).operation_bounds;}
+  if(!config.operation_bounds?.ledger||!Object.keys(config.operation_bounds.ledger).length)throw new Error('Ledger operation_bounds allowlist is empty: pass ledger_tool_manifest (the runtime tools/list) so the budget gate does not deny every call');
+ }
  const out=path.join(root,'native-config.json');fs.writeFileSync(out,JSON.stringify(config,null,2)+'\n',{mode:0o600});return{native_config:out,guide,guide_sha256:hash(guide)};
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){const input=JSON.parse(fs.readFileSync(process.argv[2],'utf8'));console.log(JSON.stringify(setup(input)));}

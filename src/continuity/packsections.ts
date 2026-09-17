@@ -121,20 +121,23 @@ export function savedLedgerIds(output: string): string[] {
 
 export interface SavedLedgerIds { refs: LedgerRefInput[]; results: number; sessions: number }
 
-/** Ledger objects saved by tool calls inside a thread's events, or inside a work record's linked spans. */
-export async function writtenLedgerIds(q: Q, scope: { threadId: string } | { recordId: string }): Promise<SavedLedgerIds> {
+/** Ledger objects saved by tool calls inside a thread's events, or inside a work record's linked spans. `asOf` ignores save results after that instant. */
+export async function writtenLedgerIds(q: Q, scope: { threadId: string } | { recordId: string }, opts: { asOf?: Date | null } = {}): Promise<SavedLedgerIds> {
   const mentionsSave = `(e.payload->>'output_preview' like '%record_id%' or e.payload->>'output_preview' like '%Recorded %')`;
+  const upTo = opts.asOf ? ` and coalesce(e.occurred_at, e.received_at) <= $2` : "";
+  const params: unknown[] = ["threadId" in scope ? scope.threadId : scope.recordId];
+  if (opts.asOf) params.push(opts.asOf);
   const r = "threadId" in scope
     ? await q.query<{ session_id: string; seq: number; out: string | null }>(
         `select e.session_id, e.seq, e.payload->>'output_preview' as out from cont_events e
-          where e.thread_id = $1 and e.kind = 'tool.finished' and ${mentionsSave}
-          order by coalesce(e.occurred_at, e.received_at), e.id`, [scope.threadId])
+          where e.thread_id = $1 and e.kind = 'tool.finished' and ${mentionsSave}${upTo}
+          order by coalesce(e.occurred_at, e.received_at), e.id`, params)
     : await q.query<{ session_id: string; seq: number; out: string | null }>(
         `select distinct on (e.id) e.session_id, e.seq, e.payload->>'output_preview' as out, e.id, coalesce(e.occurred_at, e.received_at) as at
            from cont_record_links l
            join cont_events e on e.session_id = l.session_id and e.seq between l.from_seq and l.to_seq
-          where l.record_id = $1 and l.source <> 'unassigned' and e.kind = 'tool.finished' and ${mentionsSave}
-          order by e.id`, [scope.recordId]);
+          where l.record_id = $1 and l.source <> 'unassigned' and e.kind = 'tool.finished' and ${mentionsSave}${upTo}
+          order by e.id`, params);
   const refs: LedgerRefInput[] = [];
   const seen = new Set<string>();
   const sessions = new Set<string>();
@@ -186,15 +189,15 @@ export function decisionTag(r: LedgerRefStatus): string {
   return r.superseded_by ? `SUPERSEDED by ${r.superseded_by}, which is in force` : "SUPERSEDED; no single replacement is in force";
 }
 
-/** The "Decisions in force" section, shared by the thread and record packs. */
-export function renderDecisionsInForce(refs: LedgerRefStatus[], captured: { results: number; sessions: number }, opts: { compact?: boolean; groups?: RecordDecisionGroup[]; perGroup?: number } = {}): string[] {
+/** The "Decisions in force" section, shared by the thread and record packs. `lean` drops the explanatory sentences (the status tags carry the rule). */
+export function renderDecisionsInForce(refs: LedgerRefStatus[], captured: { results: number; sessions: number }, opts: { compact?: boolean; lean?: boolean; groups?: RecordDecisionGroup[]; perGroup?: number } = {}): string[] {
   const L: string[] = [];
   const groups = opts.groups ?? [];
   L.push(`## Decisions in force for this work (${refs.length})`);
   if (!refs.length) {
-    L.push(`(none: no Ledger decision, definition, finding or change was saved in this work's events or linked to it; decisions it only read are not tracked here)`);
+    L.push(opts.lean ? `(none: nothing saved or linked; decisions the work only read are not tracked here)` : `(none: no Ledger decision, definition, finding or change was saved in this work's events or linked to it; decisions it only read are not tracked here)`);
   } else {
-    L.push(`Ledger objects this work saved or linked, resolved to what is in force now. Only [in force] items are accepted knowledge.`);
+    if (!opts.lean) L.push(`Ledger objects this work saved or linked, resolved to what is in force now. Only [in force] items are accepted knowledge.`);
     const rank = (r: LedgerRefStatus) => (r.found ? TYPE_ORDER[r.type ?? ""] ?? 4 : 5);
     const sorted = refs.map((r, i) => ({ r, i })).sort((a, b) => rank(a.r) - rank(b.r) || a.i - b.i).map((x) => x.r);
     // a warning shared by several objects (legacy scope, say) prints once after the list, so it cannot bury a status line
@@ -211,9 +214,12 @@ export function renderDecisionsInForce(refs: LedgerRefStatus[], captured: { resu
     }
     for (const [w, n] of warnCount) if (n > 1) L.push(`WARNING (${n} objects above): ${w}`);
     const notInForce = sorted.filter((r) => !r.found || r.status !== "stable" || r.authority_status === "conflict");
-    if (notInForce.length) L.push(`NOT IN FORCE (${notInForce.length}): ${notInForce.map((r) => (r.status === "deprecated" && r.superseded_by ? `${r.id} → ${r.superseded_by}` : r.id)).join("; ")}. Do not act on these as decided.`);
+    // lean: every ref's tag is on its own line above, so the restatement is only kept when the list is long enough to need it
+    if (notInForce.length && (!opts.lean || sorted.length > 3)) L.push(`NOT IN FORCE (${notInForce.length}): ${notInForce.map((r) => (r.status === "deprecated" && r.superseded_by ? `${r.id} → ${r.superseded_by}` : r.id)).join("; ")}. Do not act on these as decided.`);
     const explicit = refs.filter((r) => r.source === "explicit").length;
-    L.push(`Captured from ${plural(captured.results, "Ledger save result")} in ${plural(captured.sessions, "session")} and ${plural(explicit, "explicit link")}. Decisions the work only read are not listed; search the Ledger before relying on one.`);
+    L.push(opts.lean
+      ? `From ${plural(captured.results, "save result")}, ${plural(explicit, "explicit link")}; decisions only read are not listed.`
+      : `Captured from ${plural(captured.results, "Ledger save result")} in ${plural(captured.sessions, "session")} and ${plural(explicit, "explicit link")}. Decisions the work only read are not listed; search the Ledger before relying on one.`);
   }
   if (groups.length) {
     const cap = Math.max(1, opts.perGroup ?? 5);

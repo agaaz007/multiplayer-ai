@@ -62,4 +62,13 @@ class RecordUseTests(unittest.TestCase):
   with self.assertRaises(ValueError):audit(self.r,self.w)
  def test_infrastructure_abort_never_admits(self):
   save(self.r/'sequence.json',{'arm':'ledger','status':'infrastructure_aborted','pack':str(self.r/'pack')});self.assertFalse(audit(self.r,self.w)['admission_eligible'])
+ def test_agent_confirmed_label_from_truthful_acceptance_rendering_passes(self):
+  label='- [agent-confirmed for benchmark-b by the session that proposed it; not reviewed by a person] '
+  self.edit('stages/C/controller/native-ledger.jsonl',lambda rs:rs[1]['message']['result']['content'][0].update(text=f'record {RID} state v2\n'+label+self.native_text))
+  self.assertTrue(audit(self.r,self.w)['admission_eligible'])
+ def test_proposed_label_still_fails_even_when_it_mentions_confirmed(self):
+  self.edit('stages/C/controller/native-ledger.jsonl',lambda rs:rs[1]['message']['result']['content'][0].update(text=f'record {RID} state v2\n- [PROPOSED] not confirmed: '+self.native_text))
+  self.assertFalse(audit(self.r,self.w)['admission_eligible'])
+
+
 if __name__=='__main__':unittest.main()

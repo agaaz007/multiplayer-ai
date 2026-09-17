@@ -45,6 +45,7 @@ Documents:
 | CLI: `continuity`, `helper`, `threads`, `resume`, `thread` | live | `src/cli.ts` |
 | Brief sections: Open threads, Ledger notices | live | `src/continuity/brief.ts` |
 | launchd agent `com.tranzmit.ledger.helper` with KeepAlive | live on Agaaz's machine | `src/install.ts` |
+| Retrieval: lean record/thread packs by default (state confirmed-first, decisions in force, pending ops, changed since your last visit, drill-down references; `detail: "evidence"` for raw lines); `ledger_search`/`ledger_evidence_search`/`ledger_records`/`ledger_threads` rank authority → recency → similarity with current/PROPOSED/superseded-by labels, `scope` repo-first, `author`, `as_of`; optional pgvector embeddings as a candidate generator (`continuity.embeddings`, `ledger continuity embed`) | shipped 15 Sep (release 3) | `src/continuity/packlean.ts`, `recordpack.ts`, `resume.ts`, `records.ts`, `query.ts`, `embeddings.ts`, decision dec-20260915-transcript-retrieval-structured-layer-as-the-uni-8hv1 |
 | Stable install: `ledger deploy` copies the build to `~/.ledger/bin/releases/<id>` and installs hooks, MCP, reconciler and helper from it; installers refuse a worktree `cli.js`; `ledger continuity rotate` for password rotation | live on Agaaz's machine 15 Sep; Rachit's machine pending | `src/deploy.ts`, `src/install.ts` |
 | Regex redaction and deny globs before spool | live, tested | `src/continuity/redact.ts` |
 | All drafts shown in brief and README, labeled not in force | live, tested | `src/query.ts`, `src/views.ts` |

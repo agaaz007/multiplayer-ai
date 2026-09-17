@@ -30,3 +30,18 @@ class ReadinessTests(unittest.TestCase):
   integrity.record(self.root,'agaaz','native memory edit','integration investigation',['native record'])
   with self.assertRaises(integrity.FreezeError):integrity.check(self.root,{'frozen_files':{}})
 if __name__=='__main__':unittest.main()
+
+
+class CompactionLimitTests(unittest.TestCase):
+    def test_readiness_pack_compaction_limit_is_configurable(self):
+        import tempfile,json
+        from pathlib import Path
+        import readiness
+        with tempfile.TemporaryDirectory() as d:
+            default=json.loads((Path(readiness.build(Path(d)/'p4'))/'manifest.json').read_text())
+            scored=json.loads((Path(readiness.build(Path(d)/'p12',42,12000))/'manifest.json').read_text())
+        c=lambda m:[s for s in m['stages'] if s['id']=='C'][0]['stress']
+        self.assertEqual(c(default),{'compact_token_limit':4000})
+        self.assertEqual(c(scored),{'compact_token_limit':12000})
+        self.assertEqual([s['stress'] for s in scored['stages'] if s['id']!='C'],[s['stress'] for s in default['stages'] if s['id']!='C'])
+

@@ -1,5 +1,6 @@
 import pg from "pg";
 import type { Config } from "../store.js";
+import { embeddingsConfigured, ensureEmbeddingSchema } from "./embeddings.js";
 
 /**
  * Shared Postgres for execution continuity. One pool per URL, created lazily.
@@ -213,6 +214,18 @@ alter table cont_state_updates add column if not exists proposed_session_id text
 alter table cont_state_updates add column if not exists confirmed_session_id text;
 alter table cont_state_updates add column if not exists confirmed_via text;
 
+-- Investigation bindings (2026-09-17): an analysis session resolves its scope to one open `investigation`
+-- record (any repo, or none) before it runs data queries. One row per session; the matching explicit
+-- cont_record_links span ("bound by <author>") is what the helper extends each pass. See investigations.ts.
+create table if not exists cont_session_bindings (
+  session_id text primary key,
+  record_id uuid not null references cont_records(id),
+  question text,
+  bound_by text not null,
+  bound_at timestamptz not null default now()
+);
+create index if not exists cont_session_bindings_record_idx on cont_session_bindings(record_id);
+
 create index if not exists cont_records_repo_idx on cont_records(repo, status, updated_at desc);
 create index if not exists cont_records_updated_idx on cont_records(updated_at desc);
 create index if not exists cont_record_links_record_idx on cont_record_links(record_id);
@@ -226,9 +239,15 @@ create index if not exists cont_events_fts_idx on cont_events using gin (
 );
 `;
 
-export async function migrate(pool: pg.Pool): Promise<string[]> {
+/**
+ * Idempotent. Without `cfg`, or with a config that has no `continuity.embeddings`, this runs the base
+ * SCHEMA only. With embeddings configured it also installs pgvector and the cont_event_embeddings /
+ * cont_embedding_failures tables, refusing a width or model mismatch with stored vectors (embeddings.ts).
+ */
+export async function migrate(pool: pg.Pool, cfg?: Config): Promise<string[]> {
   const before = await tableList(pool);
   await pool.query(SCHEMA);
+  if (cfg && embeddingsConfigured(cfg)) await ensureEmbeddingSchema(pool, cfg);
   const after = await tableList(pool);
   return after.filter((t) => !before.includes(t));
 }

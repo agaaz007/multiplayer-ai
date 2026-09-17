@@ -22,6 +22,9 @@ SCOPES = {
     # The bake-off the user asked for on 2026-09-15: Ledger against "just commit" and
     # "just write a note", runnable without OpenAI/Supermemory provider routes.
     'ledger-vs-controls': (['ledger'] + list(CONTROL_ARMS), [a for a in PRODUCT_ARMS if a != 'ledger']),
+    # Readiness replay of one affected lane after an infrastructure fault (protocol: "replay affected
+    # readiness with retained failed attempts"). Never a scored cohort.
+    'ledger-replay': (['ledger'], [a for a in ALL_ARMS if a != 'ledger']),
 }
 LABELS = {3: 'three-product', 4: 'four-product', 2: 'two-control', 6: 'six-arm'}
 

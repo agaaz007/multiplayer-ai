@@ -57,6 +57,8 @@ const USAGE = `ledger — shared definitions, findings, changes, decisions for y
   execution continuity (needs continuity.database_url in ~/.ledger/config.json):
   ledger continuity migrate|status       create the cont_* tables in the shared Postgres / show counts
   ledger continuity rotate <postgres-url> verify the new database URL, write it to config.json (mode 600), restart the helper
+  ledger continuity embed --status | --backfill [--limit N] [--since 30d] [--dry-run]
+                                         optional pgvector embeddings (continuity.embeddings): status, or embed not-yet-embedded events oldest first
   ledger helper once|start|status|install
                                          capture helper: one pass, run forever, show state, install the launchd agent
   ledger threads [--all] [--hours N]     open work threads (this repo by default)
@@ -67,7 +69,8 @@ const USAGE = `ledger — shared definitions, findings, changes, decisions for y
   ledger thread show|close|title <id>
   ledger records [--all] [--kind k] [--status s] [--q text] [--hours N] [--limit N]
                                          open work records (this repo by default): kind · title · repo · updated · sessions · proposed/confirmed · id
-  ledger record show <id> [--budget N]   record pack without claiming: state (PROPOSED flagged), evidence, pending ops, unassigned, bootstrap
+  ledger record show <id> [--budget N] [--detail lean|evidence]
+                                         record pack without claiming: lean by default (state, decisions in force, pending ops, changed since your last visit, drill-down refs); --detail evidence inlines event lines
   ledger record start <kind> <title…> [--goal g] [--link <session>:<from>:<to>]
                                          new record (repo from cwd when inside a git repo, else non-code)
   ledger record link <id> <session> <from> <to> [--note n]
@@ -378,7 +381,7 @@ async function main() {
         const sub = args[0] ?? "status";
         const pool = getPool(cfg);
         if (sub === "migrate") {
-          const created = await migrate(pool);
+          const created = await migrate(pool, cfg);
           console.log(created.length ? `created: ${created.join(", ")}` : "schema up to date");
           console.log(`tables: ${(await tableList(pool)).join(", ")}`);
         } else if (sub === "status") {
@@ -415,7 +418,54 @@ async function main() {
             }
           } else console.log("restart the helper service so it picks up the new URL");
           console.log("MCP servers inside open Claude/Codex sessions keep the old connection until those sessions restart.");
-        } else throw new Error("usage: ledger continuity migrate|status|rotate <url>");
+        } else if (sub === "embed") {
+          // Optional event embeddings. The API key is read from config/env and is never printed here.
+          const E = await import("./continuity/embeddings.js");
+          const fmtUsd = (v: number | null) => (v == null ? "n/a (unknown model price)" : `USD ${v < 0.01 ? v.toFixed(4) : v.toFixed(2)}`);
+          if (args.includes("--status")) {
+            const st = await E.embeddingStatus(pool, cfg);
+            const lines = [
+              `configured: ${st.configured ? "yes" : "no (add continuity.embeddings to ~/.ledger/config.json)"}`,
+              `extension vector: ${st.extension.installed ? `installed ${st.extension.installed}` : st.extension.available ? `available ${st.extension.available}, not installed (run: ledger continuity migrate)` : "not available on this server"}`,
+            ];
+            if (st.configured) {
+              lines.push(`model: ${st.model} · dims ${st.dims} · key ${st.api_key_present ? `present (${st.api_key_env})` : `MISSING (set ${st.api_key_env})`}`);
+              lines.push(`kinds: ${st.kinds!.join(", ")} · max_chars ${st.max_chars}`);
+              lines.push(`table cont_event_embeddings: ${st.table_exists ? `present · stored dims ${st.stored_dims ?? "?"}${st.dims_match === false ? " · MISMATCH with config (see: ledger continuity migrate)" : ""}${st.stored_models.length ? ` · stored model ${st.stored_models.join(", ")}` : ""}` : "absent (run: ledger continuity migrate)"}`);
+              lines.push(`embedded ${st.embedded} / eligible ${st.eligible} · pending ${st.pending} · failures ${st.failures}`);
+              lines.push(`backfill estimate for pending: ${st.pending_chars} chars ≈ ${st.estimated_tokens} tokens ≈ ${fmtUsd(st.estimated_usd)}`);
+            }
+            console.log(lines.join("\n"));
+          } else if (args.includes("--backfill")) {
+            if (!E.embeddingsConfigured(cfg)) throw new Error("embeddings not configured: add continuity.embeddings to ~/.ledger/config.json (see docs/continuity/runbook.md, Embeddings)");
+            const settings = E.embeddingSettings(cfg)!;
+            if (!settings.api_key_present) throw new Error(`no embeddings API key: set ${settings.api_key_env} or continuity.embeddings.api_key`);
+            await migrate(pool, cfg); // installs the extension and tables; refuses a width/model mismatch with instructions
+            const limitFlag = flag(args, "--limit");
+            const limit = limitFlag ? Math.max(1, Math.floor(Number(limitFlag))) : Infinity;
+            if (!Number.isFinite(Number(limitFlag ?? 1))) throw new Error(`invalid --limit ${limitFlag}`);
+            const sinceHours = E.parseSinceHours(flag(args, "--since"));
+            const st = await E.embeddingStatus(pool, cfg, { sinceHours });
+            const plan = Math.min(limit, st.pending);
+            const planChars = st.pending ? Math.round((st.pending_chars * plan) / st.pending) : 0;
+            const planTokens = Math.ceil(planChars / 4);
+            console.log(`model ${st.model} · dims ${st.dims} · embedded ${st.embedded} / eligible ${st.eligible} · failures ${st.failures}`);
+            console.log(`pending${sinceHours != null ? ` (since ${flag(args, "--since")})` : ""}: ${st.pending} events · will embed ${plan} · ≈ ${planChars} chars ≈ ${planTokens} tokens ≈ ${fmtUsd(E.costUsd(st.model!, planTokens))}`);
+            if (args.includes("--dry-run") || plan === 0) { console.log(plan === 0 ? "nothing to do" : "dry run: nothing embedded"); }
+            else {
+              let done = 0, failed = 0, chars = 0;
+              const t0 = Date.now();
+              while (done + failed < plan) {
+                const r = await E.embedPendingEvents(pool, cfg, { limit: Math.min(256, plan - done - failed), sinceHours, log: (l) => console.log(l) });
+                done += r.embedded; failed += r.failed; chars += r.chars;
+                const tokens = Math.ceil(chars / 4);
+                console.log(`embedded ${done}/${plan}${failed ? ` · ${failed} failed` : ""} · ${tokens} tokens ≈ ${fmtUsd(E.costUsd(st.model!, tokens))} · ${Math.round((Date.now() - t0) / 1000)}s`);
+                if (r.stopped_early) { console.log(`stopped: ${r.error ?? "provider unavailable"}; rerun to continue`); break; }
+                if (r.remaining === 0 || (!r.embedded && !r.failed)) break;
+              }
+            }
+          } else throw new Error("usage: ledger continuity embed --status | --backfill [--limit N] [--since 30d] [--dry-run]");
+        } else throw new Error("usage: ledger continuity migrate|status|rotate <url>|embed …");
         await closePools();
         return;
       }
@@ -454,14 +504,14 @@ async function main() {
         const mode = (flag(args, "--mode") ?? "continue") as "continue" | "fork" | "inspect";
         if (recordId) {
           if (mode === "fork") throw new Error("--mode fork applies to threads; use continue or inspect with --record");
-          const pack = await buildRecordPack(cfg, getPool(cfg), recordId, { mode, author: cfg.author, sessionId: `cli:${cfg.author}:${Date.now()}`, repoPath: process.cwd() });
+          const pack = await buildRecordPack(cfg, getPool(cfg), recordId, { mode, author: cfg.author, sessionId: `cli:${cfg.author}:${Date.now()}`, repoPath: process.cwd(), viewer: cfg.author, detail: (flag(args, "--detail") as "lean" | "evidence" | undefined) });
           console.log(pack.text);
           await closePools();
           return;
         }
         const id = args[0];
         if (!id || id.startsWith("--")) throw new Error("usage: ledger resume <thread-id> [--mode continue|fork|inspect] [--checkout <dir>]  |  ledger resume --record <id> [--mode continue|inspect]");
-        const pack = await buildResumePack(cfg, getPool(cfg), id, { mode, author: cfg.author, sessionId: `cli:${cfg.author}:${Date.now()}`, repoPath: process.cwd() });
+        const pack = await buildResumePack(cfg, getPool(cfg), id, { mode, author: cfg.author, sessionId: `cli:${cfg.author}:${Date.now()}`, repoPath: process.cwd(), viewer: cfg.author, detail: (flag(args, "--detail") as "lean" | "evidence" | undefined) });
         console.log(pack.text);
         const dest = flag(args, "--checkout");
         if (dest && pack.checkpoint?.wip_ref && pack.checkpoint?.wip_commit) {
@@ -479,7 +529,7 @@ async function main() {
         const pool = getPool(cfg);
         const t = await getThread(pool, id);
         if (!t) throw new Error(`not found: ${id}`);
-        if (sub === "show") console.log((await buildResumePack(cfg, pool, id, { mode: "inspect", author: cfg.author, repoPath: process.cwd(), budgetTokens: 12000 })).text);
+        if (sub === "show") console.log((await buildResumePack(cfg, pool, id, { mode: "inspect", author: cfg.author, repoPath: process.cwd(), budgetTokens: 12000, viewer: cfg.author, detail: (flag(args, "--detail") as "lean" | "evidence" | undefined) })).text);
         else if (sub === "close") { await updateThread(pool, id, { status: "done" }); console.log(`closed ${id}`); }
         else if (sub === "title") { await updateThread(pool, id, { title: flag(args, "--title") ?? t.title }); console.log("updated"); }
         else throw new Error("usage: ledger thread show|close|title <id>");
@@ -558,7 +608,7 @@ async function workRecordCommand(args: string[]): Promise<void> {
   const usage = `usage: ledger record <definition|finding|change|decision> < fields.json  |  ledger record show <id> [--budget N] | start <kind> <title…> [--goal g] [--link <session>:<from>:<to>] | link <id> <session> <from> <to> [--note n] | propose <id> <kind> <text…> --evidence <session>:<seq>[,…] [--supersedes <update>] | confirm <update-id> | reject <update-id> --reason "..."`;
   if (sub === "show") {
     if (!pos[1]) throw new Error(usage);
-    console.log((await buildRecordPack(cfg, pool, pos[1], { mode: "inspect", author: cfg.author, repoPath: process.cwd(), budgetTokens: Number(flag(args, "--budget") ?? 12000) })).text);
+    console.log((await buildRecordPack(cfg, pool, pos[1], { mode: "inspect", author: cfg.author, repoPath: process.cwd(), budgetTokens: Number(flag(args, "--budget") ?? 12000), viewer: cfg.author, detail: (flag(args, "--detail") as "lean" | "evidence" | undefined) })).text);
   } else if (sub === "start") {
     const [, kind, ...title] = pos;
     if (!kind || !title.length) throw new Error(usage);

@@ -10,9 +10,31 @@ import { eventLine, PREVIEW_MAX_CHARS } from "./evidence.js";
 import { defaultRemoteBranch, repoIdentity, repoRoot } from "./shadow.js";
 import { readProgress } from "./classify.js";
 import { DECISION_RULE, ledgerRefStatuses, renderDecisionsInForce, stateLine, writtenLedgerIds, type LedgerRefInput, type LedgerRefStatus } from "./packsections.js";
+import { artifactIds, parseAsOf, pendingOperationsAsOf, recordEvidenceCountAsOf, recordStateAsOf, recordVisitDelta, renderVisitDelta, spanFetch, type PackDetail, type VisitDelta } from "./packlean.js";
 export { acceptanceLabel, evidenceRefs, stateLine, type LedgerRefStatus } from "./packsections.js";
+export { type PackDetail, type VisitDelta } from "./packlean.js";
 
 /**
+ * SIGNATURE (for mcp.ts / cli.ts):
+ *
+ *   buildRecordPack(cfg: Config, pool: pg.Pool, recordId: string, opts: RecordPackOpts): Promise<RecordPack>
+ *
+ *   RecordPackOpts = {
+ *     mode: "continue" | "inspect";      // continue claims the thread of the latest contributing session
+ *     author: string;                    // the resuming author (claim holder)
+ *     sessionId?: string;                // the resuming session; synthesized if absent
+ *     repoPath?: string;                 // local checkout, for the bootstrap rebase target
+ *     budgetTokens?: number;             // default 6000; shrinks sections, never switches detail
+ *     detail?: "lean" | "evidence";      // default "lean": state, decisions, pending, changed-since, bootstrap, drill-down references;
+ *                                        // "evidence": inline event lines, session summary text, files, unassigned spans (the pre-2026-09-15 pack)
+ *     asOf?: string;                     // ISO time: state and events only up to that instant (links and sessions are not filtered)
+ *     viewer?: string;                   // the requesting author (mcp passes cfg.author): drives "Changed since your last visit"
+ *     now?: Date;
+ *   }
+ *
+ *   MCP wiring: ledger_record_get / ledger_resume(record_id) pass { detail, asOf: as_of, viewer: cfg.author }.
+ *   The pack's `text` is what the agent reads; `detail`, `as_of`, `changed_since` are on the returned object.
+ *
  * The record pack (spec §13a, "Retrieval by record"): the active context for
  * one work record, assembled from the shared evidence layer and the record's
  * own state projection. A record accumulates from many sessions and teammates,
@@ -24,6 +46,16 @@ export { acceptanceLabel, evidenceRefs, stateLine, type LedgerRefStatus } from "
  *
  * Threads stay the physical unit: a claim, when one is acquired, is on the
  * thread of the most recent contributing session; a non-code record has none.
+ *
+ * Lean mode (default since 2026-09-15; the teamwork-v3 bake-off measured that a
+ * pack full of raw event lines sent successors to pull events with 12,000-char
+ * previews and compact six or seven times): the retrieval unit is a reference,
+ * not an event. The lean pack is ~600-900 tokens for a typical record and
+ * contains, in order: header + honesty, State (confirmed first, proposed
+ * summarised as count + ids when more than LEAN_PROPOSED_FULL per kind),
+ * Decisions in force (compact), Pending / unknown operations, Changed since
+ * your last visit, Bootstrap, Drill down (one ledger_events call per linked
+ * span, the last error, artifacts, evidence search). Nothing inline.
  */
 
 type Q = pg.Pool | pg.PoolClient;
@@ -54,6 +86,13 @@ const STATE_ORDER: { key: StateKey; label: string; hard: boolean }[] = [
 ];
 
 export type RecordPackMode = "continue" | "inspect";
+export type RecordPackDetail = PackDetail;
+/** In lean mode, a kind's proposed items are listed in full up to this many; more become a count plus ids. */
+export const LEAN_PROPOSED_FULL = 3;
+/** A lean pack above min(budget, this) shrinks level by level (review detail, then proposed ids, then caps); each drop is named. A typical record renders at level 0 in 600-1,200 tokens. */
+export const LEAN_TARGET_TOKENS = 1500;
+/** The decision rule as the lean pack states it (one sentence in the honesty block; the full DECISION_RULE is in the evidence pack's contract). */
+export const LEAN_DECISION_RULE = "Act only on [in force] Ledger objects and [accepted by <person>] record decisions; superseded, draft, conflicting, [PROPOSED] and agent-confirmed items were not decided by a person.";
 
 export interface RecordPackOpts {
   author: string;
@@ -64,6 +103,12 @@ export interface RecordPackOpts {
   repoPath?: string;
   budgetTokens?: number;
   now?: Date;
+  /** "lean" (default): references, no inline evidence. "evidence": inline event lines, summary text, files, unassigned spans. */
+  detail?: RecordPackDetail;
+  /** ISO time; state updates and events after this instant are hidden (links and contributing sessions are not filtered) */
+  asOf?: string;
+  /** the requesting author; "Changed since your last visit" is computed from their most recent contributing session */
+  viewer?: string;
 }
 
 export interface ContributingSession {
@@ -100,6 +145,14 @@ export interface RecordPack {
   sources: RecordSources;
   omitted: string[];
   text: string;
+  /** which shape was rendered */
+  detail: RecordPackDetail;
+  /** the as-of instant applied to state and events, ISO; null when the pack is current */
+  as_of: string | null;
+  /** what happened after the viewer's last contributing session; totals on a first visit; null without a viewer */
+  changed_since: VisitDelta | null;
+  /** the exact fetches the lean pack points at: one per linked span, plus the last error and the compaction summary */
+  drill_down: string[];
 }
 
 const approxTokens = (s: string) => Math.ceil(s.length / 4);
@@ -185,9 +238,12 @@ async function recordSourceCounts(qq: Q, recordId: string): Promise<Omit<RecordS
 
 export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: string, opts: RecordPackOpts): Promise<RecordPack> {
   const now = opts.now ?? new Date();
+  const detail: RecordPackDetail = opts.detail ?? "lean";
   const budget = opts.budgetTokens ?? 6000;
+  const asOf = parseAsOf(opts.asOf);
+  const upTo = (d: Date | null | undefined) => !asOf || (d != null && d.getTime() <= asOf.getTime());
   const omitted: string[] = [];
-  const state = await recordState(pool, recordId);
+  const state = asOf ? await recordStateAsOf(pool, recordId, asOf) : await recordState(pool, recordId);
   if (!state) throw new Error(`record not found: ${recordId}`);
   const rec = state.record;
   const links = await recordLinks(pool, rec.id);
@@ -241,7 +297,7 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
 
   // ----- decisions in force: explicit ledger_refs plus Ledger objects saved inside the record's spans -----
   const refs = Array.isArray(rec.ledger_refs) ? rec.ledger_refs : [];
-  const saved = await writtenLedgerIds(pool, { recordId: rec.id });
+  const saved = await writtenLedgerIds(pool, { recordId: rec.id }, { asOf });
   const refInputs: LedgerRefInput[] = [...refs.map((r) => ({ id: r.id, version: r.version, source: "explicit" as const })), ...saved.refs];
   const all = refInputs.length ? loadAll(cfg, TYPES) : [];
   const ledgerRefs: LedgerRefStatus[] = ledgerRefStatuses(all, refInputs);
@@ -250,13 +306,17 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
   const reviewImpacts = acceptedRefs.filter(o=>o.supersedes).map(o=>correctionImpact(all,o.id));
 
   // ----- evidence across sessions, ordered by occurred_at, each attributed -----
-  const [evFirst, evLast, evidenceTotal, latestComp] = await Promise.all([
+  const [evFirst, evLastRaw, evidenceTotal, latestCompRaw] = await Promise.all([
     recordEvidence(pool, rec.id, { kinds: ['instruction.added'], limit: EVIDENCE_HEAD, sources: COVERING }),
     recordEvidence(pool, rec.id, { kinds: EVIDENCE_KINDS, limit: 2000, sources: COVERING, order: 'desc' }),
-    recordEvidenceCount(pool, rec.id, EVIDENCE_KINDS, COVERING),
-    recordEvidence(pool, rec.id, { kinds: ['compaction'], limit: 1, sources: COVERING, order: 'desc' }),
+    asOf ? recordEvidenceCountAsOf(pool, rec.id, EVIDENCE_KINDS, COVERING, asOf) : recordEvidenceCount(pool, rec.id, EVIDENCE_KINDS, COVERING),
+    recordEvidence(pool, rec.id, { kinds: ['compaction'], limit: asOf ? 50 : 1, sources: COVERING, order: 'desc' }),
   ]);
-  const evAll = [...new Map([...evFirst, ...evLast].map(e => [e.id, e])).values()].sort((a,b) =>
+  // as-of: events after the instant are dropped from the sampled window (the count above is already as-of)
+  const evTime = (e: { occurred_at: Date | null; received_at: Date }) => e.occurred_at ?? e.received_at;
+  const evLast = evLastRaw.filter((e) => upTo(evTime(e)));
+  const latestComp = latestCompRaw.filter((e) => upTo(evTime(e)));
+  const evAll = [...new Map([...evFirst.filter((e) => upTo(evTime(e))), ...evLast].map(e => [e.id, e])).values()].sort((a,b) =>
     (a.occurred_at ?? a.received_at).getTime() - (b.occurred_at ?? b.received_at).getTime()
       || a.session_id.localeCompare(b.session_id) || a.seq - b.seq);
   if (evidenceTotal > evAll.length) omitted.push(`${evidenceTotal - evAll.length} middle events not loaded; evidence counts cover the full history, file previews cover the sampled window; fetch exact linked spans with ledger_events`);
@@ -312,12 +372,17 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
   const recentFiles = files.filter((f) => f.recent).map(({ path: p, count, last_at }) => ({ path: p, count, last_at }));
 
   // An unfinished operation remains pending even after another contributor becomes active.
-  const pend = (await Promise.all(sessions.map(async (s) => (await pendingOperations(pool, s.session_id))
+  const pendFull = (await Promise.all(sessions.map(async (s) => (asOf ? await pendingOperationsAsOf(pool, s.session_id, asOf) : await pendingOperations(pool, s.session_id))
     .filter((p) => inSpans(s.session_id, p.seq))
-    .map((p) => ({ call_id: p.call_id, tool: p.tool, input: p.input, seq: p.seq, session_id: s.session_id }))))).flat();
-  const errRows = await recordEvidence(pool, rec.id, { kinds: ["tool.finished"], limit: 1, sources: COVERING, order: 'desc', errorsOnly: true });
-  const lastErrRow = errRows.find((e) => e.payload?.is_error || (typeof e.payload?.stderr_preview === "string" && e.payload.stderr_preview)) ?? null;
+    .map((p) => ({ call_id: p.call_id, tool: p.tool, input: p.input, seq: p.seq, session_id: s.session_id, occurred_at: p.occurred_at }))))).flat();
+  const pend: RecordPack["pending_operations"] = pendFull.map(({ occurred_at: _at, ...p }) => p);
+  const errRows = await recordEvidence(pool, rec.id, { kinds: ["tool.finished"], limit: asOf ? 50 : 1, sources: COVERING, order: 'desc', errorsOnly: true });
+  const lastErrRow = errRows.filter((e) => upTo(evTime(e))).find((e) => e.payload?.is_error || (typeof e.payload?.stderr_preview === "string" && e.payload.stderr_preview)) ?? null;
   const lastErr = lastErrRow ? { session_id: lastErrRow.session_id, seq: lastErrRow.seq, payload: lastErrRow.payload } : null;
+  const lastErrFetch = lastErr ? `ledger_events(session_id: ${q(lastErr.session_id)}, after_seq: ${lastErr.seq - 1}, limit: 1, preview_chars: 2000)` : null;
+
+  // ----- changed since the viewer's last visit (lean and evidence alike; the section is rendered in lean) -----
+  const delta: VisitDelta | null = await recordVisitDelta(pool, rec.id, state, pendFull, { viewer: opts.viewer ?? null, excludeSessionId: opts.sessionId ?? null, asOf, kinds: EVIDENCE_KINDS });
 
   // ----- unassigned spans in the contributing sessions -----
   let unassigned: UnassignedSpan[] = [];
@@ -355,12 +420,16 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
 
   // ----- render within budget; softer sections shrink first, each drop named -----
   const stateCap = budget >= STATE_WIDE_BUDGET ? STATE_MAX_PER_KIND_WIDE : STATE_MAX_PER_KIND;
-  const stateFetch = `ledger_record_get(record_id: ${q(rec.id)}${budget < STATE_WIDE_BUDGET ? `, budget_tokens: ${STATE_WIDE_BUDGET}` : ""})`;
+  const stateFetch = `ledger_record_get(record_id: ${q(rec.id)}${budget < STATE_WIDE_BUDGET ? `, budget_tokens: ${STATE_WIDE_BUDGET}` : ""}${detail === "lean" ? `, detail: "evidence"` : ""})`;
+  const evidenceFetch = `ledger_record_get(record_id: ${q(rec.id)}, detail: "evidence")`;
+  const asOfLine = asOf ? `as of ${fmt(asOf)}: state updates and events after this instant are hidden (links and contributing sessions are not filtered).` : null;
   // classifier lag per contributing session: organization into records may trail raw capture; say so
   const lagLines: string[] = [];
+  const lagStats: { session_id: string; cap: number; cls: number }[] = [];
   for (const s of sessions.slice(0, 3)) {
     const cap = (await pool.query<{ m: number }>(`select coalesce(max(seq),0)::int as m from cont_events where session_id = $1`, [s.session_id])).rows[0].m;
     const cls = readProgress(s.session_id)?.last_seq ?? 0;
+    lagStats.push({ session_id: s.session_id, cap, cls });
     lagLines.push(`Classifier: session ${short(s.session_id)} captured through seq ${cap}, classified through seq ${cls}${cap > cls ? ` (lag ${cap - cls} events; later work may be unassigned to any record yet; see ledger_unassigned)` : " (current)"}.`);
   }
 
@@ -370,6 +439,7 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
     L.push(`# Record pack: ${rec.title}`);
     L.push(`record ${rec.id} · ${rec.kind} · ${rec.repo ? `repo ${rec.repo}` : "non-code work"} · status ${rec.status} · created by ${rec.created_by} ${fmt(rec.created_at)} · state v${rec.state_version} · updated ${fmt(rec.updated_at)}`);
     L.push(`goal: ${rec.goal ? oneLine(rec.goal) : "(none recorded)"}`);
+    if (asOfLine) L.push(asOfLine);
     for (const conflict of state.conflicts) L.push(`UNRESOLVED ACCEPTED CONFLICT: ${conflict.update_ids.join(', ')} replace ${conflict.supersedes}. Do not choose by recency; inspect evidence and explicitly resolve.`);
     L.push(`claim: ${claimInfo.note}`);
     L.push(``);
@@ -525,14 +595,135 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
     return { text: L.join("\n"), omitted: om, evidence: evidenceSummary };
   };
 
+  // ----- lean: references, never event lines. Levels shrink state caps and delta detail; each drop named. -----
+  const drill: string[] = [];
+  const spanRefs = [...covering].sort((a, b) => firstIdx(a) - firstIdx(b));
+  for (const l of spanRefs) drill.push(spanFetch(l));
+  if (lastErrFetch) drill.push(lastErrFetch);
+  if (summaryFetch) drill.push(summaryFetch);
+  const errArtifacts = lastErr ? artifactIds(lastErr.payload) : [];
+  // after_seq + limit 1 on one session is already exact; the kinds filter is redundant in the lean pointer
+  const leanSummaryFetch = sessionSummary ? `ledger_events(session_id: ${q(sessionSummary.session_id)}, after_seq: ${sessionSummary.seq - 1}, limit: 1, preview_chars: ${Math.min(sessionSummary.chars, PREVIEW_MAX_CHARS)})` : "";
+  /**
+   * Lean levels (each drop named in Omitted): 0 full lean; 1 accepted-source review reasons clipped, unassigned pointer
+   * moved to Omitted; 2 proposed items as ids, soft confirmed kinds capped at 3, pending inputs and delta detail
+   * clipped; 3 confirmed soft kinds capped at 1, span/pending lists cut to 3. Hard kinds (decisions, blockers)
+   * never lose confirmed items.
+   */
+  const renderLean = (level: number): { text: string; omitted: string[]; evidence: RecordPack["evidence_summary"] } => {
+    const om = [...omitted];
+    const L: string[] = [];
+    L.push(`# Record pack: ${rec.title}`);
+    L.push(`record ${rec.id} · ${rec.kind} · ${rec.repo ? `repo ${rec.repo}` : "non-code work"} · status ${rec.status} · created by ${rec.created_by} ${fmt(rec.created_at)} · state v${rec.state_version} · updated ${ago(rec.updated_at, now)}`);
+    L.push(`goal: ${rec.goal ? oneLine(rec.goal) : "(none recorded)"}`);
+    if (asOfLine) L.push(asOfLine);
+    L.push(`claim: ${claimInfo.note}`);
+    // honesty, compact: sessions; snapshot (+ sources at level 0); the standing rule; classifier lag in one line
+    const sesMax = level >= 2 ? 2 : 6;
+    const sesShown = sessions.slice(0, sesMax);
+    L.push(`Honesty: ${sessions.length ? `${sessions.length} contributing session${sessions.length === 1 ? "" : "s"}: ${sesShown.map((s) => `${short(s.session_id)} (${s.author}, ${harnessName(s.harness)}, last seen ${ago(s.last_seen_at, now)}${s.ended ? ", ended" : ""})`).join("; ")}${sessions.length > sesShown.length ? `; … ${sessions.length - sesShown.length} more` : ""}.` : "no span is linked to this record yet; link one with ledger_record_link."}`);
+    if (sessions.length > sesMax) om.push(`${sessions.length - sesMax} contributing sessions not listed (for budget); ${evidenceFetch}`);
+    L.push(`${!rec.repo ? "Non-code record: no code snapshot applies." : vSnap ? `Code saved through ${fmt(vSnap.at)} (remote-verified; ${vSnap.from}).` : "No verified code snapshot among contributing sessions: treat the code state as unverified."} Claim advisory; nothing inlined, references are exact fetches.`);
+    L.push(LEAN_DECISION_RULE);
+    const lag = lagStats.filter((s) => s.cap > s.cls);
+    if (lag.length) L.push(`Classifier lag: ${lag.map((s) => `${short(s.session_id)} ${s.cap - s.cls}/${s.cap}`).join(", ")} events unclassified (ledger_unassigned).`);
+    L.push(``);
+
+    // state: confirmed first within each kind; proposed in full up to LEAN_PROPOSED_FULL, else count + ids
+    L.push(`## State (v${rec.state_version} · ${state.proposed_count} proposed · ${state.confirmed_count} confirmed)`);
+    for (const conflict of state.conflicts) L.push(`UNRESOLVED ACCEPTED CONFLICT: ${conflict.update_ids.join(', ')} replace ${conflict.supersedes}. Do not choose by recency; inspect evidence and explicitly resolve.`);
+    let anyState = false;
+    const idsOnly: string[] = [];
+    const olderConfirmed: string[] = [];
+    for (const k of STATE_ORDER) {
+      const items = state[k.key];
+      if (!items.length) continue;
+      anyState = true;
+      const accepted = items.filter((u) => u.status === "confirmed");
+      const proposals = items.filter((u) => u.status === "proposed");
+      const accCap = k.hard ? stateCap : level >= 3 ? 1 : level >= 2 ? 3 : stateCap;
+      const accShown = accepted.slice(-accCap);
+      const propFull = level >= 2 ? 0 : LEAN_PROPOSED_FULL;
+      L.push(`### ${k.label} (${items.length})`);
+      for (const u of accShown) L.push(stateLine(u));
+      if (accepted.length > accShown.length) { L.push(`… ${accepted.length - accShown.length} older confirmed ${k.key}, see below`); olderConfirmed.push(`${accepted.length - accShown.length} ${k.key}`); }
+      if (proposals.length) {
+        if (proposals.length <= propFull) for (const u of proposals) L.push(stateLine(u));
+        else {
+          L.push(`- [PROPOSED] ${proposals.length} proposed, accepted by nobody: ${proposals.map((u) => `${short(u.id)} (${u.created_by})`).join(", ")}`);
+          idsOnly.push(`${proposals.length} ${k.key}`);
+        }
+      }
+    }
+    if (!anyState) L.push(`(no state updates yet; propose one with ledger_record_update(record_id: ${q(rec.id)}, action: "propose", …))`);
+    if (idsOnly.length || olderConfirmed.length) {
+      L.push(`Full text of ${[...(idsOnly.length ? [`proposed ${idsOnly.join(", ")}`] : []), ...(olderConfirmed.length ? [`older confirmed ${olderConfirmed.join(", ")}`] : [])].join(" and ")}: ${stateFetch}`);
+      if (idsOnly.length) om.push(`proposed state items shown as ids only (${idsOnly.join(", ")})${level >= 2 ? " for budget" : ""}; ${stateFetch}`);
+      if (olderConfirmed.length) om.push(`older confirmed state items (${olderConfirmed.join(", ")}) shortened for budget; ${stateFetch}`);
+    }
+    L.push(``);
+
+    // decisions in force, compact
+    for (const line of renderDecisionsInForce(ledgerRefs, saved, { compact: true, lean: true })) L.push(line);
+    for (const o of acceptedRefs) {
+      const resolution = resolveAccepted(all, o.id);
+      // one line per accepted source: pin, scope, and its review-impact flags with the reason clipped; ids are not repeated
+      const flags = reviewImpacts.flatMap((i) => [...i.affected.filter((a) => a.id === o.id).map((a) => `NEEDS REVIEW: ${clipTo(a.reason, level >= 1 ? 40 : 80)}`), ...i.incomplete.filter((a) => a.id === o.id).map((a) => `INCOMPLETE IMPACT: ${clipTo(a.reason, level >= 1 ? 40 : 80)}`)]);
+      L.push(`${resolution.status === 'conflict' ? 'CONFLICTING ACCEPTED SOURCE — resolve before reuse' : 'Accepted source'}: ${o.type} ${o.id} @${objectVersion(o).slice(0, 8)}${o.fields.analysis_scope ? "" : " · SCOPE UNKNOWN (ledger_investigation before applying it)"}${flags.length ? ` · ${flags.join(" · ")}` : ""}`);
+    }
+    if (ledgerRefs.length || acceptedRefs.length) om.push(`Ledger object titles${acceptedRefs.length ? ", accepted-source formula/query and impact paths" : ""}; ledger_get / ledger_impact per id`);
+    for (const impact of reviewImpacts) for (const item of [...impact.affected, ...impact.incomplete]) if (!acceptedRefs.some((o) => o.id === item.id)) L.push(`NEEDS REVIEW: ${item.id}; ${item.reason}`);
+    L.push(``);
+
+    // pending / unknown
+    const pendMax = level >= 3 ? 3 : 10;
+    L.push(`## Pending / unknown operations (${pend.length}) — all contributing sessions, inside linked spans`);
+    for (const p of pend.slice(0, pendMax)) L.push(`- session ${short(p.session_id)} seq ${p.seq} ${p.tool}: ${clipTo(oneLine(p.input), level >= 2 ? 80 : 160)}  ← outcome unknown; do not rerun blindly`);
+    if (pend.length > pendMax) { L.push(`… ${pend.length - pendMax} more; ${evidenceFetch}`); om.push(`${pend.length - pendMax} pending operations (list shortened for budget); ${evidenceFetch}`); }
+    L.push(``);
+
+    // changed since your last visit
+    for (const line of renderVisitDelta(delta!, { unit: "record", created: rec.created_at, stateFetch, level: level >= 2 ? 1 : 0 })) L.push(line);
+    L.push(``);
+
+    // bootstrap
+    L.push(`## Bootstrap`);
+    if (!rec.repo) L.push(`non-code record; no worktree`);
+    else if (bootstrap.length) { L.push(`snapshot from ${wip!.from}`); L.push("```\n" + bootstrap.join("\n") + "\n```"); }
+    else L.push(`(no snapshot to check out: no contributing session or thread head carries a verified wip ref)`);
+    L.push(``);
+
+    // drill down: references only
+    L.push(`## Drill down (${evidenceTotal} content events in ${sources.spans} span${sources.spans === 1 ? "" : "s"}; references only)`);
+    const spanMax = level >= 3 ? 3 : 8;
+    spanRefs.slice(0, spanMax).forEach((l) => { const s = sessions.find((x) => x.session_id === l.session_id); L.push(`- ${spanFetch(l)}  · ${s ? `${s.author}/${harnessName(s.harness)}` : short(l.session_id)}`); });
+    if (spanRefs.length > spanMax) { L.push(`- … ${spanRefs.length - spanMax} more spans; ${evidenceFetch}`); om.push(`${spanRefs.length - spanMax} span fetches (list shortened for budget); ${evidenceFetch}`); }
+    if (lastErr) L.push(`- last error (${short(lastErr.session_id)} seq ${lastErr.seq} ${String(lastErr.payload?.tool ?? "")}${errArtifacts.length ? `; artifacts ${errArtifacts.join(", ")} via ledger_artifact_get` : ""}): ${lastErrFetch}`);
+    if (sessionSummary) L.push(`- compaction summary by ${sessionSummary.harness} (${num(sessionSummary.chars)} chars, evidence not memory): ${leanSummaryFetch}`);
+    if (unassignedTotal) {
+      if (level >= 1) om.push(`${unassignedTotal} unassigned span${unassignedTotal === 1 ? "" : "s"} may belong here; ledger_unassigned(session_id: ${q(unassigned[0]?.session_id ?? sessions[0]?.session_id ?? "")})`);
+      else L.push(`- ${unassignedTotal} unassigned span${unassignedTotal === 1 ? "" : "s"} may belong here: ledger_unassigned(session_id: ${q(unassigned[0]?.session_id ?? sessions[0]?.session_id ?? "")})`);
+    }
+    L.push(`- search: ledger_evidence_search(q: "…", record_id: ${q(rec.id)})`);
+    L.push(`- write back: ledger_record_update(record_id, action: "propose", …) with exact evidence (session_id, seq); ledger_record_link your spans.`);
+    om.push(`lean detail omits evidence lines, summary text, files (${files.length}), unassigned spans, source counts, full contract; ${evidenceFetch}`);
+    L.push(``); L.push(`## Omitted for budget or unavailable`); for (const o of om) L.push(`- ${o}`);
+    return { text: L.join("\n"), omitted: om, evidence: { total: evidenceTotal, shown: [], omitted: evidenceTotal ? { count: evidenceTotal, fetch: spanFetches } : null } };
+  };
+
   // shrink the softest sections first: evidence tail and file list, then the summary, then soft state kinds, then details
   let level = 0;
-  let out = render(level);
-  while (approxTokens(out.text) > budget && level < 5) out = render(++level);
+  let out = detail === "lean" ? renderLean(level) : render(level);
+  if (detail === "lean") {
+    // a lean shrink step trades content for omission lines, so a step that does not shrink the text is not adopted
+    while (approxTokens(out.text) > Math.min(budget, LEAN_TARGET_TOKENS) && level < 3) { const next = renderLean(++level); if (approxTokens(next.text) < approxTokens(out.text)) out = next; }
+  }
+  else { while (approxTokens(out.text) > budget && level < 5) out = render(++level); }
 
   return {
     record: rec, state, ledger_refs: ledgerRefs, evidence_summary: out.evidence, session_summary: sessionSummary,
     files, recent_files: recentFiles, pending_operations: pend, last_error: lastErr, unassigned, contributing_sessions: sessions,
     claim: claimInfo, bootstrap, sources, omitted: out.omitted, text: out.text,
+    detail, as_of: asOf ? asOf.toISOString() : null, changed_since: delta, drill_down: drill,
   };
 }

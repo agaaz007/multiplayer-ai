@@ -4,7 +4,10 @@ from pathlib import Path
 from fixtures import ARMS,WORKFLOW,write
 from sequence import inventory
 
-def build(out,seed=42):
+def build(out,seed=42,compact_token_limit=4000):
+    """compact_token_limit: stage C compaction stress. The scored packs use 12000 (fixtures.py); the
+    2026-09-13 Ledger admission was earned on a seed-42 replay at 12000, and on 2026-09-15 a 4000 probe
+    timed out in C while recovering through Ledger. Pass 12000 to match the scored protocol."""
     root=Path(out).resolve();root.mkdir(parents=True,exist_ok=False)
     write(root,'initial-repo/WORKFLOW.md',WORKFLOW)
     write(root,'initial-repo/project.json',{'project':'North readiness pilot','synthetic':True,'development':True,'owner':'Mira'})
@@ -22,7 +25,7 @@ def build(out,seed=42):
     stages=[]
     for stage in 'ABC':
         write(root,f'prompts/{stage}.txt',f'Unscored native readiness stage {stage}. Read WORKFLOW.md and sources/{stage}.json. Use only your assigned product and its native guide.\n'+tasks[stage]+'\n')
-        stress={'interrupt_after_supplier_effect':True} if stage=='B' else {'compact_token_limit':4000} if stage=='C' else {}
+        stress={'interrupt_after_supplier_effect':True} if stage=='B' else {'compact_token_limit':int(compact_token_limit)} if stage=='C' else {}
         stages.append({'id':stage,'delta_dir':f'deltas/{stage}','prompt_file':f'prompts/{stage}.txt','deadline_ms':900000,'stress':stress})
     write(root,'manifest.json',{'schema':'teamwork-pack/v3','track':'engineering','arms':ARMS,'seed':seed,'development':True,'initial_repo_dir':'initial-repo','stages':stages,'files':inventory(root)})
     return root
@@ -32,4 +35,4 @@ def correction(pack):
     return {'source':str(source),'sha256':hashlib.sha256(source.read_bytes()).hexdigest(),'pointer':'/accepted_cap','record_marker':'accepted_cap=24'}
 
 if __name__=='__main__':
-    p=argparse.ArgumentParser();p.add_argument('--out',required=True);p.add_argument('--seed',type=int,default=42);a=p.parse_args();print(build(a.out,a.seed))
+    p=argparse.ArgumentParser();p.add_argument('--out',required=True);p.add_argument('--seed',type=int,default=42);p.add_argument('--compact-token-limit',type=int,default=4000,help='stage C compaction stress; scored packs use 12000');a=p.parse_args();print(build(a.out,a.seed,a.compact_token_limit))

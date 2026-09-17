@@ -55,6 +55,7 @@
 **Effort:** M
 **Priority:** P1
 **Depends on:** 7A baseline arms (eval/teamwork-v3/matrix.py ARMS)
+**Status (2026-09-15, scored):** Bake-off ran and graded (ledger-vs-controls, seed 271, 24/24 stages delivered): on reuse/decision/no-redo all three arms tie; engineering checks identical (5/5, 9/9, 11/11, 12/12); Ledger about 1.7 to 1.9x slower in delivery time. Finding recorded in the Ledger; artifacts under .context/teamwork-v3-bakeoff-20260915/ (EXECUTION-LOG.md has the run history, including four infrastructure faults found and fixed). Unblocked. control-git and handoff-note arms exist end to end (native-controls.mjs, control-readiness.mjs producer for native-readiness.json, closed-form cohort scopes incl. ledger-vs-controls, grade-reuse.py). Disk recomputed: six-arm 10 GiB, products 7.5, controls 5, ledger-vs-controls 6.25 (46 GiB free). First live batch is ledger-vs-controls under .context/teamwork-v3-bakeoff-20260915/ (readiness-2 running; scored roots provisioned). Graphify/GBrain/Supermemory wait on provider routes. Two lessons in EXECUTION-LOG.md there: never edit eval/teamwork-v3/*.{py,mjs,md,json} while a frozen cohort is pending.
 
 ### Clarify API-B response fields and run a stage-B-only rerun
 
@@ -71,6 +72,7 @@
 **Effort:** M
 **Priority:** P1
 **Depends on:** None
+**Status (2026-09-15):** Done. Rerun (5 Ledger, 5 no-memory, one frozen A tree, original wording): GET receipt_id omissions Ledger 0/5 vs control 1/5, within the decision's one-session criterion; finding fnd-20260914-stage-b-only-rerun-from-one-frozen-ledger-a-tree-8bst. API-B clarified afterwards in eval/teamwork-v3/fixtures.py (clarify_api_b): execute returns {id,key,payload,state,receipt_id}; GET /jobs/ID returns the same body. Runner: eval/teamwork-v3/rerun-stage-b.py.
 
 ## Performance
 

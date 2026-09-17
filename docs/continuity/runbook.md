@@ -153,6 +153,37 @@ git push origin --delete refs/wip/<author>/<session>                         # d
 
 Removing `continuity` from `~/.ledger/config.json` disables every continuity feature; the four Ledger object types and hooks keep working as before.
 
+## Embeddings (optional)
+
+Off unless `continuity.embeddings` exists in `~/.ledger/config.json`. Embeddings only generate candidates behind the authority ranking; they never decide which version of a fact is true. Evidence search stays Postgres full-text; `vectorCandidates` adds nearest-neighbour event ids with a cosine score for the ranking to re-order, and returns `[]` (never throws) when unconfigured, when pgvector or the tables are missing, or when the provider fails (logged once, not per call).
+
+```json
+"continuity": {
+  "database_url": "<Neon URL>",
+  "embeddings": {
+    "provider": "openai",
+    "model": "text-embedding-3-small",
+    "dimensions": 1536,
+    "api_key_env": "OPENAI_API_KEY",
+    "kinds": ["instruction.added", "assistant.message", "compaction", "tool.finished"],
+    "max_chars": 4000
+  }
+}
+```
+
+Every key but `provider` has that default; `api_key` may hold the key literally instead of `api_key_env` (file mode 600; no command ever prints it). The helper reads the env var from its own environment, so a launchd-run helper needs the key in the plist or `api_key` in the config. The OpenAI REST endpoint is called with plain `fetch`, 64 inputs per request, retried with backoff on 429/5xx, 45 s hard timeout per attempt.
+
+```
+ledger continuity migrate                 # create extension vector; cont_event_embeddings(vector(dims)) + HNSW cosine index; cont_embedding_failures
+ledger continuity embed --status          # configured? extension installed? embedded / eligible / pending / failures, model, dims, cost of the pending backfill
+ledger continuity embed --backfill --dry-run           # estimate only
+ledger continuity embed --backfill [--limit N] [--since 30d]   # oldest first, 256 per batch, progress with tokens and USD
+```
+
+Cost for the current store: about 32k events, of which the four default kinds with text are the eligible set, at roughly 300 tokens each is about 10M tokens, about USD 0.20 on text-embedding-3-small (USD 0.02 per 1M tokens). `--status` prints the exact figure from the stored text (tokens ≈ chars / 4). The helper embeds only what it uploads in a pass (at most 256 events and 60 s per pass, one batched call per pass, `embedded N events` in the log); everything older is the backfill's job. An event whose embedding the provider rejects lands in `cont_embedding_failures` and is skipped afterwards (`delete from cont_embedding_failures` to retry); a 429/5xx after retries records nothing and the next pass retries.
+
+Neon reports `vector` 0.8.6 available; `migrate` installs it on first run. Changing `model` or `dimensions` is refused by `migrate` with a mismatch error because vectors from different models are not comparable: `drop table cont_event_embeddings, cont_embedding_failures`, then `migrate` and `--backfill` again. `dimensions` must be ≤ 2000 for the HNSW index (text-embedding-3-large: set 1536 or 1024).
+
 ## Honesty statements the product shows
 
 - Code saved through {remote-verified time}; events acknowledged through {time}; later activity may be incomplete.

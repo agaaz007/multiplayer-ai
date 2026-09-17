@@ -4,7 +4,7 @@ import { registerAppTool, registerAppResource, RESOURCE_MIME_TYPE } from "@model
 import { readFile } from "node:fs/promises";
 import { z } from "zod";
 import { loadConfig, loadAll, record, getById, discardDraft, type Config } from "./store.js";
-import { brief, search, similarFindings, renderFull, stats } from "./query.js";
+import { brief, search, similarFindings, renderFull, stats, objectScopeLine } from "./query.js";
 import { AnalyticalDateSchema, AnalysisScopeSchema, ChangeSchema, DecisionSchema, DefinitionSchema, FindingSchema, TYPES, type LedgerObject } from "./schema.js";
 import { correctionImpact, objectVersion, resolveAccepted, verification } from './authority.js';
 import { investigation } from './investigation.js';
@@ -14,15 +14,15 @@ import { validateRecordCoverage, acknowledgeLocalCapture, reconcileSharedCapture
 import { EVIDENCE_URI, ReferenceSchema, evidenceResult, contributionResult } from "./evidence.js";
 import { RECEIPT_GUIDANCE, savedReceipt, receiptText } from "./receipts.js";
 import { continuityConfigured, getPool } from "./continuity/db.js";
-import { listThreads, createThread, getThread, claimThread, releaseClaim, upsertSession, appendEvents } from "./continuity/store.js";
+import { listThreads, createThread, getThread, claimThread, releaseClaim, upsertSession, appendEvents, getSession } from "./continuity/store.js";
 import { buildResumePack, threadLine } from "./continuity/resume.js";
-import { queryEvents, getArtifact, eventLine, EVENTS_DEFAULT_LIMIT, EVENTS_MAX_LIMIT, PREVIEW_CHARS, PREVIEW_MAX_CHARS, ARTIFACT_DEFAULT_CHARS, ARTIFACT_MAX_CHARS } from "./continuity/evidence.js";
+import { queryEvents, getArtifact, eventLine, resolveSessionId, resolveSearchScope, scopeLine, EVENTS_DEFAULT_LIMIT, EVENTS_MAX_LIMIT, PREVIEW_CHARS, PREVIEW_MAX_CHARS, ARTIFACT_DEFAULT_CHARS, ARTIFACT_MAX_CHARS } from "./continuity/evidence.js";
 import { repoRoot, repoIdentity, currentBranch } from "./continuity/shadow.js";
 import { forbiddenSnapshotRoot, localTranscriptExists, resolveHarnessSession } from "./continuity/safety.js";
 import { openThreadsText } from "./continuity/brief.js";
 import { writeBinding, writeSignal } from "./helper/signals.js";
 import { buildRecordPack, listRecordSummaries, recordLine, unassignedLine } from "./continuity/recordpack.js";
-import { addStateUpdate, confirmStateUpdate, createRecord, getRecord, linkSpan, rejectStateUpdate, searchEvents, unassignedSpans, updateRecordMeta } from "./continuity/records.js";
+import { addStateUpdate, asOfRecordSummaries, confirmStateUpdate, createRecord, getRecord, linkSpan, recordsForSession, rejectStateUpdate, searchEvidence, unassignedSpans, updateRecordMeta } from "./continuity/records.js";
 import { acceptanceLabel } from "./continuity/packsections.js";
 
 const text = (s: string) => ({ content: [{ type: "text" as const, text: s }] });
@@ -66,7 +66,7 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
     {
       title: "Search the ledger",
       description:
-        "Search definitions, findings, changes, and decisions by free text. Use it BEFORE running an analysis (has this question been answered?), before attributing a metric move (what shipped?), and before proposing direction (what was decided?). Shows retrieved evidence, not proof of use. If your answer builds on these records, call ledger_show_contribution with the actual record IDs and answer excerpts." + RECEIPT_GUIDANCE,
+        "Search definitions, findings, changes, and decisions by free text. Use it BEFORE running an analysis (has this question been answered?), before attributing a metric move (what shipped?), and before proposing direction (what was decided?). Ranked by authority first (current > draft > superseded), then recency, then lexical score; every hit is labelled current, draft, superseded by <id>, rejected or deprecated, and the first line states the scope searched. Ledger objects are not repo-scoped; filter by author, types, tags. Shows retrieved evidence, not proof of use. If your answer builds on these records, call ledger_show_contribution with the actual record IDs and answer excerpts." + RECEIPT_GUIDANCE,
       _meta: evidenceUi,
       annotations: readOnly,
       inputSchema: {
@@ -74,19 +74,27 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
         types: z.array(z.enum(TYPES)).optional(),
         tags: z.array(z.string()).optional(),
         limit: z.number().int().min(1).max(50).default(10),
-        include_superseded: z.boolean().default(false),
+        include_superseded: z.boolean().default(false).describe("Also return superseded, deprecated and draft objects, each labelled (tier 0 / tier 2)"),
+        author: z.string().optional().describe("Only objects recorded under this author"),
         analysis_scope: AnalysisScopeSchema.partial().optional().describe('Analytical applicability, not a permission boundary'),
         as_of: AnalyticalDateSchema.optional().describe('Effective date for definition/correction resolution'),
       },
     },
-    async ({ query, types, tags, limit, include_superseded, analysis_scope, as_of }) => {
-      const hits = search(cfg, query, { types, tags, limit, includeSuperseded: include_superseded, scope: analysis_scope, asOf: as_of });
-      if (!hits.length) return evidenceResult(`No matches for "${query}". If you go on to answer this, record the finding.`, [], { query });
-      return evidenceResult(
-        hits
-          .map((h) => `[${h.score.toFixed(2)}] ${h.type} ${h.id} — ${h.title}\n    ${(h.fields.result ?? h.fields.formula ?? h.fields.decision ?? h.fields.what ?? "")}\n    Authority: ${h.authority_status}${h.authority_status==='conflict' ? `; competing accepted sources: ${h.authority_current_ids.join(', ')}; do not choose by recency` : ''}${h.authority_warnings.length ? `\n    ${h.authority_warnings.join('\n    ')}` : ''}`)
+    async ({ query, types, tags, limit, include_superseded, author, analysis_scope, as_of }) => {
+      const opts = { types, tags, limit, includeSuperseded: include_superseded, author, scope: analysis_scope, asOf: as_of };
+      const scope = objectScopeLine(opts);
+      const hits = search(cfg, query, opts);
+      const summary = hits.map((h) => ({ id: h.id, type: h.type, authority_tier: h.authority_tier, authority_label: h.authority_label, authority_status: h.authority_status, score: h.score, created: h.created }));
+      if (!hits.length) {
+        const r = evidenceResult(`${scope}\nNo matches for "${query}". If you go on to answer this, record the finding.`, [], { query });
+        return { ...r, structuredContent: { ...r.structuredContent, scope, hits: summary } };
+      }
+      const r = evidenceResult(
+        [scope, ...hits
+          .map((h) => `[tier ${h.authority_tier} · ${h.authority_label}] [${h.score.toFixed(2)}] ${h.type} ${h.id} — ${h.title}\n    ${(h.fields.result ?? h.fields.formula ?? h.fields.decision ?? h.fields.what ?? "")}\n    Authority: ${h.authority_status}${h.authority_status==='conflict' ? `; competing accepted sources: ${h.authority_current_ids.join(', ')}; do not choose by recency` : ''}${h.authority_warnings.length ? `\n    ${h.authority_warnings.join('\n    ')}` : ''}`)]
           .join("\n"), hits, { query }
       );
+      return { ...r, structuredContent: { ...r.structuredContent, scope, hits: summary } };
     }
   );
 
@@ -287,25 +295,41 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
       if (!r.ok) throw new Error(r.error);
       return r.id;
     };
+    // Scope is decided before any query runs: "repo" whenever cwd is given (or explicitly asked for, from the
+    // server's cwd), "all" otherwise. A repo that cannot be resolved is an error, never a silent widening.
+    const scopeOf = (cwd: string | undefined, scope: "repo" | "all" | undefined) => resolveSearchScope({ cwd, scope, fallbackCwd: process.cwd() }, { repoRoot, repoIdentity });
+    const SCOPE = z.enum(["repo", "all"]).optional().describe('"repo": only the repo cwd is in (default when cwd is given); "all": every repo (default without cwd). The first result line states the scope used.');
 
     server.registerTool(
       "ledger_threads",
       {
         title: "Open work threads",
-        description: "List teammates' (and optionally your own) open work threads: goal, last activity, harness, claim holder, verified snapshot age. Use before continuing anyone's work. Pass cwd to see threads on the repo you are in.",
+        description: "List teammates' (and optionally your own) open work threads: goal, last activity, harness, claim holder, verified snapshot age. Use before continuing anyone's work. Pass cwd to see threads on the repo you are in (scope repo); scope \"all\" widens explicitly. The first line states the scope used.",
         inputSchema: {
-          cwd: z.string().optional().describe("A path inside the repo to filter by; defaults to all repos"),
+          cwd: z.string().optional().describe("A path inside the repo to filter by; without it and without scope, all repos"),
+          scope: SCOPE,
           author: z.string().optional(),
+          session_id: z.string().optional().describe("Only the thread this session is bound to (shortened id accepted)"),
           include_own: z.boolean().default(false),
           hours: z.number().int().min(1).max(720).default(72),
           limit: z.number().int().min(1).max(50).default(10),
         },
         annotations: readOnly,
       },
-      async ({ cwd, author, include_own, hours, limit }) => {
-        const root = cwd ? repoRoot(cwd) : null;
-        const rows = await listThreads(pool(), { repo: root ? repoIdentity(root) : undefined, author, excludeAuthor: include_own || author ? undefined : cfg.author, sinceHours: hours, status: "open", limit });
-        return text(rows.length ? rows.map((r) => threadLine(r)).join("\n") : "No open threads match.");
+      async ({ cwd, scope, author, session_id, include_own, hours, limit }) => {
+        try {
+          const sc = scopeOf(cwd, scope);
+          if (sc.error) return text(`ledger_threads refused: ${sc.error}`);
+          const head = scopeLine(sc, { author: author ?? (include_own ? "any" : `any except ${cfg.author}`), extra: [`status open`, `last ${hours}h`] });
+          let rows = await listThreads(pool(), { repo: sc.repo ?? undefined, author, excludeAuthor: include_own || author ? undefined : cfg.author, sinceHours: hours, status: "open", limit });
+          if (session_id) {
+            const sess = await getSession(pool(), (await resolveSessionId(pool(), session_id)).id);
+            rows = rows.filter((r) => sess?.thread_id && r.id === sess.thread_id);
+          }
+          return text([head, ...(rows.length ? rows.map((r) => threadLine(r)) : ["No open threads match."])].join("\n"));
+        } catch (e: any) {
+          return text(`ledger_threads failed: ${e.message}`);
+        }
       }
     );
 
@@ -319,7 +343,7 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
       "ledger_resume",
       {
         title: "Resume a thread or a work record",
-        description: "Continue a teammate's work. Pass thread_id for a thread (one session's worktree and claim) or record_id for a work record (one goal accumulated across sessions and teammates: state with proposed items flagged, evidence from every contributing session in time order, pending operations, contradictions, decisions in force, unassigned spans that may belong, and the bootstrap for the latest snapshot). Both packs list the Ledger decisions the work saved or linked, marked in force, SUPERSEDED, DRAFT or CONFLICT, and label each record decision with how it was accepted. mode=continue claims the thread (advisory; for a record, the thread of its most recent contributing session; a non-code record has no claim) and returns the pack with worktree bootstrap commands; mode=fork (threads only) creates a linked fork you own; mode=inspect reads without claiming. Pass cwd (a checkout of the same repo) to get the diff of what changed since the checkpoint. Your first turn must inspect the worktree, state confirmed vs uncertain progress, act only on decisions in force (never on a superseded, draft, proposed or agent-confirmed one as if a person decided it), and never blindly rerun a pending operation.",
+        description: "Continue a teammate's work. Pass thread_id for a thread (one session's worktree and claim) or record_id for a work record (one goal accumulated across sessions and teammates: state with proposed items flagged, evidence from every contributing session in time order, pending operations, contradictions, decisions in force, unassigned spans that may belong, and the bootstrap for the latest snapshot). Both packs list the Ledger decisions the work saved or linked, marked in force, SUPERSEDED, DRAFT or CONFLICT, and label each record decision with how it was accepted. detail=lean (default) returns the state projection, decisions in force, pending operations, files and bootstrap with the evidence tail omitted and each omission named with the ledger_events / ledger_evidence_search call that fetches it; detail=evidence adds the evidence lines themselves. as_of renders the pack as of that instant (updates confirmed later show as PROPOSED). mode=continue claims the thread (advisory; for a record, the thread of its most recent contributing session; a non-code record has no claim) and returns the pack with worktree bootstrap commands; mode=fork (threads only) creates a linked fork you own; mode=inspect reads without claiming. Pass cwd (a checkout of the same repo) to get the diff of what changed since the checkpoint. Your first turn must inspect the worktree, state confirmed vs uncertain progress, act only on decisions in force (never on a superseded, draft, proposed or agent-confirmed one as if a person decided it), and never blindly rerun a pending operation.",
         inputSchema: {
           thread_id: z.string().optional().describe("Thread to resume; thread_id or record_id is required"),
           record_id: z.string().optional().describe("Work record to resume instead of a thread (from ledger_records or the brief's Open work section)"),
@@ -327,9 +351,13 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
           cwd: z.string().optional().describe("Local checkout of the same repo, for the intervening-change diff"),
           session_id: z.string().optional().describe('Your harness session id; SessionStart prints it as "Ledger session: <id>". Required for continue and fork unless this server can read it from CLAUDE_CODE_SESSION_ID or CODEX_THREAD_ID with a matching local transcript. Without it nothing is claimed or bound.'),
           budget_tokens: z.number().int().min(1500).max(20000).default(6000),
+          detail: z.enum(["lean", "evidence"]).optional().describe("lean (default): state, decisions, pending operations, files, bootstrap; evidence omitted and named. evidence: include the evidence lines"),
+          as_of: z.string().optional().describe("ISO instant; the pack is rendered as of then (later confirmations show as PROPOSED)"),
         },
       },
-      async ({ thread_id, record_id, mode, cwd, session_id, budget_tokens }) => {
+      async ({ thread_id, record_id, mode, cwd, session_id, budget_tokens, detail, as_of }) => {
+        // pack options owned by the pack builders; spread so the call compiles whether or not they accept them yet
+        const packOpts = { detail, asOf: as_of, viewer: cfg.author };
         // argument errors first: they hold whatever the session
         if (!record_id && !thread_id) return text("thread_id or record_id is required.");
         if (record_id && mode === "fork") return text("mode=fork applies to threads; use mode=continue or mode=inspect with record_id (fork the underlying thread with thread_id if you need parallel work).");
@@ -340,7 +368,7 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
         }
         if (record_id && mode !== "fork") {
           try {
-            const pack = await buildRecordPack(cfg, pool(), record_id, { mode, author: cfg.author, sessionId: sid, repoPath: cwd, budgetTokens: budget_tokens });
+            const pack = await buildRecordPack(cfg, pool(), record_id, { mode, author: cfg.author, sessionId: sid, repoPath: cwd, budgetTokens: budget_tokens, ...packOpts });
             if (sid && mode === "continue" && pack.claim.acquired && pack.claim.thread_id) writeBinding(sid, { thread_id: pack.claim.thread_id });
             return text(pack.text);
           } catch (e: any) {
@@ -348,7 +376,7 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
           }
         }
         if (!thread_id) return text("thread_id or record_id is required.");
-        const pack = await buildResumePack(cfg, pool(), thread_id, { mode, author: cfg.author, sessionId: sid, repoPath: cwd, budgetTokens: budget_tokens });
+        const pack = await buildResumePack(cfg, pool(), thread_id, { mode, author: cfg.author, sessionId: sid, repoPath: cwd, budgetTokens: budget_tokens, ...packOpts });
         if (sid && mode !== "inspect" && pack.claim.acquired) writeBinding(sid, { thread_id: pack.fork?.id ?? thread_id });
         return text(pack.text);
       }
@@ -467,23 +495,33 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
       "ledger_records",
       {
         title: "Open work records",
-        description: "List work records: the logical units of work that accumulate across sessions and teammates (a thread is one session's worktree; a record is one goal). One line each: kind · title · repo or non-code · updated · contributing sessions · proposed/confirmed updates · id. Records are cross-author by nature, so nobody is excluded. Pass cwd to see records on the repo you are in; q for a title/goal substring. Continue one with ledger_resume(record_id) or read it with ledger_record_get.",
+        description: "List work records: the logical units of work that accumulate across sessions and teammates (a thread is one session's worktree; a record is one goal). One line each: kind · title · repo or non-code · updated · contributing sessions · proposed/confirmed updates · id. Records are cross-author by nature, so nobody is excluded. Pass cwd to see records on the repo you are in (scope repo); scope \"all\" widens explicitly to every repo and non-code records. q for a title/goal substring; session_id for the records one session contributed to; as_of for counts and state_version as of an instant. The first line states the scope used. Continue one with ledger_resume(record_id) or read it with ledger_record_get.",
         inputSchema: {
-          cwd: z.string().optional().describe("A path inside the repo to filter by; defaults to all repos and non-code records"),
+          cwd: z.string().optional().describe("A path inside the repo to filter by; without it and without scope, all repos and non-code records"),
+          scope: SCOPE,
           kind: z.enum(RECORD_KINDS).optional(),
           status: z.enum(RECORD_STATUSES).default("open"),
           author: z.string().optional().describe("Filter by the record's creator"),
+          session_id: z.string().optional().describe("Only records this session contributed a span to (shortened id accepted)"),
           q: z.string().optional().describe("Case-insensitive substring over title and goal"),
-          hours: z.number().int().min(1).max(24 * 365).default(336).describe("Only records updated within this many hours (default 14 days)"),
+          as_of: z.string().optional().describe("ISO instant: records created later are hidden; proposed/confirmed counts and state_version are evaluated as of then"),
+          hours: z.number().int().min(1).max(24 * 365).default(336).describe("Only records updated within this many hours (default 14 days; measured from now, not as_of)"),
           limit: z.number().int().min(1).max(50).default(15),
         },
         annotations: readOnly,
       },
-      async ({ cwd, kind, status, author, q, hours, limit }) => {
+      async ({ cwd, scope, kind, status, author, session_id, q, as_of, hours, limit }) => {
         try {
-          const root = cwd ? repoRoot(cwd) : null;
-          const rows = await listRecordSummaries(pool(), { repo: root ? repoIdentity(root) : undefined, kind, status, author, q, sinceHours: hours, limit });
-          return text(rows.length ? rows.map((r) => recordLine(r)).join("\n") : "No records match.");
+          const sc = scopeOf(cwd, scope);
+          if (sc.error) return text(`ledger_records refused: ${sc.error}`);
+          const head = scopeLine(sc, { author, asOf: as_of, extra: [`status ${status}`, `last ${hours}h`] });
+          let rows: Array<Parameters<typeof recordLine>[0]> = await listRecordSummaries(pool(), { repo: sc.repo ?? undefined, kind, status, author, q, sinceHours: hours, limit });
+          if (session_id) {
+            const ids = new Set((await recordsForSession(pool(), (await resolveSessionId(pool(), session_id)).id)).map((r) => r.id));
+            rows = rows.filter((r) => ids.has(r.id));
+          }
+          if (as_of) rows = await asOfRecordSummaries(pool(), rows, as_of);
+          return text([head, ...(rows.length ? rows.map((r) => recordLine(r)) : ["No records match."])].join("\n"));
         } catch (e: any) {
           return failed("ledger_records", e);
         }
@@ -494,17 +532,20 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
       "ledger_record_get",
       {
         title: "Work record detail",
-        description: "The full record pack without claiming anything: state projection with [PROPOSED] items flagged and contradictions side by side, contributing sessions and authors, evidence across all of them in time order, the latest compaction summary as evidence, files touched, pending operations from the most recent contributing session, linked Ledger objects with supersession flags, unassigned spans that may belong, and the bootstrap when the record has a repo. Everything omitted for budget is named with the call that fetches it.",
+        description: "The record pack without claiming anything. detail=lean (default): the state projection with [PROPOSED] items flagged and contradictions side by side, decisions in force, contributing sessions and authors, files touched, pending operations from the most recent contributing session, linked Ledger objects with supersession flags, unassigned spans that may belong, and the bootstrap when the record has a repo; the evidence lines are omitted and each omission is named with the ledger_events(session_id, after_seq, …) or ledger_evidence_search(record_id, …) call that fetches it. detail=evidence adds the evidence across every contributing session in time order and the latest compaction summary. as_of renders the pack as of that instant: updates confirmed later show as PROPOSED, later events are excluded.",
         inputSchema: {
           record_id: z.string(),
           budget_tokens: z.number().int().min(1500).max(40000).default(12000).describe("Raise to 20000 to see up to 50 state items per kind"),
           cwd: z.string().optional().describe("Local checkout of the same repo, for the bootstrap rebase target"),
+          detail: z.enum(["lean", "evidence"]).optional().describe("lean (default): state, decisions, pending operations, files, bootstrap; evidence omitted and named. evidence: include the evidence lines"),
+          as_of: z.string().optional().describe("ISO instant; the pack is rendered as of then"),
         },
         annotations: readOnly,
       },
-      async ({ record_id, budget_tokens, cwd }) => {
+      async ({ record_id, budget_tokens, cwd, detail, as_of }) => {
         try {
-          return text((await buildRecordPack(cfg, pool(), record_id, { mode: "inspect", author: cfg.author, repoPath: cwd, budgetTokens: budget_tokens })).text);
+          const packOpts = { detail, asOf: as_of, viewer: cfg.author };
+          return text((await buildRecordPack(cfg, pool(), record_id, { mode: "inspect", author: cfg.author, repoPath: cwd, budgetTokens: budget_tokens, ...packOpts })).text);
         } catch (e: any) {
           return failed("ledger_record_get", e);
         }
@@ -653,24 +694,32 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
       "ledger_evidence_search",
       {
         title: "Full-text search over captured events",
-        description: "Postgres full-text search over captured evidence: human instructions, assistant messages, tool inputs, output previews, and compaction summaries, across every session. Narrow to a record's linked spans (record_id), one session, a repo (cwd), event kinds, or a time window. Returns ranked event lines with session, author, and harness; read one in full with ledger_events(session_id, after_seq, limit: 1, preview_chars) — the shortened session id printed here is accepted there. This searches evidence, not the knowledge ledger; use ledger_search for definitions, findings, changes, and decisions.",
+        description: "Search captured evidence: human instructions, assistant messages, tool inputs, output previews, and compaction summaries. Candidates come from Postgres full-text search plus, when embeddings are configured, a vector list, fused by reciprocal rank fusion; the first line says which (\"lexical + vector\" or \"lexical only\") and the scope used. Ranking is authority first, then recency, then similarity: tier 3 = cited by a CONFIRMED record state update or the result of a successful ledger_record_* call; tier 2 = cited by a PROPOSED update; tier 1 = uncited event; tier 0 = cited only by superseded or rejected updates. Each line ends with [tier N · current | PROPOSED | uncited | superseded by <update id> | rejected]. Scope: cwd (or scope repo) restricts to sessions on that repo and is the default whenever cwd is given; scope \"all\" widens explicitly. Narrow further by record_id (its linked spans), session_id, author, kinds, hours, or as_of (events at or before that instant, update status evaluated as of then). Read one event in full with ledger_events(session_id, after_seq, limit: 1, preview_chars) — the shortened session id printed here is accepted there. This searches evidence, not the knowledge ledger; use ledger_search for definitions, findings, changes, and decisions.",
         inputSchema: {
           q: z.string().min(2),
-          cwd: z.string().optional().describe("A path inside a repo to restrict to sessions on that repo"),
+          cwd: z.string().optional().describe("A path inside a repo to restrict to sessions on that repo (scope repo)"),
+          scope: SCOPE,
           record_id: z.string().optional().describe("Restrict to events inside this record's linked spans"),
           session_id: z.string().optional(),
+          author: z.string().optional().describe("Only sessions by this author"),
           kinds: z.array(z.string()).optional().describe('e.g. ["instruction.added","assistant.message"], ["compaction"], ["tool.requested"]'),
           hours: z.number().int().min(1).max(24 * 365).optional(),
+          as_of: z.string().optional().describe("ISO instant: only events at or before it; an update confirmed after it counts as PROPOSED"),
           limit: z.number().int().min(1).max(200).default(20),
         },
         annotations: readOnly,
       },
-      async ({ q, cwd, record_id, session_id, kinds, hours, limit }) => {
+      async ({ q, cwd, scope, record_id, session_id, author, kinds, hours, as_of, limit }) => {
         try {
-          const root = cwd ? repoRoot(cwd) : null;
-          const rows = await searchEvents(pool(), q, { repo: root ? repoIdentity(root) : undefined, record_id, session_id, kinds, sinceHours: hours, limit });
-          if (!rows.length) return text(`No events match "${q}"${record_id ? ` inside record ${record_id}` : ""}.`);
-          return text(rows.map((e) => `[${e.rank.toFixed(3)}] ${e.session_id.slice(0, 8)} ${e.author}/${e.harness} · ${eventLine(e)}`).join("\n"));
+          const sc = scopeOf(cwd, scope);
+          if (sc.error) return text(`ledger_evidence_search refused: ${sc.error}`);
+          const res = await searchEvidence(pool(), q, { repo: sc.repo ?? undefined, record_id, session_id, author, kinds, sinceHours: hours, asOf: as_of, limit, cfg });
+          const head = scopeLine(sc, { author, asOf: res.as_of, retrieval: res.retrieval + (res.retrieval_note ? ` (${res.retrieval_note})` : ""), extra: [...(record_id ? [`record ${record_id}`] : []), ...(session_id ? [`session ${session_id}`] : [])] });
+          const lines = res.hits.length
+            ? res.hits.map((e) => `[${e.similarity.toFixed(4)}${e.sources.includes("vector") ? (e.sources.includes("lexical") ? " lex+vec" : " vec") : ""}] ${e.session_id.slice(0, 8)} ${e.author}/${e.harness} · ${eventLine(e, undefined, { tier: e.tier, label: e.label })}`)
+            : [`No events match "${q}"${record_id ? ` inside record ${record_id}` : ""}.`];
+          const hits = res.hits.map((e) => ({ event_id: String(e.id), session_id: e.session_id, seq: e.seq, kind: e.kind, at: (e.occurred_at ?? e.received_at)?.toISOString?.() ?? null, author: e.author, tier: e.tier, label: e.label, similarity: e.similarity, rank: e.rank, sources: e.sources, citations: e.citations, ledger_write: e.ledger_write }));
+          return { ...text([head, ...lines].join("\n")), structuredContent: { scope: head, scope_kind: sc.scope, repo: sc.repo, retrieval: res.retrieval, retrieval_note: res.retrieval_note, as_of: res.as_of, hits } };
         } catch (e: any) {
           return failed("ledger_evidence_search", e);
         }

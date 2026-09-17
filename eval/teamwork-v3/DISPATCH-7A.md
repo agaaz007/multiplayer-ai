@@ -151,17 +151,6 @@ python3 eval/teamwork-v3/review-prepare.py --config $BASE/cohort/scored/grade-co
 - Prior product admissions (`$PRIOR/admissions`) were taken against the adapters frozen on 2026-09-13; this dispatch changed shared files (`native-lifecycle.mjs`, `native-setup.mjs`, `native-guides.mjs`, `session-driver.mjs`, `sequence.py`, ...), so `full_harness_pass` receipts for the products must be re-earned by fresh readiness, as protocol.md requires after any adapter change.
 - Provider routes, the reranker and the Supermemory template/scoped-key flow were not restarted or probed in this worktree; step 2 describes them from the prior run's scripts.
 
-## Execution log: 2026-09-15 `ledger-vs-controls` batch
+## First live batch (2026-09-15)
 
-The user's bar for this week is Ledger against "just commit" and "just write a note", so the first live batch is the declared `ledger-vs-controls` scope (`cohort_scope.SCOPES['ledger-vs-controls']`, `prepare_cohort.py --arms ledger-vs-controls`). Graphify, GBrain and Supermemory wait for their provider routes, proxy and reranker to be re-provisioned; nothing about them is inferred from this batch.
-
-Done, deterministic, under `.context/teamwork-v3-bakeoff-20260915/`:
-
-- Runtime is the deployed release `~/.ledger/bin/releases/0.1.0-20260914T203935Z-5364efa-dirty/dist` (the same binary the live helper runs; Ledger native version string `release-0.1.0-20260914T203935Z-5364efa-dirty`).
-- `prepare_cohort.py --arms ledger-vs-controls`: readiness 4.75 GiB, scored 6.25 GiB (per-sequence estimates unchanged).
-- Controls: `native-setup` + `provision` + `control-readiness.mjs probe` for both readiness roots; both receipts `capture_recall_pass: true`, `isolation_pass: true`, `full_harness_pass: false`.
-- Ledger: `provision` created a fresh local database; the transport receipt comes from the release runtime's `selftest-eval-ledger-native.js` (real helper, fixture transcripts, snapshot chain, isolation), retained under `readiness/sequences/ledger/transport-probe/`; `full_harness_pass: false` until the live seed-42 sequence ends and `mechanisms.py` reproduces the record-use chain.
-- `freeze_launches.py` wrote `readiness/matrix-config.json` (three entries, scope carried).
-- API-B was clarified in `fixtures.py` (`clarify_api_b`) AFTER the stage-B rerun under `.context/stage-b-rerun-20260915/` was prepared from immutable pack copies, so the rerun measures the original wording and this cohort's engineering pack carries the clarified one.
-
-Queued: `run_readiness.py` starts automatically when the stage-B rerun process exits (they share the Codex subscription; running them concurrently risked usage-limit failures inside the rerun sample). After readiness: `mechanisms.py` audit for Ledger, `control-readiness.mjs assess` for both controls, controller inspection, then steps 6 to 8 for the six scored roots.
+The `ledger-vs-controls` scope ran to a graded result; the run history, four infrastructure faults found on the way (bare-dist runtime unreadable under the sandbox, missing `ca_file`, empty Ledger allowlist, machine sleep) and the exact fixes are in `.context/teamwork-v3-bakeoff-20260915/EXECUTION-LOG.md`. Requirements that this document did not state before that run: the `runtime` must be a self-contained copy (dist files plus `node_modules` at one level, with `prompts/`, `guides/`, `template/` beside it); every root needs `ca_file`; Ledger roots need `ledger_tool_manifest`; the readiness pack must use `--compact-token-limit 12000` to match the scored protocol; hold the machine awake (`caffeinate -dims`) for the whole run; never edit this directory while a frozen cohort is pending.

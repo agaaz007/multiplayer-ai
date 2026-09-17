@@ -29,6 +29,8 @@ def calls(root,stage,server):
                 'evidence':{'path':str(p.resolve()),'sha256':sha(p),'request_line':n,'response_line':no,'call_id':m['id']}})
     return out
 
+CONFIRMED_LABEL=re.compile(r'^\s*-?\s*\[(confirmed|agent-confirmed\b[^\]]*|accepted by [^\]]+)\]')
+
 def audit(root,correction=None):
     root=Path(root).resolve();state=read(root/'sequence.json')
     result={'schema':'teamwork-mechanism-audit/v3','root':str(root),'arm':state['arm'],
@@ -85,8 +87,10 @@ def audit(root,correction=None):
                 for retrieved in c:
                     ra=retrieved['args'];body=retrieved['body'];sv=re.search(r'\bstate v(\d+)',body)
                     if retrieved['tool'] not in ['ledger_record_get','ledger_resume'] or not retrieved['success'] or ra.get('record_id')!=rid or rid not in body or not sv or int(sv[1])<int(version[1]):continue
-                    # Exact confirmed state line, not PROPOSED, must carry the same text.
-                    if not any('[confirmed]' in line and native_text in line for line in body.splitlines()):continue
+                    # Exact confirmed state line, not PROPOSED, must carry the same text. The runtime labelled
+                    # confirmed lines '[confirmed]' until 2026-09-13; the truthful-acceptance rendering now writes
+                    # '[agent-confirmed for <who> ...; not reviewed by a person]' (or '[accepted by <person>]').
+                    if not any(CONFIRMED_LABEL.match(line) and native_text in line for line in body.splitlines()):continue
                     ids=[x['session_id']for x in [start,proposed,retrieved]]
                     if any(not i for i in ids)or len(set(ids))!=3:continue
                     if not start['response_time']<proposed['request_time']<confirmed['response_time']<retrieved['request_time']:continue

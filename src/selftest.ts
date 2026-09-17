@@ -270,6 +270,28 @@ assert.ok(b.includes("November"), "brief has active decision");
 assert.ok(!b.includes("before December"), "brief hides superseded decision");
 
 assert.ok(search(cfg2, "paywall bandit").some((h) => h.id === chg.id));
+
+// search ranking: authority tier → recency → lexical score, every hit labelled
+{
+  const cur = search(cfg2, "UPI AutoPay");
+  assert.ok(cur.some((h) => h.id === dec2.id) && !cur.some((h) => h.id === dec1.id), "the superseded decision is hidden by default");
+  assert.ok(cur.every((h) => h.authority_tier === 3 && h.authority_label === "current"), "default results are all current");
+  const withOld = search(cfg2, "UPI AutoPay", { includeSuperseded: true });
+  const oldHit = withOld.find((h) => h.id === dec1.id)!;
+  assert.ok(oldHit, "include_superseded returns the superseded decision");
+  assert.equal(oldHit.authority_tier, 0);
+  assert.equal(oldHit.authority_label, `superseded by ${dec2.id}`);
+  assert.ok(withOld.findIndex((h) => h.id === dec2.id) < withOld.indexOf(oldHit), "current precedes superseded whatever the scores");
+  // "iOS trial": f1 scores 2.0 (both terms in its question), chg scores 1.0 (iOS only) but is newer; def scores 1.0 and is oldest
+  const byRecency = search(cfg2, "iOS trial");
+  const ids = byRecency.map((h) => h.id);
+  assert.deepEqual(ids.slice(0, 3), [chg.id, f1.id, def.id], `authority → recency → score: ${ids.join(",")}`);
+  const sc = Object.fromEntries(byRecency.map((h) => [h.id, h.score]));
+  assert.ok(sc[f1.id] > sc[chg.id], "the older object has the higher score and still ranks second");
+  assert.ok(byRecency.every((h) => h.created <= (byRecency[0].created)), "newest current first");
+  assert.deepEqual(search(cfg2, "iOS trial", { author: "rachit" }).map((h) => h.id), [chg.id], "author filter");
+  assert.ok(similarFindings(cfg2, "iOS trial to paid conversion for August")[0]?.id === f1.id, "similarFindings stays relevance-ordered");
+}
 const st = stats(cfg2);
 assert.ok(st.includes("findings: 1"));
 
