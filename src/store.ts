@@ -4,9 +4,9 @@ import os from "node:os";
 import { execFileSync } from "node:child_process";
 import matter from "gray-matter";
 import type { z } from "zod";
-import { DIRS, SCHEMAS, TYPES, type LedgerObject, type LedgerType } from "./schema.js";
+import { DIRS, SCHEMAS, TYPES, type Acceptance, type EvidenceReference, type LedgerObject, type LedgerType } from "./schema.js";
 import { isGeneratedView, regenerateViews } from "./views.js";
-import { validateClaim, validateDependencies, validateEvidenceReferences, validateSupersession } from "./authority.js";
+import { objectVersion, validateClaim, validateDependencies, validateEvidenceReferences, validateSupersession } from "./authority.js";
 
 // ---------- config ----------
 
@@ -451,6 +451,8 @@ export interface RecordResult {
   path: string;
   git: string | null;
   superseded?: string;
+  /** The saved object's content_version (objectVersion of the file as written); the pin a dependency needs. */
+  content_version?: string;
 }
 
 function describe(type: LedgerType, f: Record<string, unknown>): string {
@@ -584,6 +586,8 @@ function persistLocked(
   Object.assign(front, rest);
 
   writeKnowledgeFile(file, matter.stringify(body ? body + "\n" : "", front));
+  const written = parseFile(file);
+  const content_version = written ? objectVersion(written) : undefined;
 
   const touched = [file];
   let superseded: string | undefined;
@@ -611,7 +615,7 @@ function persistLocked(
     `${opts.commitPrefix ?? type}: ${String(title).slice(0, 60)} (${author})`,
     touched.map((p) => path.relative(cfg.ledger_dir, p))
   );
-  return { id, path: file, git, superseded };
+  return { id, path: file, git, superseded, ...(content_version ? { content_version } : {}) };
 }
 
 /** Record a stable object. The full schema applies; an incomplete argument is rejected. */
@@ -622,7 +626,8 @@ export function record(cfg: Config, input: RecordInput): RecordResult {
 }
 
 export interface DraftCapture {
-  method: "transcript_fallback";
+  /** transcript_fallback: extracted from a transcript after live capture failed. query_grain_proposal: proposeFinding. */
+  method: "transcript_fallback" | "query_grain_proposal";
   session: string;
   agent?: string;
   reason: string;
@@ -674,7 +679,7 @@ export function discardDraft(cfg: Config, id: string, reason: string): { id: str
   return withKnowledgeWriteLock(cfg, () => discardDraftLocked(cfg, id, reason));
 }
 
-function discardDraftLocked(cfg: Config, id: string, reason: string): { id: string; git: string | null } {
+function discardDraftLocked(cfg: Config, id: string, reason: string, patch: Record<string, unknown> = {}): { id: string; git: string | null } {
   pull(cfg, true);
   const o = loadAll(cfg, TYPES, false).find((x) => x.id === id);
   if (!o) throw new Error(`not found: ${id}`);
@@ -683,10 +688,181 @@ function discardDraftLocked(cfg: Config, id: string, reason: string): { id: stri
   const d = normalizeYaml(raw.data);
   d.status = "deprecated";
   d.discarded = { by: `human:${cfg.author}`, at: new Date().toISOString(), reason };
+  Object.assign(d, patch);
   writeKnowledgeFile(o.path, matter.stringify(raw.content, d));
   const touched = [o.path, ...regenerateViews(cfg, loadAll(cfg, TYPES, false))];
   const git = commitAndPush(cfg, `discard ${o.type}: ${o.title.slice(0, 60)} (${cfg.author})`, touched.map((p) => path.relative(cfg.ledger_dir, p)));
   return { id, git };
+}
+
+// ---------- query-grain findings: propose (agent) → accept or discard (person) ----------
+
+export interface ProposeFindingInput {
+  population: string;
+  metric: string;
+  window: string | { from: string; to: string };
+  result: string;
+  /** Capture evidence id of the data-tool call the result was read from, exactly as printed: q:<tool_use_id>. */
+  query_ref: string;
+  investigation_record_id?: string;
+  title?: string;
+  caveats?: string[];
+  /** System the call ran against (the data tool's name is fine). Defaults to "unrecorded". */
+  source?: string;
+}
+
+export interface ProposeFindingResult extends RecordResult {
+  title: string;
+  /** The fields as written, for receipts. */
+  fields: Record<string, unknown>;
+}
+
+const ISO_DAY = /\d{4}-\d{2}-\d{2}/g;
+
+/**
+ * {from,to} as given, or the first two ISO dates found in free text ("2026-08-01..2026-08-31",
+ * "2026-08-01 to 2026-08-31"); a single date is a one-day window. Anything else stays unparsed:
+ * data_window is never invented from "last 7 days".
+ */
+export function parseWindow(window: string | { from: string; to: string } | undefined): { from: string; to: string } | null {
+  if (!window) return null;
+  if (typeof window === "object") return window.from && window.to ? { from: window.from, to: window.to } : null;
+  const dates = window.match(ISO_DAY) ?? [];
+  if (!dates.length) return null;
+  const [a, b = a] = dates;
+  return a <= b ? { from: a, to: b } : { from: b, to: a };
+}
+
+const windowText = (w: string | { from: string; to: string }) => (typeof w === "string" ? w : `${w.from}→${w.to}`);
+
+/**
+ * A material data pull proposes a finding at QUERY grain: on this population, this metric, this
+ * window, the result was Y, read from query_ref. It is a DRAFT with stance PROPOSED and is never
+ * accepted here; a person accepts or discards with reviewFinding. The draft carries every field the
+ * strict schema will need at acceptance (question, method, one implicit assumption, claim_type
+ * measurement with reproduce pointing at the retained query), so acceptance re-validates the same
+ * argument rather than inventing one.
+ */
+export function proposeFinding(cfg: Config, input: ProposeFindingInput, capture: { session: string }): ProposeFindingResult {
+  for (const k of ["population", "metric", "result", "query_ref"] as const) {
+    if (typeof input[k] !== "string" || !input[k].trim()) throw new Error(`proposeFinding needs ${k}`);
+  }
+  if (!/^q:.+/.test(input.query_ref)) throw new Error(`query_ref must be a capture evidence id exactly as printed (q:<tool_use_id>), got ${JSON.stringify(input.query_ref)}`);
+  if (!capture?.session?.trim()) throw new Error("proposeFinding needs the caller session for capture_coverage");
+  const win = windowText(input.window);
+  const parsed = parseWindow(input.window);
+  const title = (input.title?.trim() || `${input.metric} · ${input.population} · ${win}: ${input.result}`).replace(/\s+/g, " ").slice(0, 140);
+  // definitions_used only when the metric names a definition that exists; a name alone is not lineage
+  const metricKey = input.metric.trim().toLowerCase();
+  const definition = loadAll(cfg, ["definition"]).find((d) => String(d.fields.metric ?? "").toLowerCase() === metricKey || d.title.toLowerCase() === metricKey);
+  const fields: Record<string, unknown> = {
+    title,
+    question: `What was ${input.metric} for ${input.population} over ${win}?`,
+    result: input.result,
+    population: input.population,
+    metric: input.metric,
+    window: input.window,
+    ...(parsed ? { data_window: parsed } : {}),
+    source: input.source?.trim() || "unrecorded",
+    inputs: [{ source: input.source?.trim() || "unrecorded", population: input.population, ...(parsed ? { window: parsed } : {}), note: `read from retained data-tool call ${input.query_ref}` }],
+    method: `Query-grain proposal: ${input.metric} on ${input.population} over ${win}, read from the retained data-tool call ${input.query_ref}. Proposed by the agent; not reviewed.`,
+    claim_type: "measurement",
+    reproduce: { query_or_artifact: input.query_ref, instructions: `Retained query input for capture evidence ${input.query_ref}: ledger_events(session_id, q: "${input.query_ref}") then ledger_artifact_get.` },
+    assumptions: [{ statement: `The data-tool call ${input.query_ref} returned complete and correct data for ${input.population} over ${win}`, kind: "implicit", evidence: "not independently verified", if_wrong: "changes_conclusion" }],
+    definitions_used: definition ? [String(definition.fields.metric)] : [],
+    caveats: input.caveats ?? [],
+    stance: "PROPOSED",
+    query_ref: input.query_ref,
+    ...(input.investigation_record_id ? { investigation_record_id: input.investigation_record_id } : {}),
+    capture_coverage: [{ session_id: capture.session, evidence_ids: [input.query_ref] }],
+  };
+  const res = recordDraft(cfg, {
+    type: "finding",
+    fields,
+    capture: { method: "query_grain_proposal", session: capture.session, reason: `proposed at query grain from ${input.query_ref}${input.investigation_record_id ? ` in investigation ${input.investigation_record_id}` : ""}` },
+  });
+  const saved = parseFile(res.path);
+  if (saved?.fields.stance !== "PROPOSED" || saved.fields.query_ref !== input.query_ref) throw new Error(`proposal ${res.id} was written without its query-grain fields; schema.ts must accept stance and query_ref`);
+  return { ...res, title, fields };
+}
+
+export interface ReviewFindingOpts {
+  /** The person reviewing. Must be the configured Ledger author; an agent name is refused by the store. */
+  actor: string;
+  /** discard: required. */
+  reason?: string;
+  /** accept: supply when the proposal's window did not map to data_window {from,to}. */
+  window?: { from: string; to: string };
+  /** accept: the retained query artifact for query_ref, if the host located and hash-checked it. */
+  queryEvidence?: { artifact_id: string; sha256: string };
+}
+
+export interface ReviewFindingResult {
+  action: "accept" | "discard";
+  draft_id: string;
+  /** accept: the new stable finding. */
+  id?: string;
+  path?: string;
+  content_version?: string;
+  acceptance?: Acceptance;
+  git: string | null;
+  /** The person who accepted or discarded (cfg.author), never the agent. */
+  by: string;
+  reason?: string;
+}
+
+/** Frontmatter keys that describe how the draft was captured; they do not travel to the accepted finding. */
+const CAPTURE_KEYS = new Set(["capture_method", "source_session", "source_agent", "capture_reason", "discarded"]);
+
+/**
+ * A person's review of a PROPOSED query-grain finding. accept writes a NEW stable finding under
+ * cfg.author with the same fields, stance accepted, supersedes the draft, and an acceptance pinned
+ * to the draft's content_version (role review) plus, when located, the retained query artifact
+ * (role query); the draft is deprecated through the normal supersession path. discard keeps the
+ * draft as a discarded cut: deprecated, stance discarded, discarded {by, at, reason}. Anything
+ * that is not a PROPOSED draft is refused; acceptance is never automatic.
+ */
+export function reviewFinding(cfg: Config, id: string, action: "accept" | "discard", opts: ReviewFindingOpts): ReviewFindingResult {
+  if (opts.actor !== cfg.author) throw new Error(`reviewFinding actor must be the configured Ledger author (${cfg.author}); a review is a person's act`);
+  const draft = loadAll(cfg).find((o) => o.id === id);
+  if (!draft) throw new Error(`not found: ${id}`);
+  if (draft.type !== "finding") throw new Error(`${id} is a ${draft.type}; only query-grain findings are reviewed here`);
+  if (draft.status !== "draft" || draft.fields.stance !== "PROPOSED") {
+    throw new Error(`${id} is ${draft.status}${draft.fields.stance ? ` with stance ${draft.fields.stance}` : ""}, not a PROPOSED draft; nothing to ${action}${draft.superseded_by ? ` (already superseded by ${draft.superseded_by})` : ""}`);
+  }
+  if (action === "discard") {
+    const reason = opts.reason?.trim() ?? "";
+    if (!reason) throw new Error("discard requires a non-empty reason; the discarded cut keeps it");
+    const r = withKnowledgeWriteLock(cfg, () => discardDraftLocked(cfg, id, reason, { stance: "discarded" }));
+    return { action, draft_id: id, git: r.git, by: cfg.author, reason };
+  }
+  const version = objectVersion(draft);
+  const carried = Object.fromEntries(Object.entries(draft.fields).filter(([k]) => !CAPTURE_KEYS.has(k)));
+  const data_window = (carried.data_window as { from: string; to: string } | undefined) ?? opts.window;
+  if (!data_window) {
+    throw new Error(`cannot accept ${id}: its window ${JSON.stringify(draft.fields.window ?? "")} did not map to data_window {from, to}. Pass window: {from, to} with the accept, or discard it with a reason and re-propose with explicit dates.`);
+  }
+  const evidence_refs: EvidenceReference[] = [{ artifact_id: draft.id, sha256: version, role: "review" }];
+  if (opts.queryEvidence) evidence_refs.push({ artifact_id: opts.queryEvidence.artifact_id, sha256: opts.queryEvidence.sha256, role: "query" });
+  const acceptance: Acceptance = {
+    actor: cfg.author,
+    accepted_at: new Date().toISOString(),
+    expected_predecessor: { id: draft.id, version },
+    evidence_refs,
+  };
+  const fields: Record<string, unknown> = {
+    ...carried,
+    title: draft.title,
+    tags: draft.tags,
+    body: draft.body,
+    data_window,
+    status: "stable",
+    stance: "accepted",
+    supersedes: draft.id,
+    acceptance,
+  };
+  const res = record(cfg, { type: "finding", fields });
+  return { action, draft_id: id, id: res.id, path: res.path, content_version: res.content_version, acceptance, git: res.git, by: cfg.author };
 }
 
 // ---------- init ----------
