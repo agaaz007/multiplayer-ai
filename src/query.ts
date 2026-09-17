@@ -192,9 +192,33 @@ export function search(cfg: Config, query: string, opts: SearchOpts = {}): Autho
   return selected;
 }
 
-/** Findings that answer a similar question. This is the rework-killer. Relevance-ordered: a recent weak match must not crowd out the near-duplicate. */
-export function similarFindings(cfg: Config, question: string, limit = 5) {
-  return search(cfg, question, { types: ["finding"], limit: 50 }).filter((o) => o.score >= 0.5).sort((a, b) => b.score - a.score || compareHits(a, b)).slice(0, limit);
+export type SimilarFindingHit = AuthoritySearchHit & { similarity: number };
+
+export interface SimilarOpts {
+  /** The pending record's analysis_scope, when it declares one. A candidate that declares a different scope is dropped: same words, different population. */
+  scope?: unknown;
+  /** Minimum {@link questionSimilarity}. Defaults to {@link RELATED_QUESTION}. */
+  threshold?: number;
+}
+
+/**
+ * Findings that answer a similar question. This is the rework-killer, so it is ordered by similarity
+ * and capped: the write path shows these to an author who is about to record, and a list padded with
+ * everything that shares the word "trial" is a list nobody reads.
+ *
+ * Candidates come from `search`, which applies the authority projection, so a superseded or discarded
+ * finding is never offered as the thing to supersede. They are then re-scored with
+ * {@link questionSimilarity}; `hit.score` stays the lexical relevance `search` computed.
+ */
+export function similarFindings(cfg: Config, question: string, limit = 5, opts: SimilarOpts = {}): SimilarFindingHit[] {
+  const idf = idfOver(loadAll(cfg, ["finding"]).map(claimText));
+  // No candidate cap: ranked by authority then recency, a 50-hit page is the 50 newest weak matches,
+  // and the near-duplicate from three months ago — the one worth superseding — falls off the end.
+  return search(cfg, question, { types: ["finding"], limit: Number.MAX_SAFE_INTEGER })
+    .map((h) => ({ ...h, similarity: questionSimilarity(question, claimText(h), idf) }))
+    .filter((h) => h.similarity >= (opts.threshold ?? RELATED_QUESTION) && !scopesConflict(opts.scope, h.fields.analysis_scope))
+    .sort((a, b) => b.similarity - a.similarity || compareHits(a, b))
+    .slice(0, limit);
 }
 
 // ---------- rendering ----------
@@ -362,15 +386,19 @@ export function stats(cfg: Config, days = 14): string {
   const authors = new Map<string, number>();
   for (const o of recent) authors.set(o.author, (authors.get(o.author) ?? 0) + 1);
 
-  // near-duplicate findings: same question asked twice within the window
+  // near-duplicate findings: same question asked twice within the window. IDF over every finding
+  // ever recorded, so a word's weight does not swing with what happened to be asked this fortnight.
   const findings = recent.filter((o) => o.type === "finding");
+  const idf = idfOver(all.filter((o) => o.type === "finding").map(claimText));
   const dupes: string[] = [];
   for (let i = 0; i < findings.length; i++) {
     for (let j = i + 1; j < findings.length; j++) {
       const a = findings[i], b = findings[j];
       if (a.author === b.author) continue;
-      if (score(String(a.fields.question), b) >= 0.6) {
-        dupes.push(`  ${a.id} (${a.author}) ~ ${b.id} (${b.author})`);
+      if (scopesConflict(a.fields.analysis_scope, b.fields.analysis_scope)) continue;
+      const similarity = questionSimilarity(claimText(a), claimText(b), idf);
+      if (similarity >= NEAR_DUPLICATE) {
+        dupes.push(`  ${a.id} (${a.author}) ~ ${b.id} (${b.author})  [question similarity ${similarity.toFixed(2)}]`);
       }
     }
   }
