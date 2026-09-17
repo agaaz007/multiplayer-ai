@@ -15,7 +15,8 @@ function canonical(value: unknown): string {
   return JSON.stringify(value) ?? "null";
 }
 
-function scopeIdentity(value: unknown): string {
+/** Scope identity ignoring the window: two results over different windows still measure the same thing. */
+export function scopeIdentity(value: unknown): string {
   if (!value || typeof value !== "object") return canonical(null);
   const { window: _window, ...identity } = value as Record<string, unknown>;
   return canonical(identity);
