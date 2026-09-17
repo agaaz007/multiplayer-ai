@@ -149,8 +149,14 @@ assert.ok(!shared.some((h) => h.id === unrelated.id), "shared vocabulary is not 
 assert.ok(shared.every((h) => h.similarity >= RELATED_QUESTION), "every hit clears the similarity bar it is ranked by");
 
 // A declared scope that disagrees settles it whatever the wording shares: same metric, different population.
-const androidScope = { product: "HiAstro", dataset: "postgres", environment: "production", metric: "trial_to_paid_cvr",
+const androidScope = { product: "HiAstro", dataset: "postgres", environment: "production", metric: "android_trial_to_paid_cvr",
   population: "Android IN users", grain: "user", attribution_rule: "paid within 14 days" };
+const androidDef = record(cfg, {
+  type: "definition",
+  fields: { title: "Android trial to paid conversion", metric: "android_trial_to_paid_cvr",
+    formula: "paid within 14 days / trials started", source: "postgres.subscriptions", owner: "agaaz",
+    valid_from: "2026-08-01", analysis_scope: androidScope },
+});
 const scoped = record(cfg, {
   type: "finding",
   fields: {
@@ -162,8 +168,8 @@ const scoped = record(cfg, {
     method: "Cohort by trial start date; paid within 14 days over trials started.",
     assumptions: [{ statement: "postgres.subscriptions is complete for August", kind: "implicit", if_wrong: "changes_conclusion" }],
     analysis_scope: androidScope,
-    definitions_used: ["trial_to_paid_cvr"],
-    dependencies: [{ relation: "uses-definition", id: def.id, version: objectVersion(getById(cfg, def.id)!) }],
+    definitions_used: ["android_trial_to_paid_cvr"],
+    dependencies: [{ relation: "uses-definition", id: androidDef.id, version: objectVersion(getById(cfg, androidDef.id)!) }],
     confidence: "high",
   },
 });
