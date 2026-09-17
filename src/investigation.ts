@@ -1,6 +1,6 @@
 import { loadAll, type Config } from './store.js';
 import { TYPES, type LedgerObject } from './schema.js';
-import { score, renderFull, matchesDiscoveryScope } from './query.js';
+import { score, renderFull, matchesDiscoveryScope, claimText, idfOver, questionSimilarity, NEAR_DUPLICATE } from './query.js';
 import { matchesAnalysisScope, objectVersion, resolveAccepted, correctionImpact, dependents, sameAnalyticalScope, snapshotIdentity, snapshotsDiffer, verification, type ScopeQuery } from './authority.js';
 
 export interface InvestigationOptions {
@@ -78,6 +78,7 @@ export function analyticalContext(objects: LedgerObject[], opts: InvestigationOp
     return Boolean(x && y && x.from.slice(0,10)===y.from.slice(0,10) && x.to.slice(0,10)===y.to.slice(0,10));
   };
   const claims = current.filter(o=>o.type==='finding');
+  const idf = idfOver(objects.filter(o=>o.type==='finding').map(claimText));
   // Grouped, not pairwise: five mutually competing claims are one question for a person to settle,
   // and emitting ten pair warnings would spend the successor's context saying it ten times.
   const parent = new Map<string,string>();
@@ -88,7 +89,7 @@ export function analyticalContext(objects: LedgerObject[], opts: InvestigationOp
     const [a,b] = [claims[i],claims[j]];
     if (lineage.get(a.id) && lineage.get(a.id)===lineage.get(b.id)) continue;
     if (!sameAnalyticalScope(a,b) || !sameWindow(a,b)) continue;
-    if (Math.min(score(String(a.fields.question ?? ''),b), score(String(b.fields.question ?? ''),a)) < 0.5) continue;
+    if (questionSimilarity(claimText(a), claimText(b), idf) < NEAR_DUPLICATE) continue;
     if (snapshotsDiffer(a,b)) { rereads.add(a.id); rereads.add(b.id); }
     parent.set(find(a.id), find(b.id));
   }

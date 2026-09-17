@@ -8,7 +8,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { initLedger, loadConfig, loadAll, record, getById, commitAndPush, pull, recordDraft, discardDraft, ledgerHome, type Config } from "./store.js";
 import { findCandidates, parseDrafts, reconcile, pendingDrafts } from "./extract.js";
 import { findTranscript, parseTranscript, evidenceText } from "./transcript.js";
-import { brief, search, similarFindings, stats, renderFull } from "./query.js";
+import { brief, search, similarFindings, stats, renderFull, score, claimText, idfOver, questionSimilarity, scopesConflict, RELATED_QUESTION } from "./query.js";
 import { regenerateViews } from "./views.js";
 import { agentRulesText, installGuides, upsertHooks, HOOK_EVENTS, isLedgerHookCommand, gitWorktreeOf, installSource, assertStableInstallSource, RELEASES_DIR } from "./install.js";
 import { handleHook, loadJournal, saveJournal, captureStats, debt, isMaterialPull, GATE_TEXT, materialQueries } from "./hooks.js";
@@ -125,6 +125,7 @@ const cfg2 = loadConfig();
 const sim = similarFindings(cfg2, "iOS trial to paid conversion for August");
 assert.equal(sim.length, 1, "similar finding should be detected");
 assert.equal(sim[0].id, f1.id);
+
 
 const chg = record(cfg2, {
   type: "change",
@@ -1086,6 +1087,62 @@ const boxed = runGet(["--box"]);
 assert.ok(boxed.startsWith("+ Ledger") && boxed.includes("# Trial CVR August"));
 assert.ok(!boxed.includes("\u001b"), "plain terminal output has no color escapes");
 assert.equal(runGet(["--box", "--plain"]), piped, "plain mode overrides the box");
+
+// ---------- duplicate detection: shared vocabulary is not the same question ----------
+// A near-duplicate used to be measured by scoring one question against the *whole* other record —
+// its tables, its method, its assumptions, its SQL — with a title bonus that carried the total past
+// 1.0 and no penalty for the other side being about something else. On the pilot ledger that called
+// 3,629 of 21,528 finding pairs near-duplicates. Questions are now compared to questions, symmetric
+// and IDF-weighted, so the words every finding in a ledger shares cannot carry a match.
+{
+  const dupDir = fs.mkdtempSync(path.join(os.tmpdir(), "ledger-dup-"));
+  const dupCfg: Config = { ledger_dir: path.join(dupDir, "knowledge"), author: "agaaz", git_sync: false };
+  const finding = (title: string, question: string, patch: Record<string, unknown> = {}) =>
+    record(dupCfg, { type: "finding", fields: { title, question, result: "recorded for the comparison",
+      data_window: { from: "2026-08-01", to: "2026-08-31" }, inputs: [{ source: "postgres.subscriptions" }],
+      method: "Cohort by trial start date; paid within 14 days over trials started.",
+      assumptions: [{ statement: "postgres.subscriptions is complete for August", kind: "implicit", if_wrong: "changes_conclusion" }],
+      confidence: "high", ...patch } });
+
+  const asked = finding("Trial CVR August", "What was trial to paid conversion in August for iOS?");
+  // Same subject, same month, same platform, same tables — and a different question.
+  const elsewhere = finding("App Store review latency", "How long did App Store review take for the August releases?", {
+    inputs: [{ source: "postgres.subscriptions", population: "iOS trial to paid conversion cohort, August" }],
+    method: "Median approval minus submission over August iOS trial-cohort releases; paid conversion is not read.",
+  });
+  for (const filler of ["Which August iOS build shipped the paywall copy change?", "How many support tickets mentioned the August paywall?"])
+    finding(filler.slice(0, 40), filler);
+
+  const q = "iOS trial to paid conversion for August";
+  const hits = similarFindings(dupCfg, q);
+  assert.deepEqual(hits.map((h) => h.id), [asked.id], "the same question is the only hit");
+  assert.ok(score(q, getById(dupCfg, elsewhere.id)!) >= 0.5, "the old measure still rates the unrelated record a duplicate");
+  assert.ok(hits.every((h) => h.similarity >= RELATED_QUESTION), "every hit clears the bar it is ranked by");
+
+  // Symmetric: a long record cannot out-match a short one by having more words to hit.
+  const idf = idfOver([asked, elsewhere].map((o) => claimText(getById(dupCfg, o.id)!)));
+  const [a, b] = [claimText(getById(dupCfg, asked.id)!), claimText(getById(dupCfg, elsewhere.id)!)];
+  assert.equal(questionSimilarity(a, b, idf), questionSimilarity(b, a, idf));
+  assert.ok(questionSimilarity(a, a, idf) > 0.999, "a question is its own duplicate");
+
+  // A declared scope that disagrees settles it whatever the wording shares.
+  const androidScope = { product: "HiAstro", dataset: "postgres", environment: "production", metric: "android_trial_to_paid_cvr",
+    population: "Android IN users", grain: "user", attribution_rule: "paid within 14 days" };
+  assert.ok(scopesConflict(androidScope, { ...androidScope, population: "iOS US users" }));
+  assert.ok(!scopesConflict(androidScope, undefined), "an undeclared scope is unknown, never a mismatch");
+  const androidDef = record(dupCfg, { type: "definition", fields: { title: "Android trial to paid conversion",
+    metric: "android_trial_to_paid_cvr", formula: "paid within 14 days / trials started", source: "postgres.subscriptions",
+    owner: "agaaz", valid_from: "2026-08-01", analysis_scope: androidScope } });
+  const androidQ = "What was trial to paid conversion in August for Android?";
+  const scoped = finding("Trial CVR August, Android IN", androidQ, { analysis_scope: androidScope,
+    definitions_used: ["android_trial_to_paid_cvr"],
+    dependencies: [{ relation: "uses-definition", id: androidDef.id, version: objectVersion(getById(dupCfg, androidDef.id)!) }] });
+  assert.ok(similarFindings(dupCfg, androidQ).some((h) => h.id === scoped.id), "found when no scope is supplied");
+  assert.ok(similarFindings(dupCfg, androidQ, 5, { scope: androidScope }).some((h) => h.id === scoped.id), "and when the scopes agree");
+  assert.ok(!similarFindings(dupCfg, androidQ, 5, { scope: { ...androidScope, population: "iOS US users" } }).some((h) => h.id === scoped.id),
+    "a candidate that declares a different population is dropped: same words, not the same answer");
+  fs.rmSync(dupDir, { recursive: true, force: true });
+}
 
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log("selftest: ok");
