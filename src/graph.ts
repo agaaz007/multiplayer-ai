@@ -314,7 +314,11 @@ export function buildGraph(cfg: Config, opts: GraphOpts = {}): Graph {
       adjacency.set(e.from, [...(adjacency.get(e.from) ?? []), e.to]);
       adjacency.set(e.to, [...(adjacency.get(e.to) ?? []), e.from]);
     }
-    const depth = opts.depth ?? (opts.id ? 2 : 1);
+    // Defaults per selection, because the useful neighbourhood differs. An ego graph wants two hops.
+    // A conflict wants one: the shared predecessor is most of the story, as the heads alone do not
+    // show that they replace the same record. An unpinned-definition set wants none: it is a list of
+    // 60+ findings in a real ledger, and expanding it produces a hairball that answers nothing.
+    const depth = opts.depth ?? (opts.id ? 2 : opts.conflictsOnly ? 1 : 0);
     const reached = new Set<string>(seeds.filter((s) => byNodeId.has(s)));
     let frontier = [...reached];
     for (let d = 0; d < depth && frontier.length; d++) {
