@@ -6,6 +6,7 @@ import { repoIdentity, repoRoot } from "./shadow.js";
 import { takeLocalNotifications } from "../helper/signals.js";
 import { unassignedSpans } from "./records.js";
 import { listRecordSummaries, recordLine, unassignedLine } from "./recordpack.js";
+import { investigationLine, listInvestigations } from "./investigations.js";
 
 /**
  * The "Open threads" section for SessionStart and `ledger brief`. Teammates'
@@ -40,11 +41,43 @@ export async function openThreadsText(cfg: Config, opts: { cwd?: string; hours?:
       out.push(`Teammates' work you can continue. Continue with ledger_resume(thread_id, mode: "continue"); explore in parallel with mode: "fork"; read only with mode: "inspect". A claim is advisory and protects the shared record, not the other machine.`);
       for (const r of rows) out.push(threadLine(r));
     }
+    // Open investigations sit before the work records: an analysis session must bind to one (or declare a new
+    // question) before its first data query, whatever repo it is in, or none.
+    const investigations = await openInvestigationsText(cfg, { timeoutMs: opts.timeoutMs });
+    if (investigations) {
+      if (out.length) out.push(``);
+      out.push(investigations);
+    }
     const records = await openWorkText(cfg, { cwd: opts.cwd, timeoutMs: opts.timeoutMs });
     if (records) {
       if (out.length) out.push(``);
       out.push(records);
     }
+    return out.join("\n");
+  })();
+  const timeout = new Promise<string>((res) => setTimeout(() => res(""), opts.timeoutMs ?? 4000));
+  try { return await Promise.race([work, timeout]); } catch { return ""; }
+}
+
+/** The contract sentence under "Open investigations"; the hooks' gate and Stop block name the same three tools. */
+export const INVESTIGATIONS_CONTRACT = `Analysis sessions must bind to one of these or declare a new question before running data queries (ledger_investigations / ledger_investigation_bind / ledger_investigation_new). Non-repo work is fine; do not proceed as just a thread on this repo.`;
+
+/**
+ * "## Open investigations (all repos, last N days)": open `investigation` work records from every repo and
+ * from no repo, newest first, one line each (title · created_by · updated · proposed/confirmed · bound sessions
+ * · id), followed by the bind-or-declare contract. Empty string when there are none (the contract still applies:
+ * ledger_investigation_new declares the first). Fails open like the other sections.
+ */
+export async function openInvestigationsText(cfg: Config, opts: { hours?: number; limit?: number; timeoutMs?: number; now?: Date } = {}): Promise<string> {
+  if (!continuityConfigured(cfg)) return "";
+  const hours = opts.hours ?? 24 * 14;
+  const limit = opts.limit ?? 8;
+  const now = opts.now ?? new Date();
+  const work = (async () => {
+    const { items } = await listInvestigations(getPool(cfg), cfg, { hours, limit });
+    if (!items.length) return "";
+    const out = [`## Open investigations (all repos, last ${Math.round(hours / 24)} days)`, INVESTIGATIONS_CONTRACT];
+    for (const it of items) out.push(investigationLine(it, now));
     return out.join("\n");
   })();
   const timeout = new Promise<string>((res) => setTimeout(() => res(""), opts.timeoutMs ?? 4000));
