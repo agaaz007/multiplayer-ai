@@ -536,6 +536,21 @@ hook("SessionEnd", { reason: "other" }, T(17));
   assert.ok(!bh("Stop", {}, T(47)).stdout, "nothing owed after the draft");
 }
 
+// ---- an incidental material probe dismissed with a reason must not force a bind (2026-09-17) ----
+{
+  const pdir = path.join(tmp, "sessions-probe");
+  const psid = "sess-probe";
+  const ph = (event: string, input: any, at: string) => handleHook(event, { session_id: psid, cwd: "/w", ...input }, { dir: pdir, now: new Date(at) });
+  ph("SessionStart", { source: "startup" }, T(50));
+  const probe = ph("PostToolUse", { tool_use_id: "t_p1", tool_name: "Bash", tool_input: "psql \"$URL\" -Atc 'select 1'", tool_response: "1\n" }, T(51));
+  assert.ok(probe.stdout && probe.stdout.includes("not bound"), "a connectivity probe with a digit is (conservatively) material and gates once");
+  const pj = loadJournal(psid, pdir);
+  const qid = pj.entries.find((e) => e.kind === "query")!.evidence_id!;
+  const cov = [{ session_id: psid, evidence_ids: [qid] }];
+  ph("PostToolUse", { tool_name: "mcp__ledger__ledger_skip_record", tool_input: { reason: "connectivity probe, no analysis", capture_coverage: cov }, tool_response: { structuredContent: { capture_ack: { schema: "ledger-capture/v1", action: "skip", status: "dismissed", coverage: cov, reason: "connectivity probe, no analysis" } } } }, T(52));
+  assert.ok(!ph("Stop", {}, T(53)).stdout, "dismissed probe: no debt and no unbound block, so the turn may end without binding");
+}
+
 // the pilot can read all of it
 const cap = captureStats(365, jdir).join("\n");
 assert.ok(cap.includes("queries 4") && cap.includes("records 1") && cap.includes("0 unprompted, 1 after a checkpoint"), cap);
