@@ -208,6 +208,17 @@ async function requireRecord(q: Q, id: string): Promise<WorkRecord> {
 
 // ---------- records ----------
 
+/**
+ * Every open investigation, any repo. The classifier's anti-twin lookup needs this rather than its own
+ * candidate list: candidates are capped and scoped to `repo = $1 or repo is null`, so the same analytical
+ * question opened while working in another repo is invisible and becomes a new record instead of a link.
+ */
+export async function openInvestigations(q: Q): Promise<WorkRecord[]> {
+  return (await q.query<WorkRecord>(
+    `select * from cont_records where kind = 'investigation' and status = 'open' order by updated_at desc limit 500`
+  )).rows;
+}
+
 export async function createRecord(q: Q, r: { kind: RecordKind; title: string; goal?: string | null; repo?: string | null; created_by: string; ledger_refs?: { id: string; version?: string }[] }): Promise<WorkRecord> {
   assertOneOf(RECORD_KINDS, r.kind, "record kind");
   const title = requireText(r.title, "record title", TITLE_MAX);
