@@ -744,6 +744,15 @@ const byT = (hits: Awaited<ReturnType<typeof R.searchEvents>>) => Object.fromEnt
   const redeclare = await I.declareInvestigation(pool, cfgA, { question: "Why did iOS trial CVR drop in September?", session_id: "agaaz-claude-pm-3" });
   assert.notEqual(redeclare.record_id, dec.record_id, "a closed investigation does not block the same question being reopened as a new record");
   void upd;
+  // the brief: "## Open investigations" with the contract sentence, before "## Open work (records)"
+  const B = await import("./continuity/brief.js");
+  const inv = await B.openInvestigationsText(cfg, {});
+  assert.ok(inv.startsWith("## Open investigations (all repos, last 14 days)\n" + B.INVESTIGATIONS_CONTRACT + "\n"), inv.split("\n").slice(0, 2).join(" | "));
+  assert.ok(inv.includes(`· rachit · updated `) && inv.includes(`· 2 bound sessions · demo · ${dec2.record_id}`) && !inv.includes(dec.record_id), inv);
+  for (const name of ["ledger_investigations", "ledger_investigation_bind", "ledger_investigation_new", "before running data queries"]) assert.ok(B.INVESTIGATIONS_CONTRACT.includes(name));
+  const start = await B.openThreadsText(cfg, {});
+  assert.ok(start.includes("## Open investigations (all repos") && start.includes("## Open work (records)") && start.indexOf("## Open investigations") < start.indexOf("## Open work (records)"), "SessionStart context lists open investigations before open work");
+  ok("brief: Open investigations section (title · author · updated · proposed/confirmed · bound sessions · repo · id) with the bind-or-declare contract, placed before Open work (records)");
   ok("listInvestigations: all repos incl. repo-null, match ranking over title/goal/confirmed state then updated_at desc, author/limit filters, closed ones excluded; compact text carries ids and the bind-or-declare instruction");
 }
 
