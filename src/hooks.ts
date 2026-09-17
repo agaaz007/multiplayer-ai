@@ -360,11 +360,52 @@ function decisionsResolve(d: JournalEntry[]): string {
     `Rejecting the proposal with ledger_record_update(action: "reject") also settles it. Use the d: ID in capture_coverage.`;
 }
 
+/** Decision in force: analysis scope is an investigation record, bound or declared, never "just a thread on this repo". */
+export const BIND_DECISION_ID = "dec-20260917-multi-pm-continuity-bind-or-new-at-session-start-u44f";
+
+/** PostToolUse additional context on the first material pull of an unbound session (once per session). */
+export const GATE_TEXT =
+  `Ledger: analysis session is not bound to an investigation. Before more queries: ledger_investigations(q: "<question>") ` +
+  `then ledger_investigation_bind(record_id) or ledger_investigation_new(question). Non-repo work is fine; do not proceed as just a thread on this repo.`;
+
+/** Material pulls journaled in this session (see isMaterialPull), whatever their capture status. */
+export function materialQueries(j: Journal): JournalEntry[] {
+  return j.entries.filter((e) => e.kind === "query" && e.material === true);
+}
+
+/**
+ * Stop reason when material queries ran and no investigation is bound. Same once-per-fingerprint rule as the
+ * debt block; ledger_investigation_bind / ledger_investigation_new later in the session clears it.
+ */
+export function unboundReason(material: JournalEntry[]): string {
+  return (
+    `Ledger: this session ran ${material.length} material data quer${material.length === 1 ? "y" : "ies"} but is not bound to an investigation (${BIND_DECISION_ID}). ` +
+    `Resolve scope first: ledger_investigations(q: "<question>") then ledger_investigation_bind(record_id) or ledger_investigation_new(question). ` +
+    `Non-repo work is fine; do not proceed as just a thread on this repo. Binding clears this block; the queries below stay owed either way.`
+  );
+}
+
+/**
+ * The QUERY GRAIN: each material pull in the debt is one candidate finding, proposed with ledger_propose_finding
+ * against its own q: id. Non-material queries keep the RESOLVE wording.
+ */
+function queryGrain(d: JournalEntry[]): string {
+  const material = d.filter((e) => e.kind === "query" && e.material === true);
+  if (!material.length) return "";
+  return (
+    `QUERY GRAIN: ${material.length} of these returned material results; each is one finding at query grain:\n` +
+    material.map((e) => `- ${queryIdentity(e)} · ${e.tool}: ${e.summary}`).join("\n") +
+    `\nFor each, propose a finding at query grain with ledger_propose_finding({ population, metric, window, result, query_ref: "q:<id>" }) ` +
+    `(the bound investigation is attached automatically), or dismiss it with ledger_skip_record and a reason. Use the q: id in capture_coverage.\n\n`
+  );
+}
+
 function stopReason(d: JournalEntry[]): string {
   return (
     `Ledger: ${debtNoun(d)} still lack an explicitly scoped capture acknowledgment:\n` +
     debtText(d) +
     `\n\n` +
+    queryGrain(d) +
     RESOLVE + decisionsResolve(d) +
     `\nThis reminder fires once per batch of uncaptured work.`
   );
@@ -381,7 +422,7 @@ export function sessionStartContext(j: Journal): string {
     `Session ${j.session_id}: ${debtNoun(d)} have no explicitly scoped record. Context may have been compacted; ${d.some((e) => e.kind === "decision") ? "they are" : "the queries are"} still known:\n` +
     debtText(d) +
     `\n\n` +
-    RESOLVE + decisionsResolve(d) + pending
+    queryGrain(d) + RESOLVE + decisionsResolve(d) + pending
   );
 }
 
@@ -461,8 +502,7 @@ function handleHookLocked(event: string, input: any, opts: HookOpts = {}): HookR
         if (material && !j.investigation && !j.entries.some(e => e.kind === "gate")) {
           j.entries.push({ at: now, kind: "gate", summary: "unbound material pull" });
           saveJournal(j, dir);
-          const question = calls.map(c => summarize(c.input, 80)).find(Boolean) ?? "<question>";
-          const ctx = gateText(question);
+          const ctx = GATE_TEXT;
           return {
             // hookSpecificOutput.additionalContext is the Claude Code PostToolUse shape; the top-level copies and
             // stderr are the plain text for hosts that read either. Exit 0: the tool already ran.
@@ -501,8 +541,10 @@ function handleHookLocked(event: string, input: any, opts: HookOpts = {}): HookR
       // continuity: end of turn is the primary `turn` checkpoint trigger; the helper does the work
       try { writeSignal(sessionId, "checkpoint"); } catch { /* best-effort */ }
       const d = debt(j);
-      if (!d.length) return { exit: 0 };
-      const fp = fingerprint(d);
+      // material pulls with no investigation binding block too (BIND_DECISION_ID); a bind later in the session clears it
+      const unbound = j.investigation ? [] : materialQueries(j);
+      if (!d.length && !unbound.length) return { exit: 0 };
+      const fp = fingerprint(d) + (unbound.length ? "|unbound" : "");
       if (j.nudged === fp || input?.stop_hook_active) {
         // already nudged for this work (or we are inside a stop-hook continuation): let it go, count it
         if (!j.entries.some((e) => e.kind === "unresolved" && e.summary === fp)) {
@@ -517,7 +559,7 @@ function handleHookLocked(event: string, input: any, opts: HookOpts = {}): HookR
       // JSON on stdout, exit 0: the block form both Claude Code and Codex document.
       // Top-level decision/reason is the original Claude shape and the Codex shape;
       // hookSpecificOutput is the current Claude shape. Emit both.
-      const reason = `Session ${j.session_id}\n` + stopReason(d);
+      const reason = `Session ${j.session_id}\n` + [unbound.length ? unboundReason(unbound) : "", d.length ? stopReason(d) : ""].filter(Boolean).join("\n\n");
       return {
         stdout: JSON.stringify({ decision: "block", reason, hookSpecificOutput: { hookEventName: "Stop", decision: "block", reason } }),
         exit: 0,
@@ -533,8 +575,8 @@ function handleHookLocked(event: string, input: any, opts: HookOpts = {}): HookR
       const ctx =
         `Ledger: session ${j.session_id} is about to be compacted and ${debtNoun(d)} have no scoped record:\n` +
         debtText(d) +
-        `\n\nRecord it now, while the method and assumptions are still in context. ` +
-        RESOLVE + decisionsResolve(d);
+        `\n\nRecord it now, while the method and assumptions are still in context.\n` +
+        queryGrain(d) + RESOLVE + decisionsResolve(d);
       return {
         stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: "PreCompact", additionalContext: ctx } }),
         exit: 0,

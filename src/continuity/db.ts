@@ -214,9 +214,9 @@ alter table cont_state_updates add column if not exists proposed_session_id text
 alter table cont_state_updates add column if not exists confirmed_session_id text;
 alter table cont_state_updates add column if not exists confirmed_via text;
 
--- Investigation bindings (2026-09-17): an analysis session resolves its scope to one open `investigation`
+-- Investigation bindings (2026-09-17): an analysis session resolves its scope to one open investigation
 -- record (any repo, or none) before it runs data queries. One row per session; the matching explicit
--- cont_record_links span ("bound by <author>") is what the helper extends each pass. See investigations.ts.
+-- cont_record_links span (note "bound by <author>") is what the helper extends each pass. See investigations.ts.
 create table if not exists cont_session_bindings (
   session_id text primary key,
   record_id uuid not null references cont_records(id),
