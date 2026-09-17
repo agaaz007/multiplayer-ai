@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { idfOver as C_idfOver } from "./query.js";
 import { execFileSync } from "node:child_process";
 
 /**
@@ -691,6 +692,41 @@ let recLatency: import("./continuity/records.js").WorkRecord;
   assert.match(prompt,/\d+ omitted by the 30-record prompt cap/);
   assert.equal(await recordCount(),before,'retrieval test uses fake output and does not manufacture classifier records');
   ok('full-scope lexical candidates retain old/closed relevant work; confirmed state survives proposal floods; omitted counts and foreign scope remain explicit');
+}
+
+// ---------- a restated investigation links to the open one instead of becoming record #14 ----------
+// Thirteen open investigations with zero bound sessions were one question restated, not thirteen questions.
+// byTitle only collapsed byte-identical titles inside a repo-scoped, capped candidate list.
+{
+  const open = [
+    { title: "Analyze live HiAstro paywall variant performance", goal: "Compare HiAstro production paywall variants using live impression, click, and conversion events." },
+    { title: "Diagnose and reduce SDK primary-host timeouts", goal: "Identify the cause of primary-host fallbacks and determine a remedy that preserves access for Jio users." },
+    { title: "Marriage-intent paywall experiment sizing", goal: "Recover prior marriage-intent paywall work and continue sizing the experiment." },
+    { title: "Analyze HiAstro paywall conversion and reconcile Autotune results", goal: "Trace paywall exposure through verified trials and paid charges, then reconcile the funnel analysis with Statsig Autotune results." },
+    { title: "Evaluate HiAstro intent paywall designs against monetization evidence", goal: "Critique the supplied paywall screenshot and intent-sheet designs using historical experiment results and subscription-plan economics." },
+    { title: "Compare Ledger with current GBrain, Supermemory, and Graphify", goal: "Compare Ledger's capabilities and benchmark evidence with the latest releases of GBrain, Supermemory, and Graphify." },
+    { title: "Review Ledger's handoff capabilities, benchmark evidence, and continuity gaps", goal: "Assess Ledger against the unfinished-work handoff goal and identify evidence-backed priorities." },
+  ].map((r, i) => ({ ...r, id: `open-${i}`, kind: "investigation", status: "open", repo: null } as any));
+  const idf = C_idfOver(open.map((r) => `${r.title} ${r.goal}`));
+  const twin = (title: string, goal: string) => C.twinInvestigation({ title, goal }, open, idf);
+
+  // Restatements of an open investigation link to it.
+  assert.equal(twin("Analyze HiAstro paywall variant performance live", "Compare live HiAstro paywall variants on impressions, clicks and conversions.")?.record.id, "open-0");
+  assert.equal(twin("Investigate SDK host fallback timeouts", "Find why the primary host times out and fix it without losing Jio users.")?.record.id, "open-1");
+  assert.equal(twin("Size the marriage-intent paywall experiment", "Continue sizing the marriage intent paywall test.")?.record.id, "open-2");
+
+  // The real open investigations are distinct work and must not collapse into each other.
+  for (const r of open) {
+    const others = open.filter((o) => o.id !== r.id);
+    const collapsed = C.twinInvestigation({ title: r.title, goal: r.goal }, others, C_idfOver(others.map((o) => `${o.title} ${o.goal}`)));
+    assert.equal(collapsed, null, `"${r.title}" must not be read as a restatement of "${collapsed?.record.title}"`);
+  }
+
+  // A genuinely different question opens a new record; linking is not the default.
+  assert.equal(twin("Cut the SessionStart brief below four seconds", "Make the continuity sections load inside the brief's budget."), null);
+  assert.equal(twin("Write the investor update for September", "Draft the monthly update covering shipping and revenue."), null);
+  assert.ok(C.TWIN_TITLE === 0.5 && C.TWIN_QUESTION === 0.3, "both bars are explicit constants, not inline numbers");
+  ok("anti-twin: a reworded investigation links to the open one; seven real open investigations stay seven");
 }
 
 await closePools();
