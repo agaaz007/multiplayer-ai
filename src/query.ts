@@ -1,7 +1,7 @@
 import { type Config, loadAll } from "./store.js";
 import { TYPES, type LedgerObject, type LedgerType } from "./schema.js";
 import { captureStats } from "./hooks.js";
-import { projectAuthorityObjects, resolveAccepted, correctionImpact, matchesAnalysisScope, objectVersion, type ScopeQuery } from './authority.js';
+import { projectAuthorityObjects, resolveAccepted, correctionImpact, matchesAnalysisScope, objectVersion, scopeIdentity, type ScopeQuery } from './authority.js';
 
 // ---------- text scoring (no embeddings; good enough for hundreds of objects) ----------
 
@@ -39,6 +39,58 @@ export function score(query: string, o: LedgerObject): number {
     else if (doc.includes(t)) hits += 1;
   }
   return hits / q.size;
+}
+
+// ---------- duplicate detection: a different question from search, and a different measure ----------
+
+/**
+ * `score` asks "is this record relevant to this query": recall of the query's tokens against the whole
+ * record, unnormalised for how much the record says. That is the right shape for search and the wrong
+ * one for "did someone already answer this". A 16-token question against a 600-token finding matches on
+ * the vocabulary every finding in a ledger shares (`login`, `trial`, `config`, `rate`), the title bonus
+ * carries it past 1.0, and nothing on the other side has to be about the same thing. On the pilot ledger
+ * that flagged 3,629 of 21,528 finding pairs as near-duplicates — 17% of everything anyone had written.
+ *
+ * Duplication is a symmetric claim about two questions, so it is measured as one: cosine over the two
+ * questions alone, each token weighted by inverse document frequency, so shared boilerplate counts for
+ * little and the terms that distinguish one question from another carry the match. Same corpus, 25 pairs
+ * at {@link NEAR_DUPLICATE}.
+ */
+export const NEAR_DUPLICATE = 0.5;
+/** The write-path nudge is advisory and capped, so it reaches lower: a refresh of the same metric over a later window lands here. */
+export const RELATED_QUESTION = 0.35;
+
+/** What a record claims, not everything it says: the question a finding answers, the metric a definition names. Falls back to the title when a legacy record has neither. */
+export function claimText(o: LedgerObject): string {
+  const f = o.fields;
+  return String(f.question ?? f.metric ?? f.decision ?? f.what ?? "").trim() || o.title;
+}
+
+/** IDF over a corpus of claim texts. Built once per call site; `df` counts every finding ever recorded, superseded included, because how common a word is is a property of the vocabulary and not of what is current. */
+export function idfOver(corpus: string[]): (token: string) => number {
+  const df = new Map<string, number>();
+  for (const text of corpus) for (const t of new Set(tokens(text))) df.set(t, (df.get(t) ?? 0) + 1);
+  const n = corpus.length;
+  return (t) => Math.log((n + 1) / ((df.get(t) ?? 0) + 0.5));
+}
+
+/** Cosine of two IDF-weighted question vectors, in [0, 1]. Symmetric: neither side wins by being longer. */
+export function questionSimilarity(a: string, b: string, idf: (t: string) => number): number {
+  const [x, y] = [new Set(tokens(a)), new Set(tokens(b))];
+  if (!x.size || !y.size) return 0;
+  let dot = 0, na = 0, nb = 0;
+  for (const t of x) { const w = idf(t); na += w * w; if (y.has(t)) dot += w * w; }
+  for (const t of y) { const w = idf(t); nb += w * w; }
+  return na && nb ? dot / Math.sqrt(na * nb) : 0;
+}
+
+/**
+ * Two declared scopes that disagree are not two answers to one question, whatever their wording shares:
+ * a metric measured on Android IN does not duplicate the same metric on iOS US. An absent scope is
+ * unknown, never a match, so legacy records keep being compared on their questions.
+ */
+export function scopesConflict(a: unknown, b: unknown): boolean {
+  return Boolean(a && b && scopeIdentity(a) !== scopeIdentity(b));
 }
 
 export interface SearchOpts {
