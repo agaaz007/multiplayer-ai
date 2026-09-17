@@ -13,6 +13,7 @@ import { verifyAcceptanceEvidence } from './acceptance-evidence.js';
 import { validateRecordCoverage, acknowledgeLocalCapture, reconcileSharedCapture } from './capture-boundary.js';
 import { investigation } from './investigation.js';
 import { correctionImpact, objectVersion, resolveAccepted } from './authority.js';
+import { buildGraph, renderGraph, type GraphFormat } from './graph.js';
 import { AnalysisScopeSchema, AnalyticalDateSchema } from './schema.js';
 import { DEFAULT_QUIET_MS, pendingDrafts, reconcile } from "./extract.js";
 import { continuityConfigured, getPool, migrate, tableList, closePools } from "./continuity/db.js";
@@ -45,6 +46,14 @@ const USAGE = `ledger — shared definitions, findings, changes, decisions for y
   ledger investigate <question> [--scope scope.json] [--definitions id,id] [--as-of DATE]
                                          accepted corrections, exact evidence and affected findings across all history
   ledger impact <correction-id>           direct/transitive review paths and unresolved lineage
+  ledger graph [--format mermaid|dot|json] [--id ID --depth N] [--impact ID]
+                                         render the lineage already in the ledger: supersedes, pinned
+                                         dependencies, reproductions, evidence. Selection:
+                                         --conflicts (unresolved accepted heads) · --unpinned (findings
+                                         on a definition name with no pinned version) · --impact <id>
+                                         (blast radius of a correction). Filters: --type --tag --author
+                                         --days N --current-only. --names draws dashed definitions_used
+                                         edges; --legend adds a key. Scope line goes to stderr.
   ledger record <type> < fields.json     record from JSON on stdin
   ledger drafts                          drafts awaiting review (from the transcript fallback)
   ledger discard <id> --reason "..."     reject a draft
@@ -102,7 +111,8 @@ function flag(args: string[], name: string): string | undefined {
   return i === -1 ? undefined : args[i + 1];
 }
 
-const BOOL_FLAGS = new Set(["--all", "--plain", "--box", "--no-push", "--dry-run", "--show"]);
+const BOOL_FLAGS = new Set(["--all", "--plain", "--box", "--no-push", "--dry-run", "--show",
+  "--current-only", "--conflicts", "--unpinned", "--names", "--legend"]);
 /** Non-flag arguments, with `--name value` pairs and boolean flags removed. */
 function positionals(args: string[]): string[] {
   const out: string[] = [];
@@ -317,6 +327,36 @@ async function main() {
       case 'impact': {
         if (!args[0]) throw new Error('usage: ledger impact <correction-id>');
         console.log(JSON.stringify(correctionImpact(loadAll(loadConfig()),args[0]),null,2));
+        return;
+      }
+      case "graph": {
+        const format = (flag(args, "--format") ?? "mermaid") as GraphFormat;
+        if (!["mermaid", "dot", "json"].includes(format)) throw new Error(`unknown --format ${format}; use mermaid, dot or json`);
+        const depth = flag(args, "--depth");
+        const days = flag(args, "--days");
+        const t = flag(args, "--type") as LedgerType | undefined;
+        if (t && !TYPES.includes(t)) throw new Error(`unknown --type ${t}; use ${TYPES.join(", ")}`);
+        const g = buildGraph(loadConfig(), {
+          types: t ? [t] : undefined,
+          tags: flag(args, "--tag")?.split(","),
+          author: flag(args, "--author"),
+          days: days ? Number(days) : undefined,
+          id: flag(args, "--id") ?? positionals(args)[0],
+          depth: depth ? Number(depth) : undefined,
+          currentOnly: args.includes("--current-only"),
+          conflictsOnly: args.includes("--conflicts"),
+          unpinnedOnly: args.includes("--unpinned"),
+          impact: flag(args, "--impact"),
+          names: args.includes("--names"),
+        });
+        // The scope line goes to stderr so stdout stays a clean pipe into graphviz or a mermaid paste,
+        // while a reader still sees what the picture cut. Silence here would let a filtered graph
+        // read as the whole ledger.
+        console.error(g.scope);
+        for (const heads of g.summary.conflicts)
+          console.error(`UNRESOLVED: ${heads.join(" vs ")} — both accepted, no authoritative head. Drawn without an arrow; resolve with evidence, never by recency.`);
+        if (!g.nodes.length) { console.error("nothing selected"); return; }
+        console.log(renderGraph(g, format, args.includes("--legend")));
         return;
       }
       case "record": {
