@@ -168,7 +168,7 @@ if (process.argv.includes("--show")) console.log(lean.text.split("\n").map((l) =
 assert.equal(lean.detail, "lean", "lean is the default detail");
 assert.equal(pack.detail, "evidence");
 for (const t of [lean.text, pack.text]) {
-  assert.ok(t.startsWith(`# Record pack: Attribution investigation\nrecord ${recAttr.id} · investigation · repo ${REPO} · status open · created by agaaz `), t.split("\n").slice(0, 2).join("\n"));
+  assert.ok(t.startsWith(`# Record pack: Attribution investigation\nrecord ${recAttr.id} · investigation · repos touched ${REPO} (read as tools; identity is the question) · status open · created by agaaz `), t.split("\n").slice(0, 2).join("\n"));
   assert.ok(t.includes(" · state v1 · updated "), "header carries state_version");
   assert.ok(t.includes("goal: Explain why Mixpanel and ClickHouse disagree"), "goal line");
   assert.ok(t.includes("## State (v1 · 4 proposed · 1 confirmed)"), "state header counts");
