@@ -237,11 +237,11 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
         // Rework check for findings: surface prior answers before writing a new one.
         let warn = "";
         if (type === "finding") {
-          const sim = similarFindings(cfg, String(fields.question));
+          const sim = similarFindings(cfg, String(fields.question), 5, { scope: fields.analysis_scope });
           if (sim.length) {
             warn =
-              `\n\nNote: ${sim.length} similar finding(s) already exist. If yours is a refresh, set supersedes to the old id. If the numbers disagree, say why in caveats.\n` +
-              sim.map((s) => `  ${s.id} (${s.author}, ${s.created.slice(0, 10)}): ${s.fields.result}`).join("\n");
+              `\n\nNote: ${sim.length} finding(s) ask a similar question, closest first. Each is a candidate, not a duplicate: check the population and window before treating one as the same answer. If yours is a refresh of one, set supersedes to its id. If the numbers disagree, say why in caveats.\n` +
+              sim.map((s) => `  [${s.similarity.toFixed(2)}] ${s.id} (${s.author}, ${s.created.slice(0, 10)}): ${s.fields.result}`).join("\n");
           }
         }
         const res = record(cfg, { type, fields });
