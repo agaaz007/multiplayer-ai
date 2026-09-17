@@ -80,6 +80,14 @@ try {
   const draftMermaid = toMermaid(withDraft);
   assert.match(draftMermaid, /classDef draft[^\n]*stroke-dasharray/);
   assert.ok(draftMermaid.split("\n").some((l) => /^  class n\d+ draft$/.test(l)));
+  const classTokens = (m: string) => m.split("\n").filter((l) => /^  class n\d+ /.test(l)).map((l) => l.split(" ").at(-1)!);
+  const defined = (m: string) => new Set(m.split("\n").filter((l) => l.startsWith("  classDef ")).map((l) => l.split(" ")[3]));
+  for (const m of [draftMermaid, toMermaid(withDraft, true)]) {
+    assert.ok(classTokens(m).length, "every node carries a class");
+    // `class n1 a,b` is a node list plus one class name, not two classes: it would drop the styling.
+    assert.ok(classTokens(m).every((c) => !c.includes(",")), "one class token per node, never a comma list");
+    for (const c of classTokens(m)) assert.ok(defined(m).has(c), `class ${c} is used but never defined by a classDef`);
+  }
 
   // ---- nothing is laid out or ranked by date ----
   for (const rendered of [toDot(withDraft, true), toMermaid(withDraft, true)]) {
