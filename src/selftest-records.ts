@@ -46,8 +46,8 @@ const cfg: Config = { ledger_dir: path.join(tmp, "ledger"), author: "rachit", gi
 const pool = getPool(cfg);
 
 // ---------- 1. schema: idempotent migrate, three new tables, FTS index ----------
-await pool.query(`drop table if exists cont_state_updates, cont_record_links, cont_records, cont_notifications, cont_artifacts, cont_claims, cont_checkpoints, cont_events, cont_sessions, cont_threads cascade`);
-const NEW = ["cont_records", "cont_record_links", "cont_state_updates"];
+await pool.query(`drop table if exists cont_session_bindings, cont_state_updates, cont_record_links, cont_records, cont_notifications, cont_artifacts, cont_claims, cont_checkpoints, cont_events, cont_sessions, cont_threads cascade`);
+const NEW = ["cont_records", "cont_record_links", "cont_state_updates", "cont_session_bindings"];
 const first = await migrate(pool);
 for (const t of NEW) assert.ok(first.includes(t), `first migrate creates ${t}: ${first.join(",")}`);
 const second = await migrate(pool);
@@ -637,5 +637,115 @@ const byT = (hits: Awaited<ReturnType<typeof R.searchEvents>>) => Object.fromEnt
   await assert.rejects(R.addStateUpdate(pool,{record_id:rec.id,kind:'note',text:'invented evidence',created_by:'agaaz',evidence:[{session_id:sidR,seq:99999}]}),/evidence event not found/);
   ok('advancing one accepted branch cannot erase a conflict; fabricated event references rejected');
 }
+// ---------- investigations (2026-09-17): declare / bind / list / sessionBinding, and the helper's span extension ----------
+{
+  const I = await import("./continuity/investigations.js");
+  const cfgA: Config = { ...cfg, author: "agaaz" };
+  const sidP = "agaaz-claude-pm-1"; // a warehouse/sheets session the helper has not uploaded yet: bind must create the session row itself
+  assert.equal(await I.sessionBinding(pool, sidP), null);
+  const dec = await I.declareInvestigation(pool, cfgA, { question: "  Why did iOS trial CVR   drop in September? ", goal: "Find the driver, not just the size", session_id: sidP, repo: null });
+  assert.match(dec.record_id, UUID);
+  assert.ok(dec.text.includes("non-repo work") && dec.text.includes(dec.record_id) && dec.text.includes("ledger_propose_finding"), dec.text);
+  const rec = (await R.getRecord(pool, dec.record_id))!;
+  assert.equal(rec.kind, "investigation"); assert.equal(rec.repo, null); assert.equal(rec.status, "open"); assert.equal(rec.created_by, "agaaz");
+  assert.equal(rec.title, "Why did iOS trial CVR drop in September?", "title is the whitespace-normalised question");
+  assert.equal(rec.goal, "Find the driver, not just the size");
+  const b1 = (await I.sessionBinding(pool, sidP))!;
+  assert.equal(b1.record_id, dec.record_id); assert.equal(b1.bound_by, "agaaz"); assert.equal(b1.question, "Why did iOS trial CVR drop in September?"); assert.ok(Date.parse(b1.bound_at) > 0);
+  assert.ok(await S.getSession(pool, sidP), "bind created the session row");
+  let links = await R.recordLinks(pool, dec.record_id);
+  assert.equal(links.length, 1);
+  assert.deepEqual([links[0].source, links[0].from_seq, links[0].to_seq, links[0].note, links[0].created_by, links[0].session_id], ["explicit", 1, 1, "bound by agaaz", "agaaz", sidP], "explicit span 1..1 when the session has no events yet");
+  ok("declareInvestigation: repo-null investigation created and the session bound with an explicit 'bound by' span; sessionBinding round-trips");
+
+  // near-identical question: refused, the existing id named, bind suggested
+  await assert.rejects(I.declareInvestigation(pool, cfgA, { question: "why did ios trial cvr drop in september", session_id: "agaaz-claude-pm-2" }), (e: any) => e.message.includes(dec.record_id) && e.message.includes("ledger_investigation_bind") && /near-identical/.test(e.message));
+  await assert.rejects(I.declareInvestigation(pool, { ...cfg, author: "rachit" }, { question: "WHY   DID iOS TRIAL CVR DROP IN SEPTEMBER?", session_id: "rachit-codex-pm-2" }), /near-identical/);
+  assert.equal(await I.sessionBinding(pool, "agaaz-claude-pm-2"), null, "a refused declaration binds nothing");
+  assert.equal(I.titleSimilarity("Why did iOS trial CVR drop in September?", "iOS trial CVR drop in September: why?"), 1, "token-identical titles are duplicates");
+  assert.ok(I.titleSimilarity("Why did iOS trial CVR drop in September?", "Why did Android trial CVR drop in September?") < 0.9, "one different token is not a duplicate");
+  await assert.rejects(I.declareInvestigation(pool, cfgA, { question: "   ", session_id: sidP }), /question is required/);
+  ok("declareInvestigation refuses a near-identical open question (case/whitespace/order-insensitive) and names the record to bind instead");
+
+  // a different question on a repo, from a session with events: explicit span covers 1..max seq
+  const maxR = (await pool.query<{ m: number }>(`select max(seq)::int as m from cont_events where session_id = $1`, [sidR])).rows[0].m;
+  assert.ok(maxR > 1);
+  const dec2 = await I.declareInvestigation(pool, { ...cfg, author: "rachit" }, { question: "Checkout latency spike on 2026-09-07", session_id: sidR, repo: REPO });
+  const rec2 = (await R.getRecord(pool, dec2.record_id))!;
+  assert.equal(rec2.repo, REPO);
+  const lR = (await R.recordLinks(pool, dec2.record_id)).find((l) => l.session_id === sidR)!;
+  assert.deepEqual([lR.source, lR.from_seq, lR.to_seq, lR.note], ["explicit", 1, maxR, "bound by rachit"], "explicit span from seq 1 to the current max seq");
+  assert.equal((await I.sessionBinding(pool, sidR))!.record_id, dec2.record_id);
+  // bind validation
+  await assert.rejects(I.bindInvestigation(pool, cfgA, { record_id: randomUUID(), session_id: sidP }), /record not found/);
+  await assert.rejects(I.bindInvestigation(pool, cfgA, { record_id: "not-a-uuid", session_id: sidP }), /record not found/);
+  const impl = await R.createRecord(pool, { kind: "implementation", title: "Not an investigation", repo: REPO, created_by: "agaaz" });
+  await assert.rejects(I.bindInvestigation(pool, cfgA, { record_id: impl.id, session_id: sidP }), /implementation record, not an investigation/);
+  await assert.rejects(I.bindInvestigation(pool, cfgA, { record_id: dec.record_id, session_id: "" }), /session_id is required/);
+  // idempotent for the same record; rebinding to another record keeps the earlier span and starts a new one
+  const same = await I.bindInvestigation(pool, cfgA, { record_id: dec.record_id, session_id: sidP });
+  assert.equal(same.already_bound, true); assert.equal(same.title, rec.title);
+  assert.equal((await R.recordLinks(pool, dec.record_id)).length, 1, "no second span for the same binding");
+  const re = await I.bindInvestigation(pool, cfgA, { record_id: dec2.record_id, session_id: sidP, question: "same driver on checkout?" });
+  assert.equal(re.already_bound, false); assert.ok(re.text.includes("rebound from " + dec.record_id), re.text);
+  const bP = (await I.sessionBinding(pool, sidP))!;
+  assert.equal(bP.record_id, dec2.record_id); assert.equal(bP.question, "same driver on checkout?");
+  assert.equal((await R.recordLinks(pool, dec.record_id)).length, 1, "the earlier investigation keeps its span");
+  const lP2 = (await R.recordLinks(pool, dec2.record_id)).find((l) => l.session_id === sidP)!;
+  assert.deepEqual([lP2.from_seq, lP2.to_seq, lP2.source], [1, 1, "explicit"]);
+  ok("bindInvestigation: validates open investigation records, is idempotent for the same record, and a rebind keeps history and starts a new explicit span");
+
+  // the helper's per-pass step: the bound span follows the session's max seq, one UPDATE, nothing when unchanged
+  assert.equal(await I.extendBoundLink(pool, sidP), false, "nothing to extend before events arrive");
+  await S.appendEvents(pool, sidP, [
+    { producer_event_id: "p1", kind: "instruction.added", occurred_at: iso(200), payload: { text: "pull iOS trial CVR by week from the warehouse" } },
+    { producer_event_id: "p2:requested", kind: "tool.requested", call_id: "p2", occurred_at: iso(201), payload: { tool: "mcp__hiastro-clickhouse__run_query", input: "select week, trial_cvr from kpis where platform='ios'" } },
+    { producer_event_id: "p2:finished", kind: "tool.finished", call_id: "p2", occurred_at: iso(202), payload: { output_preview: "2026-09-01 0.124" } },
+  ], null, null);
+  const before = (await R.getRecord(pool, dec2.record_id))!.updated_at;
+  assert.equal(await I.extendBoundLink(pool, sidP), true, "span extended");
+  const lP3 = (await R.recordLinks(pool, dec2.record_id)).find((l) => l.session_id === sidP)!;
+  assert.deepEqual([lP3.id, lP3.from_seq, lP3.to_seq], [lP2.id, 1, 3], "the same explicit span now covers the whole session");
+  assert.ok((await R.getRecord(pool, dec2.record_id))!.updated_at.getTime() >= before.getTime(), "record updated_at moved with the span");
+  assert.equal(await I.extendBoundLink(pool, sidP), false, "idempotent: nothing to extend twice");
+  assert.equal((await R.recordLinks(pool, dec.record_id))[0].to_seq, 1, "the superseded binding's span is not extended");
+  assert.deepEqual((await I.boundSessionIds(pool)).filter((x) => [sidP, sidR].includes(x)).sort(), [sidP, sidR].sort());
+  // explicit beats suggested: a classifier suggestion over the same events ranks below the binding in evidence
+  await R.linkSpan(pool, { record_id: impl.id, session_id: sidP, from_seq: 1, to_seq: 3, source: "suggested", confidence: 0.6, note: "classifier guess", created_by: "classifier" });
+  const ev = await R.recordEvidence(pool, dec2.record_id, { kinds: ["instruction.added"] });
+  assert.ok(ev.some((e) => e.session_id === sidP && e.link_source === "explicit"), "the bound span's events read as explicit evidence on the investigation");
+  ok("extendBoundLink (helper step): one UPDATE moves the bound span to the session's max seq, idempotent, superseded bindings untouched; suggested links stay lower authority");
+
+  // listing: all repos incl. repo-null, ranked by match to q over title + goal + confirmed state, then updated_at desc
+  const all = await I.listInvestigations(pool, cfg, {});
+  assert.ok(all.items.some((i) => i.record_id === dec.record_id && i.repo === null) && all.items.some((i) => i.record_id === dec2.record_id && i.repo === REPO), "repo-null and repo investigations listed together");
+  assert.ok(all.items.every((i) => i.status === "open" && i.match === 0));
+  assert.ok(all.text.includes(dec.record_id) && all.text.includes(dec2.record_id) && all.text.includes("ledger_investigation_bind(record_id)") && all.text.includes("ledger_investigation_new(question)"), all.text);
+  for (let i = 1; i < all.items.length; i++) assert.ok(all.items[i - 1].updated_at >= all.items[i].updated_at, "updated_at desc without q");
+  const d2 = all.items.find((i) => i.record_id === dec2.record_id)!;
+  assert.equal(d2.bound_sessions, 2, "sidP (rebound) and sidR are bound to dec2");
+  assert.equal(all.items.find((i) => i.record_id === dec.record_id)!.bound_sessions, 0, "the rebound session no longer counts on the first investigation");
+  const byQ = await I.listInvestigations(pool, cfg, { q: "iOS trial CVR" });
+  assert.equal(byQ.items[0].record_id, dec.record_id); assert.equal(byQ.items[0].match, 1);
+  assert.ok(byQ.text.includes("ranked by match") && byQ.text.includes("match 1.00"));
+  const upd = await R.addStateUpdate(pool, { record_id: dec2.record_id, kind: "progress", text: "p95 doubled for android users at the payment step", created_by: "rachit", status: "confirmed" });
+  const byState = await I.listInvestigations(pool, cfg, { q: "android payment p95" });
+  assert.equal(byState.items[0].record_id, dec2.record_id, "confirmed state text participates in the match");
+  assert.ok(byState.items[0].match > 0 && byState.items[0].confirmed >= 1);
+  const byAuthor = await I.listInvestigations(pool, cfg, { author: "rachit" });
+  assert.ok(byAuthor.items.length >= 1 && byAuthor.items.every((i) => i.created_by === "rachit") && byAuthor.items.some((i) => i.record_id === dec2.record_id));
+  const none = await I.listInvestigations(pool, cfg, { author: "nobody-here" });
+  assert.deepEqual(none.items, []); assert.ok(none.text.startsWith("No open investigations") && none.text.includes("ledger_investigation_new"));
+  assert.equal((await I.listInvestigations(pool, cfg, { limit: 1 })).items.length, 1);
+  // a closed investigation is neither listed nor bindable
+  await R.updateRecordMeta(pool, dec.record_id, { status: "done" });
+  assert.ok(!(await I.listInvestigations(pool, cfg, {})).items.some((i) => i.record_id === dec.record_id), "closed investigation excluded");
+  await assert.rejects(I.bindInvestigation(pool, cfgA, { record_id: dec.record_id, session_id: "agaaz-claude-pm-3" }), /is done, not open/);
+  const redeclare = await I.declareInvestigation(pool, cfgA, { question: "Why did iOS trial CVR drop in September?", session_id: "agaaz-claude-pm-3" });
+  assert.notEqual(redeclare.record_id, dec.record_id, "a closed investigation does not block the same question being reopened as a new record");
+  void upd;
+  ok("listInvestigations: all repos incl. repo-null, match ranking over title/goal/confirmed state then updated_at desc, author/limit filters, closed ones excluded; compact text carries ids and the bind-or-declare instruction");
+}
+
 await closePools();
 console.log(`selftest-records: ok (${step} checks) — tmp ${tmp}`);
