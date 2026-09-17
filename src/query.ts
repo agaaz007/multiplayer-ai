@@ -60,8 +60,8 @@ export interface SearchOpts {
  */
 export type ObjectAuthorityTier = 3 | 2 | 0;
 
-/** `current` · `draft` · `superseded by <id>` · `rejected` (a discarded draft) · `deprecated` (retired without a successor). */
-export type ObjectAuthorityLabel = "current" | "draft" | `superseded by ${string}` | "rejected" | "deprecated";
+/** `current` · `draft` · `superseded by <id>` · `rejected` (a discarded draft) · `discarded cut` (a query-grain proposal a person discarded, reason kept) · `deprecated` (retired without a successor). */
+export type ObjectAuthorityLabel = "current" | "draft" | `superseded by ${string}` | "rejected" | "discarded cut" | "deprecated";
 
 export type AuthoritySearchHit = LedgerObject & {
   score: number;
@@ -85,7 +85,7 @@ export function matchesDiscoveryScope(o: LedgerObject, scope?: ScopeQuery): bool
 /** Tier and label from the object's own lifecycle plus its accepted resolution; the label always names what displaced it. */
 export function objectAuthority(o: LedgerObject, authority: { status: string; current: { id: string }[] }): { tier: ObjectAuthorityTier; label: ObjectAuthorityLabel } {
   if (o.superseded_by) return { tier: 0, label: `superseded by ${o.superseded_by}` };
-  if (o.status === "deprecated") return { tier: 0, label: o.fields.discarded ? "rejected" : "deprecated" };
+  if (o.status === "deprecated") return { tier: 0, label: o.fields.stance === "discarded" ? "discarded cut" : o.fields.discarded ? "rejected" : "deprecated" };
   if (o.status === "draft") return { tier: 2, label: "draft" };
   // stable: current unless the accepted resolution names other heads and not this one
   if (authority.status === "conflict" && !authority.current.some((c) => c.id === o.id)) {
@@ -277,9 +277,15 @@ export function brief(cfg: Config, opts: BriefOpts = {}): string {
   // drafts were listed, which hid hand-recorded `status: draft` objects from every brief.
   const drafts = source.filter((o) => o.status === "draft" && byTag(o) && matchesAnalysisScope(o, opts.scope));
   if (drafts.length) {
-    const fallback = drafts.filter((o) => o.fields.capture_method === "transcript_fallback");
-    const manual = drafts.filter((o) => o.fields.capture_method !== "transcript_fallback");
+    const proposed = drafts.filter((o) => o.fields.stance === "PROPOSED");
+    const fallback = drafts.filter((o) => o.fields.stance !== "PROPOSED" && o.fields.capture_method === "transcript_fallback");
+    const manual = drafts.filter((o) => o.fields.stance !== "PROPOSED" && o.fields.capture_method !== "transcript_fallback");
     out.push(``, `## Drafts, not in force (${drafts.length})`);
+    if (proposed.length) {
+      out.push(`Query-grain findings proposed by an agent after a data pull (stance PROPOSED). Not law: a person accepts with ledger_review_finding(id, "accept") or discards with a reason; the next agent may reuse the result only as a proposal.`);
+      for (const d of proposed.slice(0, 5)) out.push(`- [proposed] finding ${d.id}: **${d.title}** — investigation ${d.fields.investigation_record_id ?? "unbound"}, query ${d.fields.query_ref ?? "?"} (${d.author}, ${d.created.slice(0, 10)})`);
+      if (proposed.length > 5) out.push(`- …and ${proposed.length - 5} more proposed findings: \`ledger drafts\``);
+    }
     if (fallback.length) {
       out.push(`Extracted from transcripts after live capture failed. For each: ledger_get it, then record a stable object with supersedes set to the draft id, or ledger_discard_draft with a reason.`);
       for (const d of fallback.slice(0, 5)) out.push(`- [fallback] ${d.type} ${d.id}: **${d.title}** — ${d.fields.capture_reason ?? ""} (${d.author}, ${d.created.slice(0, 10)})`);
@@ -343,7 +349,9 @@ function draftStats(all: LedgerObject[], recent: LedgerObject[]): string[] {
   const pending = all.filter((o) => fromFallback(o) && o.status === "draft");
   const promoted = all.filter((o) => fromFallback(o) && o.status === "deprecated" && o.superseded_by);
   const discarded = all.filter((o) => fromFallback(o) && o.status === "deprecated" && !o.superseded_by);
+  const proposals = all.filter((o) => o.fields.capture_method === "query_grain_proposal");
   return [
     `  transcript fallback: drafts created ${made.length} (window), pending review ${pending.length}, promoted ${promoted.length}, discarded ${discarded.length} (all time)`,
+    `  query-grain proposals: pending ${proposals.filter((o) => o.status === "draft").length}, accepted ${proposals.filter((o) => o.superseded_by).length}, discarded cuts ${proposals.filter((o) => o.fields.stance === "discarded").length} (all time)`,
   ];
 }

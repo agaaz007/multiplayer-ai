@@ -227,6 +227,30 @@ Every record commits and pushes. Every read pulls. Teammates see each other's ob
 
 ---
 
+## Analysis sessions: bind or declare, then propose at query grain
+
+Decision in force (dec-20260917 bind-or-new): an analysis session is bound to one investigation (a work record) before it pulls data, and every material data pull proposes a finding at **query grain**. A state update says "we now believe X"; a query-grain finding says "on this population, this metric, this window, the result was Y" and is what the next agent must reuse.
+
+**At session start, bind or declare new.** Three tools:
+
+| tool | when |
+|---|---|
+| `ledger_investigations({ q?, author?, hours?, limit? })` | list open investigations on this repo before starting one |
+| `ledger_investigation_bind({ record_id, question? })` | continue an existing investigation: binds this session to it |
+| `ledger_investigation_new({ question, goal?, repo? })` | nothing matches: declare a new investigation and bind to it |
+
+**After each material pull**, call `ledger_propose_finding({ population, metric, window, result, query_ref: "q:<tool_use_id>", investigation_record_id?, title?, caveats? })`. `query_ref` is the evidence id the checkpoint prints. The tool writes a DRAFT finding with `stance: PROPOSED`, linked to the investigation and covering that query (`capture_ack.status: pending_review`). If the session is unbound and no `investigation_record_id` is given, it refuses: bind or declare first. It never creates an orphan and never accepts anything.
+
+**A person accepts or discards** with `ledger_review_finding({ id, action: "accept" | "discard", reason?, window? })`:
+
+- `accept` writes a NEW stable finding under the configured author with `stance: accepted`, `supersedes` the draft, and an `acceptance` pinned to the draft's `content_version` (role `review`) plus the retained query artifact when it can be located (role `query`). The result reads "Accepted by <person>". Acceptance is a person's act: an agent calling this tool acts under that person's name, and it is never automatic.
+- `discard` requires a reason. The draft becomes a **discarded cut**: deprecated, `stance: discarded`, the reason kept. It leaves the review queue but stays in history; `ledger_search(include_superseded: true)` labels it `discarded cut`.
+- If the proposal's free-text window did not map to `data_window {from, to}`, accept needs `window: {from, to}`.
+
+**PROPOSED findings are not law.** The brief and `ledger drafts` list them under "Drafts, not in force" with their investigation and `query_ref`. Reuse a proposed result only as a proposal, say so, and never present it as accepted knowledge. `ledger_record_finding` remains the path for a full argued finding; a query-grain proposal is the floor, not a replacement.
+
+---
+
 ## Execution continuity: continuing a teammate's unfinished work
 
 The four object types carry conclusions. Unfinished work is carried by **threads**: a goal pursued over time in one repo across any number of sessions and harnesses. The configured local helper captures supported session events and snapshots the session's repository to a hidden git ref on its configured cadence. Inspect capture gaps and remote verification. A different or nested checkout is not automatically included in that repository snapshot.

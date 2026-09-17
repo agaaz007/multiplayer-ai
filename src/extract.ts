@@ -320,7 +320,11 @@ export function reconcile(cfg: Config, opts: ReconcileOpts = {}): ReconcileResul
   return results;
 }
 
-/** The review queue: fallback drafts, newest first. A human's own draft is not a review item. */
+/**
+ * The review queue, newest first: fallback drafts and query-grain proposals (stance PROPOSED).
+ * A human's own `status: draft` object is not a review item. A discarded cut is deprecated, so it
+ * never appears here; find it with ledger_search(include_superseded), labelled "discarded cut".
+ */
 export function pendingDrafts(cfg: Config) {
-  return loadAll(cfg).filter((o) => o.status === "draft" && o.fields.capture_method === "transcript_fallback");
+  return loadAll(cfg).filter((o) => o.status === "draft" && (o.fields.capture_method === "transcript_fallback" || o.fields.stance === "PROPOSED"));
 }
