@@ -727,9 +727,10 @@ const ISO_DAY = /\d{4}-\d{2}-\d{2}/g;
 export function parseWindow(window: string | { from: string; to: string } | undefined): { from: string; to: string } | null {
   if (!window) return null;
   if (typeof window === "object") return window.from && window.to ? { from: window.from, to: window.to } : null;
-  const dates = window.match(ISO_DAY) ?? [];
-  if (!dates.length) return null;
-  const [a, b = a] = dates;
+  const dates: string[] = window.match(ISO_DAY) ?? [];
+  const a = dates[0];
+  if (!a) return null;
+  const b = dates[1] ?? a;
   return a <= b ? { from: a, to: b } : { from: b, to: a };
 }
 
