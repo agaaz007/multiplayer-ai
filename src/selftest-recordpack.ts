@@ -463,7 +463,7 @@ for (const t of [lean.text, pack.text]) {
   assert.deepEqual({ sessions: attr.sessions, proposed: attr.proposed, confirmed: attr.confirmed, np: attr.newest_proposed?.text, npKind: attr.newest_proposed?.kind, npBy: attr.newest_proposed?.created_by }, { sessions: 2, proposed: 4, confirmed: 1, np: "Size the effect of the distinct_id guard against the attribution window", npKind: "next", npBy: "classifier" });
   assert.deepEqual({ sessions: copy.sessions, proposed: copy.proposed, confirmed: copy.confirmed, np: copy.newest_proposed }, { sessions: 1, proposed: 0, confirmed: 0, np: null });
   assert.equal(rows[0].id, recCopy.id, "most recently updated first");
-  assert.match(recordLine(attr, T(120)), new RegExp(`^- investigation · Attribution investigation · demo · updated \\d+[mh] ago · 2 sessions · 4/1 updates · ${attr.id}$`));
+  assert.match(recordLine(attr, T(120)), new RegExp(`^- investigation · Attribution investigation · touched demo · updated \\d+[mh] ago · 2 sessions · 4/1 updates · ${attr.id}$`));
   assert.match(recordLine(copy, T(120)), new RegExp(`^- writing · Landing copy · non-code · updated \\d+[mh] ago · 1 session · 0/0 updates · ${copy.id}$`));
   assert.deepEqual((await listRecordSummaries(pool, { repo: REPO })).map((r) => r.id), [recAttr.id], "repo filter");
   assert.deepEqual((await listRecordSummaries(pool, { repo: null })).map((r) => r.id), [recCopy.id], "repo null = non-code only");
@@ -484,7 +484,7 @@ for (const t of [lean.text, pack.text]) {
 {
   const text = await openWorkText(cfg, { now: T(120) });
   assert.ok(text.startsWith("## Open work (records), last 14 days\n"), text.split("\n")[0]);
-  assert.ok(text.includes(`· Attribution investigation · demo · `) && text.includes(`· ${recAttr.id}`), "attribution record line");
+  assert.ok(text.includes(`· Attribution investigation · touched demo · `) && text.includes(`· ${recAttr.id}`), "attribution record line");
   assert.ok(text.includes(`· Landing copy · non-code · `) && text.includes(`· ${recCopy.id}`), "landing copy line");
   assert.ok(text.includes(`\n  PROPOSED next: "Size the effect of the distinct_id guard against the attribution window" (by classifier)\n`), "newest proposed update under the record");
   assert.ok(text.includes(`\n  PROPOSED note: "second draft" (by rachit)\n`) || text.endsWith(`\n  PROPOSED note: "second draft" (by rachit)`) || text.includes(`  PROPOSED note: "second draft" (by rachit)\n\n## Unassigned`), "landing copy's newest proposed note");
@@ -555,7 +555,7 @@ const call = async (name: string, args: Record<string, unknown>) => {
 // ---------- MCP: the other record tools ----------
 {
   const list = await call("ledger_records", {});
-  assert.ok(list.includes(recAttr.id) && list.includes(recCopy.id) && list.includes("· Attribution investigation · demo ·"), list);
+  assert.ok(list.includes(recAttr.id) && list.includes(recCopy.id) && list.includes("· Attribution investigation · touched demo ·"), list);
   assert.ok((await call("ledger_records", { kind: "writing" })).includes(recCopy.id) && !(await call("ledger_records", { kind: "writing" })).includes(recAttr.id));
   assert.match(await call("ledger_records", { q: "zzz-nothing" }), /(^|\n)No records match\.$/, "a scope line may precede the empty result");
   const get = await call("ledger_record_get", { record_id: recAttr.id });
