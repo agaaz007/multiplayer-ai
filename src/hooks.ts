@@ -67,6 +67,8 @@ export interface Journal {
   nudged?: string;
   /** the open investigation this analysis session is bound to (ledger_investigation_bind / ledger_investigation_new) */
   investigation?: { record_id: string; title?: string; at: string };
+  /** Stop already blocked once for "material queries, no investigation binding"; a bind clears the condition itself */
+  unbound_nudged?: boolean;
   /** Latest fallback batch. Coverage is explicit; a resumed session can accrue new debt. */
   extracted?: { at: string; result: "none" | "drafts" | "skipped" | "error"; reason: string; draft_ids: string[]; attempts?: number; evidence_ids?: string[] };
   extractions?: NonNullable<Journal["extracted"]>[];
@@ -541,20 +543,23 @@ function handleHookLocked(event: string, input: any, opts: HookOpts = {}): HookR
       // continuity: end of turn is the primary `turn` checkpoint trigger; the helper does the work
       try { writeSignal(sessionId, "checkpoint"); } catch { /* best-effort */ }
       const d = debt(j);
-      // material pulls with no investigation binding block too (BIND_DECISION_ID); a bind later in the session clears it
+      // material pulls with no investigation binding block too (BIND_DECISION_ID), once per session; a bind later
+      // in the session clears the condition, and never re-opens a debt nudge for the same queries
       const unbound = j.investigation ? [] : materialQueries(j);
       if (!d.length && !unbound.length) return { exit: 0 };
-      const fp = fingerprint(d) + (unbound.length ? "|unbound" : "");
-      if (j.nudged === fp || input?.stop_hook_active) {
+      const fp = fingerprint(d);
+      const debtDue = d.length > 0 && j.nudged !== fp;
+      const unboundDue = unbound.length > 0 && !j.unbound_nudged;
+      if (input?.stop_hook_active || (!debtDue && !unboundDue)) {
         // already nudged for this work (or we are inside a stop-hook continuation): let it go, count it
-        if (!j.entries.some((e) => e.kind === "unresolved" && e.summary === fp)) {
+        if (d.length && !j.entries.some((e) => e.kind === "unresolved" && e.summary === fp)) {
           j.entries.push({ at: now, kind: "unresolved", summary: fp });
           saveJournal(j, dir);
         }
         return { exit: 0 };
       }
-      j.nudged = fp;
-      j.entries.push({ at: now, kind: "nudge", summary: fp, evidence_ids: d.map(queryIdentity) });
+      if (debtDue) { j.nudged = fp; j.entries.push({ at: now, kind: "nudge", summary: fp, evidence_ids: d.map(queryIdentity) }); }
+      if (unboundDue) { j.unbound_nudged = true; j.entries.push({ at: now, kind: "nudge", summary: "unbound", evidence_ids: unbound.map(queryIdentity) }); }
       saveJournal(j, dir);
       // JSON on stdout, exit 0: the block form both Claude Code and Codex document.
       // Top-level decision/reason is the original Claude shape and the Codex shape;
