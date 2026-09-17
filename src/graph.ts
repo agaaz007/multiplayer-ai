@@ -61,6 +61,12 @@ export interface GraphNode {
   unpinned_definitions: string[];
   /** Set by --impact: this object depends on the corrected record and needs review before reuse. */
   needs_review?: boolean;
+  /**
+   * Set by --impact: this object's lineage to the corrected record is unresolved (a bare id, a metric
+   * name, a pin that no longer matches), so it is neither confirmed affected nor safely excluded.
+   * Drawn as loudly as needs_review on purpose: an unknown blast radius is not a clean bill of health.
+   */
+  lineage_unresolved?: string;
 }
 
 export interface GraphEdge {
@@ -160,16 +166,20 @@ function allEdges(objects: LedgerObject[], opts: GraphOpts): { edges: GraphEdge[
         detail: (o.fields.correction as Correction | undefined)?.effect });
     }
 
-    for (const d of deps) {
-      const { strength, detail } = pinStrength(d.id, d.version);
-      push({ from: o.id, to: d.id, kind: d.relation, strength, detail });
-    }
-
+    // A reproduction pins its target twice by design (reproduction_of, plus derived-from in
+    // dependencies). One line, not two: the reproduction edge carries the outcome, which is the
+    // part a reader needs, so the duplicate derived-from is folded into it.
     const rep = o.fields.reproduction_of as Reproduction | undefined;
     if (rep) {
       const { strength, detail } = pinStrength(rep.id, rep.version);
       push({ from: o.id, to: rep.id, kind: "reproduction", strength,
         detail: [rep.outcome, detail].filter(truthy).join(", ") });
+    }
+
+    for (const d of deps) {
+      if (rep && d.id === rep.id && d.relation === "derived-from") continue;
+      const { strength, detail } = pinStrength(d.id, d.version);
+      push({ from: o.id, to: d.id, kind: d.relation, strength, detail });
     }
 
     // Bare-id compatibility fields. They carry no version, so they are drawn as unresolved lineage
@@ -283,7 +293,11 @@ export function buildGraph(cfg: Config, opts: GraphOpts = {}): Graph {
     keep = new Set([...keep].filter((id) => reach.has(id)));
     for (const id of reach) if (byNodeId.has(id)) keep.add(id);
     const needsReview = new Set(impact.affected.map((a) => a.id));
-    for (const n of nodes) if (needsReview.has(n.id)) n.needs_review = true;
+    const unresolved = new Map(impact.incomplete.map((x) => [x.id, x.reason]));
+    for (const n of nodes) {
+      if (needsReview.has(n.id)) n.needs_review = true;
+      else if (unresolved.has(n.id)) n.lineage_unresolved = unresolved.get(n.id);
+    }
   }
   if (opts.conflictsOnly) keep = new Set([...keep].filter((id) => conflictOf.has(id)));
   if (opts.unpinnedOnly) keep = new Set([...keep].filter((id) => byNodeId.get(id)?.unpinned_definitions.length));
@@ -371,10 +385,16 @@ function badges(n: GraphNode): string[] {
     n.label,
     n.conflict ? "UNRESOLVED CONFLICT" : null,
     n.needs_review ? "NEEDS REVIEW" : null,
+    n.lineage_unresolved ? `LINEAGE UNRESOLVED: ${clip(n.lineage_unresolved, 60)}` : null,
     n.verification === "contested" ? "contested" : n.verification === "reproduced" ? "reproduced" : null,
     n.correction ? `correction: ${n.correction}` : null,
     n.unpinned_definitions.length ? `unpinned: ${n.unpinned_definitions.join(", ")}` : null,
   ].filter(truthy);
+}
+
+/** The markers that change what a reader should do with the node, rather than merely describe it. */
+function isAlarm(n: GraphNode): boolean {
+  return n.conflict || n.verification === "contested" || Boolean(n.needs_review) || Boolean(n.lineage_unresolved);
 }
 
 const DOT_SHAPE: Record<LedgerType, string> = {
@@ -391,7 +411,7 @@ function dotNode(n: GraphNode): string {
     : n.tier === 2
       ? { color: "#9a6700", fill: "#fff8e5", font: "#24292f", style: "filled,dashed", pen: 1.4 }
       : { color: "#8c959f", fill: "#f6f8fa", font: "#6e7781", style: "filled,dotted", pen: 1.0 };
-  const alarm = n.conflict || n.verification === "contested" || n.needs_review;
+  const alarm = isAlarm(n);
   const label = [clip(n.title), `(${n.id})`, ...badges(n)].join("\\n");
   const attrs = [
     `label="${label.replace(/"/g, '\\"')}"`,
@@ -472,8 +492,7 @@ export function toMermaid(g: Graph, legend = false): string {
     const label = [clip(n.title), `${n.id}`, ...badges(n)].map(text).join("<br/>");
     lines.push(`  ${MERMAID_SHAPE[n.type](alias.get(n.id)!, label)}`);
     const tier = n.tier === 3 ? "current" : n.tier === 2 ? "draft" : "retired";
-    const alarm = n.conflict || n.verification === "contested" || n.needs_review;
-    lines.push(`  class ${alias.get(n.id)} ${tier}${alarm ? ",alarm" : ""}`);
+    lines.push(`  class ${alias.get(n.id)} ${tier}${isAlarm(n) ? ",alarm" : ""}`);
   }
   for (const e of g.edges) {
     const a = alias.get(e.from)!;
