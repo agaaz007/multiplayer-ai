@@ -262,7 +262,7 @@ async function main() {
             }
             // continuity: teammates' open threads + any notices the helper fetched. Fails open in 4 s.
             try {
-              const threads = await openThreadsText(cfg, { cwd: input?.cwd ? String(input.cwd) : process.cwd() });
+              const threads = await openThreadsText(cfg, { cwd: input?.cwd ? String(input.cwd) : process.cwd(), timeoutMs: 8000 }); // SessionStart hook allows 30 s; Neon connects have taken 7-8 s
               if (threads) parts.push(threads);
             } catch { /* never block a session start */ }
           }
