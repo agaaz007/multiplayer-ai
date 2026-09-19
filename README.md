@@ -123,7 +123,7 @@ One nudge per batch of uncaptured work. A second Stop with the same work passes 
 |---|---|---|---|---|
 | Claude Code, incl. Conductor | yes | automatic (hook) | `~/.claude/ledger.md` via CLAUDE.md import | yes |
 | Codex CLI and desktop app | yes | automatic (hook, once trusted) | inline in `~/.codex/AGENTS.md` | yes, once the five hooks are trusted via `/hooks` |
-| ChatGPT web | not yet: needs a remote HTTPS MCP endpoint (Developer mode connector), not stdio | agent must call `ledger_brief` | paste the guide into project or custom instructions | no lifecycle hooks exist |
+| ChatGPT web | test only: `ledger mcp --http --scratch` serves a scratch ledger over HTTPS for a Developer mode app; the team ledger needs login, not built yet | agent must call `ledger_brief` | paste the guide into project or custom instructions | no lifecycle hooks exist |
 
 Conductor runs Claude Code, and everything here is installed at user scope (`~/.claude.json`, `~/.claude/settings.json`, `~/.claude/CLAUDE.md`), so every Conductor workspace gets it. The installed commands use absolute paths, so Conductor's PATH does not matter.
 

@@ -24,6 +24,7 @@
     "test:resume": "npm run build && node dist/selftest-resume.js",
     "test:classify": "npm run build && node dist/selftest-classify.js",
     "test:recordpack": "npm run build && node dist/selftest-recordpack.js",
+    "test:http": "npm run build && node dist/selftest-http.js",
     "test:authority": "npm run build && node dist/selftest-authority.js",
     "test:capture": "npm run build && node dist/selftest-capture.js && node dist/selftest-capture-boundary.js",
     "test:investigation": "npm run build && node dist/selftest-investigation.js",
