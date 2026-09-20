@@ -17,18 +17,36 @@ const safe = (id: string) => id.replace(/[^A-Za-z0-9_-]/g, "_");
 const directory = (id: string) => path.join(spoolDir(), `${safe(id)}.v2`);
 const manifestFile = (id: string) => path.join(directory(id), "manifest.json");
 const segmentFile = (id: string, n: number) => path.join(directory(id), `${String(n).padStart(12, "0")}.json`);
-export interface SpoolBatch { offset: number; events: NormEvent[]; at: string }
-interface Manifest { version: 2; next: number; acked: number; source_cursor: number; legacy_imported: boolean }
+export interface SpoolBatch { offset: number; events: NormEvent[]; at: string; source?: Record<string, unknown> }
+interface Manifest { version: 2; next: number; acked: number; source_cursor: number; legacy_imported: boolean; source?: Record<string, unknown> }
 /** Fault injection only; called after real durability boundaries. */
 let fault: ((boundary: string) => void) | undefined;
 export function setSpoolFaultInjector(fn?: (boundary: string) => void): void { fault = fn; }
 function syncDir(dir: string): void { const fd = fs.openSync(dir, "r"); try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); } }
+const diskUsage = new Map<string, { bytes: number; checked: number }>();
+function currentDiskUsage(): { bytes: number; checked: number } {
+  const root = spoolDir(), cached = diskUsage.get(root);
+  if (cached && Date.now() - cached.checked < 30_000) return cached;
+  let bytes = 0;
+  const walk = (dir: string) => { if (!fs.existsSync(dir)) return; for (const e of fs.readdirSync(dir, { withFileTypes: true })) { const f = path.join(dir, e.name); if (e.isDirectory()) walk(f); else bytes += fs.lstatSync(f).size; } };
+  walk(root); const value = { bytes, checked: Date.now() }; diskUsage.set(root, value); return value;
+}
 function atomic(file: string, bytes: string): void {
+  // Retention is bounded even when all segments are acknowledged. Capacity
+  // failures leave the source unadvanced; pruning is an explicit operation.
+  const budget = Number(process.env.LEDGER_SPOOL_MAX_BYTES ?? 512 * 1024 * 1024);
+  if (!Number.isSafeInteger(budget) || budget < 4096) throw new Error("invalid LEDGER_SPOOL_MAX_BYTES (minimum 4096)");
+  const usage = currentDiskUsage(), size = Buffer.byteLength(bytes);
+  if (usage.bytes + size > budget) throw new Error("spool disk budget exceeded; source and pending data retained; prune acknowledged retention explicitly");
+  const disk = fs.statfsSync(path.dirname(file));
+  if (Number(disk.bavail) * Number(disk.bsize) < size + (64 << 20)) throw new Error("spool free-space reserve reached; source retained");
+  const previous = fs.existsSync(file) ? fs.statSync(file).size : 0;
   const tmp = `${file}.${process.pid}.tmp`;
   const fd = fs.openSync(tmp, "w", 0o600);
   try { fs.writeFileSync(fd, bytes); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
   fault?.("file_flushed");
   fs.renameSync(tmp, file); syncDir(path.dirname(file));
+  usage.bytes += size - previous;
   fault?.(file.endsWith("manifest.json") ? "manifest_committed" : "segment_committed");
 }
 function segment(id: string, n: number, batch: SpoolBatch): void {
@@ -90,6 +108,7 @@ function manifest(id: string, locked = false): Manifest {
   }
   atomic(manifestFile(id), JSON.stringify(m)); return m;
 }
+export function spoolSource(id: string): Record<string, unknown> | undefined { return manifest(id).source; }
 export function spoolCursor(id: string): number | undefined {
   if (!fs.existsSync(manifestFile(id)) && !fs.existsSync(path.join(spoolDir(), `${safe(id)}.jsonl`))) return undefined;
   return manifest(id).source_cursor;
@@ -99,6 +118,7 @@ export function spoolAppend(id: string, batch: SpoolBatch): void {
   const m = manifest(id, true);
   for (const part of chunks(batch)) segment(id, m.next++, part);
   m.source_cursor = batch.offset;
+  if (batch.source) m.source = batch.source;
   atomic(manifestFile(id), JSON.stringify(m));
   });
 }

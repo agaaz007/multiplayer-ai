@@ -69,7 +69,8 @@ const pool = getPool(cfg);
 await assertSelftestDatabaseMarker(pool);
 await pool.query(`drop table if exists cont_session_bindings, cont_state_updates, cont_record_links, cont_records, cont_notifications, cont_artifacts, cont_claims, cont_checkpoints, cont_events, cont_sessions, cont_threads cascade`);
 await migrate(pool);
-assert.equal((await tableList(pool)).length, 11, "all eleven cont_* tables present (cont_session_bindings added 2026-09-17)");
+const migratedTables = await tableList(pool);
+for (const table of ["cont_sessions","cont_threads","cont_events","cont_records","cont_session_bindings","cont_binding_operations","cont_usage_invocations","cont_usage_storage_ops","cont_handoff_attempts"]) assert.ok(migratedTables.includes(table), `${table} exists after additive migration`);
 ok(`schema reset on ${DB.replace(/\/\/[^@]*@/, "//…@")}`);
 
 // ---------- fixture: agaaz (Claude Code) then rachit (Codex) on one repo ----------

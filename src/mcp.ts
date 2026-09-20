@@ -22,7 +22,7 @@ import { buildResumePack, threadLine } from "./continuity/resume.js";
 import { queryEvents, getArtifact, eventLine, resolveSessionId, resolveSearchScope, scopeLine, EVENTS_DEFAULT_LIMIT, EVENTS_MAX_LIMIT, PREVIEW_CHARS, PREVIEW_MAX_CHARS, ARTIFACT_DEFAULT_CHARS, ARTIFACT_MAX_CHARS } from "./continuity/evidence.js";
 import { repoRoot, repoIdentity, currentBranch } from "./continuity/shadow.js";
 import { forbiddenSnapshotRoot, localTranscriptExists, resolveHarnessSession, resolveHarnessIdentity, type HarnessIdentity } from "./continuity/safety.js";
-import { openThreadsText } from "./continuity/brief.js";
+import { openThreadsText, continuityBrief } from "./continuity/brief.js";
 import { writeBinding, writeSignal } from "./helper/signals.js";
 import { buildRecordPack, listRecordSummaries, recordLine, unassignedLine } from "./continuity/recordpack.js";
 import { addStateUpdate, asOfRecordSummaries, confirmStateUpdate, createRecord, getRecord, linkSpan, recordsForSession, rejectStateUpdate, searchEvidence, unassignedSpans, updateRecordMeta } from "./continuity/records.js";
@@ -137,8 +137,8 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
     async ({ days, tags }) => {
       const capture = reconcileSharedCapture(cfg);
       const b = brief(cfg, { days, tags, guidePath: opts.guidePath });
-      const threads = await openThreadsText(cfg, { cwd: process.cwd(), includeOwn: false });
-      return text([b,threads,...capture.warnings].filter(Boolean).join('\n\n'));
+      const continuity = await continuityBrief(cfg, { cwd: process.cwd(), includeOwn: false });
+      return {...text([b,continuity.text,...capture.warnings].filter(Boolean).join('\n\n')),structuredContent:{availability:continuity.availability === "unavailable" ? "unavailable" : "available",continuity_sections:continuity.sections}};
     }
   );
 
@@ -214,7 +214,7 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
   }, async ({question, analysis_scope, definition_ids, as_of, limit, candidate_limit}) => {
     const pack = investigation(cfg, {question, scope:analysis_scope, definition_ids, as_of, limit, candidate_limit});
     const result = evidenceResult(pack.text, pack.objects, {query: question, candidate_count: pack.legacy_candidates.length});
-    return {...result, structuredContent: {...result.structuredContent, investigation: pack}};
+    return {...result, structuredContent: {...result.structuredContent, investigation: pack, availability: pack.availability, discovery_status: pack.discovery_status, candidate_count: pack.legacy_candidates.length}};
   });
 
   registerAppTool(server, 'ledger_impact', {

@@ -32,8 +32,8 @@ async function briefRepo(cwd: string | undefined, budget: number): Promise<strin
  * the current repo first. Read deadlines bound waiting and surface unavailable sections distinctly from empty work. The work-record sections from
  * openWorkText are appended so every entry point gets them.
  */
-export async function openThreadsText(cfg: Config, opts: { cwd?: string; hours?: number; limit?: number; includeOwn?: boolean; timeoutMs?: number } = {}): Promise<string> {
-  if (!continuityConfigured(cfg)) return "";
+export async function continuityBrief(cfg: Config, opts: { cwd?: string; hours?: number; limit?: number; includeOwn?: boolean; timeoutMs?: number } = {}): Promise<{text:string;sections:AvailableSection[];availability:"available"|"unavailable"|"not_configured"}> {
+  if (!continuityConfigured(cfg)) return {text:"",sections:[],availability:"not_configured"};
   const hours = opts.hours ?? 48;
   const limit = opts.limit ?? 5;
   const budget = opts.timeoutMs ?? 4000;
@@ -68,8 +68,10 @@ export async function openThreadsText(cfg: Config, opts: { cwd?: string; hours?:
     for (const n of notes) out.push(`- ${n}`);
   }
   for (const section of [t, i, r]) if (section) { if (out.length) out.push(``); out.push(section); }
-  return out.join("\n");
+  return {text:out.join("\n"),sections:[threadResult,investigationResult,workResult],availability:[threadResult,investigationResult,workResult].some(s=>s.status === "unavailable") ? "unavailable" : "available"};
 }
+
+export async function openThreadsText(cfg:Config,opts:Parameters<typeof continuityBrief>[1]={}):Promise<string> {return (await continuityBrief(cfg,opts)).text;}
 
 /** The contract sentence under "Open investigations"; the hooks' gate and Stop block name the same three tools. */
 export const INVESTIGATIONS_CONTRACT = `Analysis sessions must bind to one of these or declare a new question before running data queries (ledger_investigations / ledger_investigation_bind / ledger_investigation_new). Non-repo work is fine; do not proceed as just a thread on this repo.`;
