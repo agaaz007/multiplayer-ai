@@ -86,16 +86,27 @@ export interface MemoryReport {
     edges: ReuseEdge[];
     cross_author: ReuseEdge[];
     stale: ReuseEdge[];
+    /** Cross-person references that name a record but pin no version: multiplayer without lineage. */
+    unpinned_cross_author: { from: string; from_author: string; to: string; to_author: string }[];
     findings_total: number;
     findings_pinned: number;
   };
   gaps: {
-    findings_without_pins: { id: string; title: string; author: string }[];
-    unresolved_names: { id: string; title: string; names: string[] }[];
-    drafts: { id: string; title: string; author: string; origin: "fallback" | "manual" }[];
+    findings_without_pins: Capped<{ id: string; title: string; author: string }>;
+    unresolved_names: Capped<{ id: string; title: string; names: string[] }>;
+    drafts: Capped<{ id: string; title: string; author: string; origin: "fallback" | "manual" }>;
     unreproduced: number;
   };
 }
+
+/** A full count with a bounded sample, so a truncated list never becomes a wrong number. */
+export interface Capped<T> {
+  count: number;
+  examples: T[];
+}
+
+const EXAMPLES = 20;
+const capped = <T>(xs: T[]): Capped<T> => ({ count: xs.length, examples: xs.slice(0, EXAMPLES) });
 
 const RESULT_FIELDS = ["result", "decision", "what", "formula"] as const;
 
