@@ -1,5 +1,5 @@
 import { type Config, loadAll } from "./store.js";
-import { TYPES, type LedgerObject, type LedgerType } from "./schema.js";
+import { TYPES, AnalysisScopeSchema, type LedgerObject, type LedgerType } from "./schema.js";
 import { captureStats } from "./hooks.js";
 import { projectAuthorityObjects, resolveAccepted, correctionImpact, matchesAnalysisScope, objectVersion, scopeIdentity, type ScopeQuery } from './authority.js';
 
@@ -160,6 +160,25 @@ export function matchesDiscoveryScope(o: LedgerObject, scope?: ScopeQuery): bool
     return matchesAnalysisScope(o,identity);
   }
   return matchesAnalysisScope(o,scope);
+}
+
+/** Missing facets are discovery evidence only. Known incompatible facets never become fallback hits. */
+export function legacyScopeGaps(o: LedgerObject, scope?: ScopeQuery): string[] | null {
+  const actual = (o.fields.analysis_scope ?? {}) as Record<string, unknown>;
+  const required = Object.keys(AnalysisScopeSchema.shape).filter(k => k !== 'window');
+  const gaps = required.filter(k => typeof actual[k] !== 'string' || !(actual[k] as string).trim());
+  if (!gaps.length) return null;
+  for (const [key, value] of Object.entries(scope ?? {})) {
+    if (key === 'window' || value === undefined) continue;
+    if (actual[key] !== undefined && actual[key] !== value) return null;
+  }
+  if (scope?.window) {
+    const window = (o.type === 'finding' ? o.fields.data_window : actual.window) as {from?: string; to?: string} | undefined;
+    if (window?.from && (o.type === 'finding' ? window.from.slice(0,10) !== scope.window.from.slice(0,10) : window.from.slice(0,10) > scope.window.from.slice(0,10))) return null;
+    if (window?.to && (o.type === 'finding' ? window.to.slice(0,10) !== scope.window.to.slice(0,10) : window.to.slice(0,10) < scope.window.to.slice(0,10))) return null;
+    if (!window?.from || !window?.to) gaps.push('window');
+  }
+  return gaps;
 }
 
 /** Tier and label from the object's own lifecycle plus its accepted resolution; the label always names what displaced it. */

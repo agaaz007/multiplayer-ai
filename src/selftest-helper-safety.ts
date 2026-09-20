@@ -155,14 +155,14 @@ const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd,
   assert.match(noPass, /ENOTFOUND/);
   assert.match(String(captureStaleness({ ...base, last_pass_started_at: iso(1), last_pass_finished_at: iso(0.9), last_error: "shadow e598e2b8: push failed" }, now, { alive })), /reported errors in its last pass: shadow e598e2b8: push failed/);
 
-  assert.equal(continuityStartContext("sess-1", now), "", "SessionStart adds nothing on a machine without a helper heartbeat");
+  assert.match(continuityStartContext("fixture-session-1", now), /Capture status unknown/, "SessionStart supplies real identity even without a helper heartbeat");
   writeHeartbeat({ ...base, pid: process.pid, last_pass_started_at: iso(1), last_pass_finished_at: iso(0.5) }, now);
   assert.ok(fs.existsSync(heartbeatFile()));
-  const fresh = continuityStartContext("sess-1", now);
-  assert.match(fresh, /^Ledger session: sess-1\. Pass session_id: "sess-1" to ledger_resume/);
+  const fresh = continuityStartContext("fixture-session-1", now);
+  assert.match(fresh, /^Ledger session: fixture-session-1\. Pass session_id: "fixture-session-1" to ledger_investigation_bind/);
   assert.ok(!fresh.includes("WARNING"));
   writeHeartbeat({ last_pass_started_at: iso(30), last_pass_finished_at: iso(45) }, now);
-  assert.match(continuityStartContext("sess-1", now), /WARNING: Ledger capture on this machine is stalled/);
+  assert.match(continuityStartContext("fixture-session-1", now), /WARNING: Ledger capture on this machine is stalled/);
   ok("staleness: dead, stalled, failing and healthy helpers distinguished; SessionStart prints the session id and any warning");
 }
 

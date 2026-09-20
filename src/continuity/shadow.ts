@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import crypto from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { DEFAULT_DENY_GLOBS, DEFAULT_SNAPSHOT_EXCLUDES, globToRegExp } from "./redact.js";
 import { forbiddenSnapshotRoot } from "./safety.js";
@@ -30,6 +31,8 @@ export interface ShadowOpts {
   push?: boolean;              // default true
   message?: string;
   now?: Date;
+  /** Helper worker-owned directory, never the user index. */
+  privateIndexDirectory?: string;
 }
 
 export interface ShadowResult {
@@ -119,10 +122,18 @@ export function shadowCommit(worktree: string, opts: ShadowOpts): ShadowResult {
   const exclude = [...DEFAULT_SNAPSHOT_EXCLUDES, ...(opts.exclude ?? [])];
   const denyRe = deny.map(globToRegExp);
   const excludeRe = exclude.map(globToRegExp);
-  const idx = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "ledger-shadow-")), "index");
+  const indexDir = opts.privateIndexDirectory ?? fs.mkdtempSync(path.join(os.tmpdir(), "ledger-shadow-"));
+  fs.mkdirSync(indexDir, { recursive: true, mode: 0o700 });
+  const idx = path.join(indexDir, "index");
+  const metadata = path.join(indexDir, "identity.json");
+  const identity = crypto.createHash("sha256").update(JSON.stringify({ root: fs.realpathSync(root), head, deny, exclude, include: opts.include ?? [] })).digest("hex");
+  let reuse = false;
+  try { reuse = fs.existsSync(idx) && fs.readFileSync(metadata, "utf8") === identity; } catch { /* new or interrupted cache */ }
+  // One worker per worktree owns this index. A killed Git may leave its private lock.
+  try { fs.unlinkSync(`${idx}.lock`); } catch { /* absent */ }
   const env = { GIT_INDEX_FILE: idx };
   try {
-    git(root, ["read-tree", head], env);
+    if (!reuse) git(root, ["read-tree", head], env);
     git(root, ["add", "-A", "--", "."], env);
     for (const inc of opts.include ?? []) {
       try { git(root, ["add", "-f", "--", inc], env); } catch { res.gaps.push({ kind: "include_missing", paths: [inc] }); }
@@ -149,6 +160,10 @@ export function shadowCommit(worktree: string, opts: ShadowOpts): ShadowResult {
       changed = git(root, ["diff-files", "--name-only"], env).split("\n").filter(Boolean).filter((f) => !toDrop.includes(f));
       if (changed.length) res.gaps.push({ kind: "file_changed_during_snapshot", paths: changed.slice(0, 50) });
     }
+    const finalPaths = git(root, ["ls-tree", "-r", "--name-only", tree]).split("\n").filter(Boolean);
+    const finalLeaks = finalPaths.filter(f => denyRe.some(r => r.test(f) || r.test(path.basename(f))));
+    if (finalLeaks.length) return { ...res, error: "denied path appeared during snapshot retry", gaps: [{ kind: "denied_path_in_tree", paths: finalLeaks }] };
+    fs.writeFileSync(metadata, identity, { mode: 0o600 });
     res.tree = tree;
     if (opts.lastTree && tree === opts.lastTree) return { ...res, ok: true, skipped: "unchanged" };
     const headTree = git(root, ["rev-parse", `${head}^{tree}`]);
@@ -166,19 +181,22 @@ export function shadowCommit(worktree: string, opts: ShadowOpts): ShadowResult {
     };
     // A restarted helper can lose the previous shadow commit. Continuing from the remote tip keeps the push a fast-forward;
     // parenting on HEAD made every later push of the ref fail as non-fast-forward, so nothing was saved (2026-09-13).
-    const parent = opts.parent ?? (opts.push === false ? null : remoteTip()) ?? head;
+    // The first shared snapshot is an orphan. Parenting on local HEAD can push
+    // private history (including denied files removed from the final tree).
+    // Shared successors parent ONLY on the already-published snapshot lineage.
+    const parent = opts.push === false ? (opts.parent ?? null) : remoteTip();
 
     const when = (opts.now ?? new Date()).toISOString();
     const msg = opts.message ?? `wip snapshot ${when}`;
-    const makeCommit = (p: string): string => {
-      const c = git(root, ["commit-tree", tree, "-p", p, "-m", msg], {
+    const makeCommit = (p: string | null): string => {
+      const c = git(root, ["commit-tree", tree, ...(p ? ["-p", p] : []), "-m", msg], {
         GIT_AUTHOR_NAME: "ledger-helper", GIT_AUTHOR_EMAIL: "helper@ledger.local", GIT_COMMITTER_NAME: "ledger-helper", GIT_COMMITTER_EMAIL: "helper@ledger.local",
       });
       git(root, ["update-ref", opts.ref, c]);
       res.commit = c;
-      res.parent = p;
+      res.parent = p ?? undefined;
       try {
-        res.files = git(root, ["diff-tree", "--no-commit-id", "--name-status", "-r", p, c]).split("\n").filter(Boolean).map((l) => { const [status, ...rest] = l.split("\t"); return { status, path: rest.join("\t") }; });
+        res.files = git(root, ["diff-tree", "--no-commit-id", "--name-status", "-r", ...(p ? [p, c] : ["--root", c])]).split("\n").filter(Boolean).map((l) => { const [status, ...rest] = l.split("\t"); return { status, path: rest.join("\t") }; });
       } catch { /* first commit or unusual parent */ }
       return c;
     };
@@ -214,7 +232,7 @@ export function shadowCommit(worktree: string, opts: ShadowOpts): ShadowResult {
   } catch (e: any) {
     return { ...res, error: String(e?.stderr || e?.message || e).slice(0, 300) };
   } finally {
-    try { fs.rmSync(path.dirname(idx), { recursive: true, force: true }); } catch { /* tmp */ }
+    if (!opts.privateIndexDirectory) try { fs.rmSync(path.dirname(idx), { recursive: true, force: true }); } catch { /* tmp */ }
   }
 }
 

@@ -1,6 +1,6 @@
 import { loadAll, type Config } from './store.js';
 import { TYPES, type LedgerObject } from './schema.js';
-import { score, renderFull, matchesDiscoveryScope, claimText, idfOver, questionSimilarity, NEAR_DUPLICATE } from './query.js';
+import { score, renderFull, matchesDiscoveryScope, claimText, idfOver, questionSimilarity, NEAR_DUPLICATE, legacyScopeGaps, objectAuthority, tokens } from './query.js';
 import { matchesAnalysisScope, objectVersion, resolveAccepted, correctionImpact, dependents, sameAnalyticalScope, snapshotIdentity, snapshotsDiffer, verification, type ScopeQuery } from './authority.js';
 
 export interface InvestigationOptions {
@@ -9,13 +9,16 @@ export interface InvestigationOptions {
   definition_ids?: string[];
   as_of?: string;
   limit?: number;
+  candidate_limit?: number;
 }
 
 /** Task context is derived from exact accepted lineages, independently of the recent brief. */
 export function analyticalContext(objects: LedgerObject[], opts: InvestigationOptions) {
+  if (!opts.question.trim()) throw new Error('investigation question must not be empty');
+  for (const value of [opts.limit, opts.candidate_limit]) if (value !== undefined && (!Number.isInteger(value) || value < 1 || value > 50)) throw new Error('investigation limits must be integers between 1 and 50');
   const byId = new Map(objects.map(o => [o.id, o]));
   const requested = new Set(opts.definition_ids ?? []);
-  const relevant = objects.filter(o => matchesDiscoveryScope(o, opts.scope));
+  const relevant = objects.filter(o => matchesDiscoveryScope(o, opts.scope) && !legacyScopeGaps(o, opts.scope));
   const hits = relevant.map(o => ({o, score: requested.has(o.id) ? Number.MAX_SAFE_INTEGER : score(opts.question, o)}))
     .filter(h => h.score > 0).sort((a,b) => b.score-a.score || a.o.id.localeCompare(b.o.id));
   const warnings: string[] = [];
@@ -40,7 +43,7 @@ export function analyticalContext(objects: LedgerObject[], opts: InvestigationOp
     visited.add(id);
     const o = byId.get(id);
     if (!o) { warnings.push(`Missing linked source: ${id}`); continue; }
-    if (!matchesDiscoveryScope(o, opts.scope)) { warnings.push(`Linked source does not establish requested scope: ${id}`); continue; }
+    if (!matchesDiscoveryScope(o, opts.scope) || legacyScopeGaps(o, opts.scope)) { warnings.push(`Linked source does not establish requested scope: ${id}`); continue; }
     const r = resolveAccepted(objects, id, {asOf: opts.as_of, scope: opts.scope});
     const family = [...r.history.map(h=>h.id)].sort().join('|') || id;
     contexts.set(family, r);
@@ -65,8 +68,28 @@ export function analyticalContext(objects: LedgerObject[], opts: InvestigationOp
     // metrics/populations or feed unscoped decisions, and still require review.
     if (source) { affected.set(item.id,item); selected.set(source.id,source); }
   }
-  const unresolved_scope = opts.scope ? objects.filter(o=>!o.fields.analysis_scope && score(opts.question,o)>0).map(o=>o.id) : [];
-  if (unresolved_scope.length) warnings.push(`${unresolved_scope.length} legacy matching records lack analytical scope; they are not silently used as current task authority.`);
+  const candidates = objects.map(o => ({o, gaps: legacyScopeGaps(o, opts.scope), relevance: score(opts.question,o)}))
+    .filter(h => h.gaps && h.relevance > 0)
+    .sort((a,b) => b.relevance - a.relevance || a.o.id.localeCompare(b.o.id));
+  const legacy_candidates = candidates.slice(0,opts.candidate_limit ?? 5).map(({o,gaps,relevance}) => {
+    // Resolve without the requested scope to preserve lifecycle/conflict labels, not applicability.
+    const authority = resolveAccepted(objects,o.id,{asOf:opts.as_of});
+    const lifecycle = objectAuthority(o,authority);
+    const matched = [...new Set(tokens(opts.question))].filter(t => tokens([o.title,o.body,JSON.stringify(o.fields)].join(' ')).includes(t));
+    return {id:o.id, content_version:objectVersion(o), title:o.title, author:o.author, type:o.type, status:o.status,
+      authority_label:authority.status === 'conflict' ? 'unresolved accepted conflict' : lifecycle.label,
+      authority_status:authority.status, authority_warnings:authority.warnings,
+      supersedes:o.supersedes, superseded_by:o.superseded_by,
+      excerpt:String(o.fields.result ?? o.fields.formula ?? o.fields.decision ?? o.fields.what ?? o.body).slice(0,600),
+      scope_status:'unknown' as const, scope_gaps:gaps!, scope_known:o.fields.analysis_scope ?? null,
+      reason_matched:`Lexical match: ${matched.join(', ')}; analytical applicability not established`, score:relevance,
+      next_action:{tool:'ledger_get',arguments:{id:o.id}},
+      warning:'Candidate only. Open the original evidence and validate scope, correction history and lineage before reuse; this is not applicable authority.'};
+  });
+  const unresolved_scope = candidates.map(h=>h.o.id);
+  if (unresolved_scope.length) warnings.push(`${unresolved_scope.length} matching records lack complete analytical scope; ${legacy_candidates.length} candidate(s) shown separately, never silently used as current task authority.`);
+  const discovery_status = legacy_candidates.length ? 'candidates_available' : current.length ? 'applicable_records' : selected.size ? 'no_applicable_records' : 'no_matches';
+
 
   // Competition is computed through the supersession DAG, so two same-scope claims nobody linked are two
   // separate lineages and neither side is flagged. This is the same comparison the write path nudges
@@ -153,6 +176,8 @@ export function analyticalContext(objects: LedgerObject[], opts: InvestigationOp
     ...section(`## Contested: a reproduction at this version did not match`, contested.map(o=>`CONTESTED: ${o.id}\n${renderObject(o)}`)),
     ...section(`## Uncertain: accepted results requiring review before reuse`, current.filter(o=>affected.has(o.id)).map(o=>`NEEDS REVIEW: ${o.id}\n${renderObject(o)}`)),
     ...section(`## Original evidence and correction history`, [...selected.values()].filter(o=>!current.some(c=>c.id===o.id)).map(renderObject)),
+    ...section(`## Legacy candidates — scope unknown, not applicable authority`, legacy_candidates.map(c=>
+      `${c.id} (${c.author}; ${c.status}; ${c.authority_label})\n${c.title}\n${c.excerpt}\ncontent_version: ${c.content_version}\nMissing scope: ${c.scope_gaps.join(', ')}. ${c.reason_matched}.\n${c.warning} Open with ledger_get({id: "${c.id}"}).${c.authority_warnings.length ? `\n${c.authority_warnings.join('; ')}` : ''}`)),
     ...section(`## Proposals, not accepted`, [...new Map(resolutions.flatMap(r=>r.proposals).map(o=>[o.id,o])).values()].map(renderObject)),
     ...section(`## Results requiring review`, [...affected.values()].map(a=>`${a.id}: ${a.status}; ${a.reason}; path ${a.path.join(' -> ')}; downstream scope: ${JSON.stringify(byId.get(a.id)?.fields.analysis_scope ?? 'unknown')}`)),
     ...impacts.flatMap(i=>i.incomplete.map(x=>`INCOMPLETE IMPACT: ${x.id}: ${x.reason}`)),
@@ -161,7 +186,7 @@ export function analyticalContext(objects: LedgerObject[], opts: InvestigationOp
     `Artifact references are references only: fetch and hash-check them before claiming restoration or executing a saved query.`,
     `Preserve unresolved capture, missing lineage and pending operations. Save the new result against exact definition and query versions.`,
   ].join('\n\n');
-  return {question:opts.question, scope:opts.scope ?? null, resolutions, current, impacts, affected:[...affected.values()], unlinked, verification:Object.fromEntries(verified), next_checks:next, unresolved_scope, warnings:[...new Set(warnings)], objects:[...selected.values()], text};
+  return {availability:'available' as const, discovery_status, legacy_candidates, question:opts.question, scope:opts.scope ?? null, resolutions, current, impacts, affected:[...affected.values()], unlinked, verification:Object.fromEntries(verified), next_checks:next, unresolved_scope, warnings:[...new Set(warnings)], objects:[...selected.values()], text};
 }
 
 export function investigation(cfg: Config, opts: InvestigationOptions) { return analyticalContext(loadAll(cfg,TYPES), opts); }

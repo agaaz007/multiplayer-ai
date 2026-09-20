@@ -22,6 +22,9 @@ export interface HelperHeartbeat {
   last_pass_ms: number | null;
   last_error: string | null;
   updated_at: string;
+  snapshot_queue_depth?: number;
+  snapshot_last_error?: string | null;
+  capture_sessions?: Record<string, { source_cursor: number; pending_batches: number; pending_bytes: number; oldest_at: string | null }>;
 }
 
 export const heartbeatFile = () => path.join(ledgerHome(), "helper-heartbeat.json");
