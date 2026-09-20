@@ -1,0 +1,87 @@
+import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
+import type pg from "pg";
+import type { Config } from "./store.js";
+import { assertSafeSelftestDatabase, assertSelftestDatabaseMarker } from "./selftest-db-guard.js";
+import { getPool,migrate,closePools } from "./continuity/db.js";
+import { bindInvestigation,declareInvestigation,sessionBinding } from "./continuity/investigations.js";
+import { resolveHarnessIdentity,resolveHarnessSession } from "./continuity/safety.js";
+import { withUsageInvocation,drainUsageWrites,usageDirectory,sqlOperationClass } from "./usage.js";
+import { flushUsage } from "./continuity/usage.js";
+const url=process.env.LEDGER_CONTINUITY_DB!;
+assertSafeSelftestDatabase(url);
+const tmp=await fs.mkdtemp(path.join(os.tmpdir(),"ledger-bind-usage-"));
+process.env.LEDGER_CONFIG_DIR=path.join(tmp,"config");
+const cfg:Config={author:"binding-test",ledger_dir:path.join(tmp,"ledger"),git_sync:false,continuity:{database_url:url,machine:"fixture"}};
+const pool=getPool(cfg);await assertSelftestDatabaseMarker(pool);await migrate(pool);
+const sid=`test-${randomUUID()}`;
+const question=`Unique binding durability ${randomUUID()}`;
+const key=randomUUID();
+const declared=await declareInvestigation(pool,cfg,{session_id:sid,question,request_id:key});
+assert.deepEqual(await declareInvestigation(pool,cfg,{session_id:sid,question,request_id:key}),declared);
+await assert.rejects(declareInvestigation(pool,cfg,{session_id:sid,question:question+" changed",request_id:key}),/different binding arguments/);
+let row=(await pool.query(`select * from cont_sessions where id=$1`,[sid])).rows[0];
+assert.equal(row.harness,"unknown");
+await bindInvestigation(pool,cfg,{session_id:sid,record_id:declared.record_id,identity:{harness:"codex",source:"local_transcript",verified:true}});
+row=(await pool.query(`select * from cont_sessions where id=$1`,[sid])).rows[0];assert.equal(row.harness,"codex");assert.equal(row.identity_history.length,1);
+for(let i=0;i<100;i++) await bindInvestigation(pool,cfg,{session_id:sid,record_id:declared.record_id,request_id:`repeat-${i}`});
+await Promise.all(Array.from({length:8},(_,i)=>bindInvestigation(pool,cfg,{session_id:sid,record_id:declared.record_id,request_id:`concurrent-${i}`})));
+assert.equal((await pool.query(`select count(*)::int n from cont_record_links where session_id=$1`,[sid])).rows[0].n,1);
+await pool.query(`delete from cont_record_links where session_id=$1`,[sid]);
+await bindInvestigation(pool,cfg,{session_id:sid,record_id:declared.record_id});
+assert.equal((await pool.query(`select count(*)::int n from cont_record_links where session_id=$1`,[sid])).rows[0].n,1,"same binding repairs legacy missing link");
+await assert.rejects(bindInvestigation(pool,{...cfg,author:"another-author"},{session_id:sid,record_id:declared.record_id}),/different configured author/);
+
+function faultPool(needle:RegExp,after=false):pg.Pool {
+  return new Proxy(pool,{get(target,key){if(key !== "connect") {const v=Reflect.get(target,key);return typeof v === "function" ? v.bind(target) : v;}return async () => {
+    const c=await pool.connect();const original=c.query.bind(c);let fired=false;
+    const release=c.release.bind(c);
+    (c as any).query=async (...args:any[])=>{const hit=!fired&&needle.test(String(args[0]));if(hit)fired=true;if(hit&&!after)throw new Error("injected write failure");const r=await (original as any)(...args);if(hit)throw new Error("injected acknowledgement loss");return r;};
+    c.release=((destroy?:boolean)=>{(c as any).query=original;c.release=release;release(destroy);}) as typeof c.release;
+    return c;
+  };}}) as pg.Pool;
+}
+for(const needle of [/insert into cont_records/,/insert into cont_session_bindings/,/insert into cont_record_links/,/insert into cont_binding_operations/]) {
+  const faultSid=`fault-${randomUUID()}`;const q=`Failure point ${randomUUID()}`;
+  await assert.rejects(declareInvestigation(faultPool(needle),cfg,{session_id:faultSid,question:q,request_id:randomUUID()}),/injected/);
+  assert.equal(await sessionBinding(pool,faultSid),null);
+  assert.equal((await pool.query(`select count(*)::int n from cont_records where title=$1`,[q])).rows[0].n,0,"no orphan record after intermediate failure");
+  assert.equal((await pool.query(`select count(*)::int n from cont_sessions where id=$1`,[faultSid])).rows[0].n,0,"session insertion rolled back too");
+}
+const lostId=randomUUID(),lostSid=`lost-${randomUUID()}`,lostQuestion=`Lost commit ${randomUUID()}`;
+const recovered=await declareInvestigation(faultPool(/^commit$/,true),cfg,{session_id:lostSid,question:lostQuestion,request_id:lostId});
+assert.equal((await sessionBinding(pool,lostSid))?.record_id,recovered.record_id);
+assert.deepEqual(await declareInvestigation(pool,cfg,{session_id:lostSid,question:lostQuestion,request_id:lostId}),recovered);
+const sameQuestion=`Concurrent exact ${randomUUID()}`;
+const race=await Promise.allSettled([1,2].map(n=>declareInvestigation(pool,cfg,{session_id:`race-${randomUUID()}`,question:sameQuestion,request_id:randomUUID()})));
+assert.equal(race.filter(r=>r.status === "fulfilled").length,1);
+assert.equal(race.filter(r=>r.status === "rejected").length,1);
+assert.equal(resolveHarnessSession("../../etc/passwd",{},()=>true).ok,false);
+const identity=resolveHarnessIdentity("real-session-id",{CODEX_THREAD_ID:"unrelated-session"},()=>({harness:"unknown",source:"explicit_unverified",verified:false}));
+assert.equal(identity.ok && identity.identity?.harness,"unknown");
+console.log("ok binding: 100 retries, concurrency, legacy repair, author guard, write rollback, commit-loss reconciliation, exact question race, unknown identity");
+
+const before=(await pool.query(`select count(*)::int n from cont_usage_invocations`)).rows[0].n;
+await withUsageInvocation(cfg,{tool:"ledger_records",traffic_class:"evaluation",purpose:"interactive_read",session_id:sid},async()=>{
+  await pool.query("select 1 n where false");
+  const c=await pool.connect();try{await c.query("select 1 n");}finally{c.release();}
+  return {structuredContent:{sources:[{id:"fnd-20260920-safe-record-abcd",author:"peer",content_version:"a".repeat(64)}]}};
+});
+await withUsageInvocation(cfg,{tool:"ledger_brief",traffic_class:"evaluation",purpose:"automatic_brief"},async()=>{await pool.query("select 1");return {};});
+await drainUsageWrites();
+let files=await fs.readdir(usageDirectory());assert.ok(files.length >= 5);
+const outage=await flushUsage({query:async()=>{throw new Error("offline");}} as any);assert.equal(outage.error,"usage_upload_failed");
+assert.equal((await fs.readdir(usageDirectory())).length,files.length,"offline telemetry retains all spool frames");
+const uploaded=await flushUsage(pool);assert.equal(uploaded.pending,0);
+assert.equal((await pool.query(`select count(*)::int n from cont_usage_invocations`)).rows[0].n,before+2,"started and terminal frames deduplicate");
+const inv=(await pool.query(`select * from cont_usage_invocations where session_id=$1`,[sid])).rows[0];assert.equal(inv.outcome,"success");assert.equal(inv.records[0].author,"peer");
+const ops=(await pool.query(`select * from cont_usage_storage_ops where invocation_id=$1`,[inv.invocation_id])).rows;
+assert.equal(ops.length,2,"pool and checked-out query count once each; telemetry upload does not recurse");assert.deepEqual(ops.map(x=>x.returned_rows).sort(),[0,1]);assert.ok(ops.every(x=>x.purpose === "interactive_read"));assert.ok(ops.every(x=>x.evidence_returned === null));
+assert.equal(sqlOperationClass("with rows as (delete from t returning *) select * from rows"),"write");
+assert.equal(sqlOperationClass("select 1"),"read");
+assert.ok(!(await fs.readdir(usageDirectory())).some(f=>f.endsWith(".json")),"acknowledged frames removed");
+console.log("ok usage: direct/client SQL counts, zero rows, separate automatic purpose, no recursion, outage/replay and final outcome ordering");
+await closePools();
