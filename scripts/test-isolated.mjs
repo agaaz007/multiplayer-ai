@@ -58,8 +58,8 @@ try {
   }
   if (!args.includes("--no-build")) await run("npm", ["run", "build"], env);
   const selected = args.filter(x => !x.startsWith("--"));
-  const suites = selected.length ? selected : ["selftest", "selftest-helper-safety", "selftest-events", "selftest-authority", "selftest-capture", "selftest-capture-boundary", "selftest-investigation", "selftest-claims", "selftest-graph", "selftest-findings", "eval/analytical-selftest", "eval/analytical-competitors-selftest", "selftest-continuity", "selftest-records", "selftest-resume", "selftest-classify", "selftest-recordpack", "selftest-embeddings", "selftest-availability", "selftest-binding-usage", "selftest-production"];
-  const databaseSuites = new Set(["selftest-continuity", "selftest-records", "selftest-resume", "selftest-classify", "selftest-recordpack", "selftest-embeddings", "selftest-binding-usage", "selftest-production", "selftest-capture-store", "eval/selftest-eval-conditions"]);
+  const suites = selected.length ? selected : ["selftest", "selftest-helper-safety", "selftest-events", "selftest-authority", "selftest-capture", "selftest-capture-boundary", "selftest-investigation", "selftest-claims", "selftest-graph", "selftest-findings", "eval/analytical-selftest", "eval/analytical-competitors-selftest", "selftest-continuity", "selftest-records", "selftest-resume", "selftest-classify", "selftest-recordpack", "selftest-embeddings", "selftest-availability", "selftest-binding-usage", "selftest-production", "selftest-capture-durability", "selftest-snapshot-worker", "selftest-restore"];
+  const databaseSuites = new Set(["selftest-continuity", "selftest-records", "selftest-resume", "selftest-classify", "selftest-recordpack", "selftest-embeddings", "selftest-binding-usage", "selftest-production", "selftest-restore", "selftest-capture-store", "eval/selftest-eval-conditions"]);
   for (const suite of suites) {
     if (!/^(?:eval\/)?[a-z0-9-]+$/.test(suite)) throw new Error("Invalid selftest suite name");
     console.log(`\nRunning ${suite}`);

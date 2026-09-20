@@ -50,6 +50,18 @@ export function instrumentUsageClient(client: pg.PoolClient): void {
   };
 }
 
+/** Unlike a general mutation, usage UPSERTs are replay-safe after an unknown commit.
+ * Destroy an overdue borrowed client and retain local frames; later replay reconciles
+ * UUIDs. The budget includes pool acquisition, and a late-acquired client is destroyed. */
+async function boundedUsageWrite<T>(pool:pg.Pool,run:(client:pg.PoolClient)=>Promise<T>,timeoutMs:number):Promise<T> {
+  let client:pg.PoolClient|undefined,finished=false,released=false;
+  const release=(destroy=false)=>{if(client&&!released){released=true;client.release(destroy);}};
+  let timer:ReturnType<typeof setTimeout>;
+  const timeout=new Promise<never>((_,reject)=>{timer=setTimeout(()=>{finished=true;release(true);reject(new Error("usage_upload_timeout"));},timeoutMs);});
+  const work=(async()=>{client=await pool.connect();if(finished){release(true);throw new Error("usage_upload_timeout");}return run(client);})();
+  try{return await Promise.race([work,timeout]);}finally{finished=true;clearTimeout(timer!);release();}
+}
+
 let uploading=false;
 /** Bounded best-effort drain, called out of the user request path. Delete only after
  * committed UPSERT; a crash replays the same UUID. No raw argument/result bodies. */
@@ -58,21 +70,24 @@ export async function flushUsage(pool: pg.Pool, limit=100): Promise<{uploaded:nu
   uploading=true;
   try { return await withoutUsage(async () => {
     await drainUsageWrites();
-    const dir=usageDirectory();const files=await fs.readdir(dir).catch(()=>[]);let uploaded=0;
+    const dir=usageDirectory();const files=await fs.readdir(dir).catch(()=>[]);let uploaded=0;const deadline=performance.now()+4000;
     for(const file of files.filter(f=>/^(?:invocation-[a-f0-9-]{36}-(?:started|finished)|storage-[a-f0-9-]{36})\.json$/.test(f)).slice(0,Math.max(1,Math.min(1000,limit)))) {
+      if(performance.now()>=deadline) return {uploaded,pending:files.length-uploaded,dropped:usageHealth().dropped,error:"usage_batch_budget"};
       const filename=path.join(dir,file);
       try {
         const bytes=await fs.readFile(filename,"utf8");const e=JSON.parse(bytes) as UsageEnvelope;const v=e.value;
+        await boundedUsageWrite(pool,async client => {
         if(e.kind === "invocation") {
           const x=e.value;
-          await pool.query(`insert into cont_usage_invocations(invocation_id,actor,session_id,harness,identity_source,identity_verified,machine,version,tool,traffic_class,purpose,parent_invocation_id,started_at,finished_at,duration_ms,outcome,availability,records)
+          await client.query(`insert into cont_usage_invocations(invocation_id,actor,session_id,harness,identity_source,identity_verified,machine,version,tool,traffic_class,purpose,parent_invocation_id,started_at,finished_at,duration_ms,outcome,availability,records)
            values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb)
            on conflict(invocation_id) do update set finished_at=excluded.finished_at,duration_ms=excluded.duration_ms,outcome=excluded.outcome,availability=excluded.availability,records=excluded.records
            where cont_usage_invocations.finished_at is null`,[x.invocation_id,x.actor,x.session_id,x.harness,x.identity_source,x.identity_verified,x.machine,x.version,x.tool,x.traffic_class,x.purpose,x.parent_invocation_id,x.started_at,x.finished_at,x.duration_ms,x.outcome,x.availability,JSON.stringify(x.records)]);
         } else {
           const x=e.value;
-          await pool.query(`insert into cont_usage_storage_ops(operation_id,invocation_id,backend,operation_class,purpose,started_at,duration_ms,success,returned_rows,evidence_returned,attempt) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) on conflict do nothing`,[x.operation_id,x.invocation_id,x.backend,x.operation_class,x.purpose,x.started_at,x.duration_ms,x.success,x.returned_rows,x.evidence_returned,x.attempt]);
+          await client.query(`insert into cont_usage_storage_ops(operation_id,invocation_id,backend,operation_class,purpose,started_at,duration_ms,success,returned_rows,evidence_returned,attempt) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) on conflict do nothing`,[x.operation_id,x.invocation_id,x.backend,x.operation_class,x.purpose,x.started_at,x.duration_ms,x.success,x.returned_rows,x.evidence_returned,x.attempt]);
         }
+        },Math.max(1,Math.min(2000,deadline-performance.now())));
         // A terminal outcome may have replaced the started frame during upload.
         if(await fs.readFile(filename,"utf8").catch(()=>"") === bytes) await fs.unlink(filename).catch(()=>{});
         uploaded++;

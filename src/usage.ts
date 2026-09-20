@@ -55,6 +55,7 @@ export function withoutUsage<T>(fn: () => T): T { const c=context.getStore(); re
 /** Usage is never awaited by the user's operation. Bounded, separate spool; failures
  * are exposed through health, not recursively reported as database operations. */
 function emit(envelope: UsageEnvelope): void {
+  if(process.env.LEDGER_USAGE === "0") return;
   if (pending.size >= MAX_PENDING) { dropped++; return; }
   const dir=usageDirectory();
   const previous=queues.get(dir) ?? Promise.resolve();
@@ -98,13 +99,15 @@ function recordsOf(value: unknown): UsageSummary["records"] {
   }).slice(0,100);
 }
 export async function withUsageInvocation<T>(cfg: Config, metadata: UsageMetadata, fn: () => Promise<T>, summary?: (result:T) => UsageSummary): Promise<T> {
+  if(process.env.LEDGER_USAGE === "0") return fn();
   const id=metadata.invocation_id && /^[a-f0-9-]{36}$/.test(metadata.invocation_id) ? metadata.invocation_id : randomUUID();
   const invocation: UsageInvocation={invocation_id:id,actor:safe(cfg.author),session_id:metadata.session_id ? safe(metadata.session_id) : null,harness:metadata.identity?.harness ?? "unknown",identity_source:safe(metadata.identity?.source),identity_verified:metadata.identity?.verified ?? false,machine:cfg.continuity?.machine ? safe(cfg.continuity.machine) : null,version:safe(metadata.version,"unknown"),tool:safe(metadata.tool),traffic_class:metadata.traffic_class ?? "unknown",purpose:metadata.purpose ?? "interactive_read",parent_invocation_id:metadata.parent_invocation_id ? safe(metadata.parent_invocation_id) : null,started_at:new Date().toISOString(),finished_at:null,duration_ms:null,outcome:"started",availability:"unknown",records:[]};
   const began=performance.now(); emit({kind:"invocation",value:{...invocation}});
   return context.run({invocation},async () => {
     try {
       const result=await fn();
-      const details=summary?.(result) ?? {};
+      let details:UsageSummary={};
+      try {details=summary?.(result) ?? {};}catch{lastError="usage_summary_failed";}
       const isError=(result as {isError?:boolean})?.isError === true;
       invocation.outcome=details.outcome ?? (isError ? "error" : "success");
       invocation.availability=details.availability ?? "unknown";
@@ -157,7 +160,8 @@ export function instrumentMcpTools(server: {registerTool: (...args:any[]) => any
     try {
       return await withUsageInvocation(cfg,{tool:name,session_id:resolved.ok ? resolved.id : undefined,identity:resolved.ok ? resolved.identity : undefined,traffic_class,purpose,version:process.env.LEDGER_BUILD_COMMIT ?? "0.1.0"},async () => {
         const result=await handler(...args);
-        return {...result,structuredContent:{...result?.structuredContent,usage:{invocation_id:currentUsageInvocationId(),source:"ledger_server"}}};
+        const invocation_id=currentUsageInvocationId();
+        return invocation_id ? {...result,structuredContent:{...result?.structuredContent,usage:{invocation_id,source:"ledger_server"}}} : result;
       },result => ({outcome:result?.isError ? result?.structuredContent?.outcome === "refusal" ? "refusal" : "error" : "success",availability:result?.isError ? "unavailable" : result?.structuredContent?.availability === "unavailable" ? "unavailable" : (result?.structuredContent?.legacy_candidates?.length || result?.structuredContent?.candidate_count) ? "available" : Array.isArray(result?.structuredContent?.sources) ? result.structuredContent.sources.length ? "available" : "empty" : "unknown",records:recordsOf(result)}));
     } finally {
       // Background, bounded upload. It neither delays this tool result nor starts
@@ -171,14 +175,14 @@ export function instrumentMcpTools(server: {registerTool: (...args:any[]) => any
 
 
 export function invalidateUsageDiskEstimate(): void { diskBytes.delete(usageDirectory()); }
-export async function usageSpoolHealth(): Promise<{pending_files:number;pending_bytes:number;oldest_at:string|null;dropped:number;last_error:string|null;coverage:"known"|"unknown"}> {
+export async function usageSpoolHealth(): Promise<{pending_files:number;pending_bytes:number;oldest_at:string|null;dropped:number;last_error:string|null;coverage:"known"|"unknown";enabled:boolean}> {
   const dir=usageDirectory();let files:string[];
-  try {files=await fs.readdir(dir);} catch(e) {return {pending_files:0,pending_bytes:0,oldest_at:null,dropped,last_error:lastError,coverage:(e as NodeJS.ErrnoException).code === "ENOENT" ? "known" : "unknown"};}
+  try {files=await fs.readdir(dir);} catch(e) {return {pending_files:0,pending_bytes:0,oldest_at:null,dropped,last_error:lastError,enabled:process.env.LEDGER_USAGE !== "0",coverage:(e as NodeJS.ErrnoException).code === "ENOENT" ? "known" : "unknown"};}
   let count=0,bytes=0,oldest=Infinity,totalDropped=0,error:string|null=lastError;
   for(const file of files) {
     if(file.endsWith(".status")) {try{const h=JSON.parse(await fs.readFile(path.join(dir,file),"utf8"));totalDropped+=Number(h.dropped)||0;error=h.last_error ?? error;}catch{error="health_unreadable";}continue;}
     if(!file.endsWith(".json"))continue;
     const stat=await fs.stat(path.join(dir,file)).catch(()=>null);if(!stat)continue;count++;bytes+=stat.size;oldest=Math.min(oldest,stat.mtimeMs);
   }
-  return {pending_files:count,pending_bytes:bytes,oldest_at:Number.isFinite(oldest)?new Date(oldest).toISOString():null,dropped:Math.max(dropped,totalDropped),last_error:error,coverage:error === "health_unreadable" ? "unknown" : "known"};
+  return {pending_files:count,pending_bytes:bytes,oldest_at:Number.isFinite(oldest)?new Date(oldest).toISOString():null,dropped:Math.max(dropped,totalDropped),last_error:error,enabled:process.env.LEDGER_USAGE !== "0",coverage:error === "health_unreadable" ? "unknown" : "known"};
 }
