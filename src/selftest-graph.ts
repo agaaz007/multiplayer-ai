@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { buildGraph, toDot, toMermaid, type Graph } from "./graph.js";
+import { authorInk, buildGraph, toDot, toMermaid, type Graph } from "./graph.js";
 import { getById, loadAll, pull, record, recordDraft, type Config } from "./store.js";
 import { objectVersion } from "./authority.js";
 import type { AnalysisScope, Dependency, LedgerObject } from "./schema.js";
@@ -200,7 +200,135 @@ try {
   assert.match(buildGraph(cfg).scope, /including superseded and drafts/);
   assert.match(buildGraph(cfg, { days: 7 }).scope, /last 7d/);
 
-  console.log("graph: pinned-vs-named edges, tier styling, no date in the layout, correction blast radius, reproduction, ego walk, and undirected unresolved conflicts tests passed");
+
+  // ---- the node is the question, the person is the ink ----
+  // What a prospect or a teammate recognises is their own question, never `fnd-...-gyt8`, so the
+  // label is derived per type and the id drops to the line underneath.
+  const change = get(record(cfg, { type: "change", fields: { title: "Eligibility filter shipped",
+    what: "Paywall eligibility filter shipped to Android IN at 100%", shipped_at: "2026-09-05",
+    surface: "paywall", owner: "agaaz", scope: "Android IN, 100%" } }).id);
+  // A record written before `question` existed: the only shape that can reach the title fallback,
+  // because the write path has required the field ever since. Written by hand for that reason.
+  const legacyId = "fnd-20260820-legacy-cut-with-no-question-field-0000";
+  fs.writeFileSync(path.join(cfg.ledger_dir, "findings", `${legacyId}.md`), [
+    "---", "type: finding", `id: ${legacyId}`,
+    "title: Legacy cut recorded before the question field existed",
+    "status: stable", "generated:", "  by: 'human:rachit'", "  at: '2026-08-20T00:00:00.000Z'",
+    "result: Kept for the fallback path only.", "---", "",
+  ].join("\n"));
+
+  const labelled = buildGraph(cfg);
+  assert.equal(node(labelled, pinned.id).headline, "Does Android trial conversion differ by intent?", "a finding is its question");
+  assert.equal(node(labelled, decision.id).headline, "Run the next paywall test on marriage intent", "a decision is the decision");
+  assert.equal(node(labelled, d2.id).headline, "trial_cvr", "a definition is the metric it fixes, not its prose title");
+  assert.equal(node(labelled, change.id).headline, "Paywall eligibility filter shipped to Android IN at 100%", "a change is what shipped");
+  assert.equal(node(labelled, legacyId).headline, "Legacy cut recorded before the question field existed",
+    "a record with no words of its own falls back to its title, never to an empty node");
+
+  const mermaid = toMermaid(labelled);
+  const aliasOf = (g: Graph, id: string) => `n${g.nodes.findIndex((x) => x.id === id)}`;
+  const nodeLine = (m: string, g: Graph, id: string) => {
+    const l = m.split("\n").find((x) => new RegExp(`^  ${aliasOf(g, id)}[([{]`).test(x));
+    assert.ok(l, `expected a rendered node for ${id}`);
+    return l;
+  };
+  const classesOf = (m: string, g: Graph, id: string) =>
+    m.split("\n").filter((l) => l.startsWith(`  class ${aliasOf(g, id)} `)).map((l) => l.split(" ").at(-1)!);
+  const labelParts = (line: string) => line.slice(line.indexOf('"') + 1, line.lastIndexOf('"')).split("<br/>");
+
+  // The question leads, the id stays available on the next line, the author is written out.
+  assert.deepEqual(labelParts(nodeLine(mermaid, labelled, pinned.id)).slice(0, 3),
+    ["Does Android trial conversion differ by intent?", pinned.id, "by agaaz"]);
+  for (const n of labelled.nodes)
+    assert.ok(labelParts(nodeLine(mermaid, labelled, n.id)).includes(`by ${n.author}`),
+      "the author is spelled out on every node: a channel that exists only as a hue is not readable");
+
+  // ---- a real question carries mermaid's syntax characters, and must survive as text ----
+  const hostileText = 'Did "eligible" (v2) cover {chat|voice} [IN] <5% & >95% #1 `x`?';
+  const hostileFields = (() => { const f: Record<string, unknown> = finding("Hostile characters in the question", [],
+    { question: hostileText, definitions_used: [] }); delete f.analysis_scope; return f; })();
+  const hostile = get(record(cfg, { type: "finding", fields: hostileFields }).id);
+  const escaped = buildGraph(cfg);
+  const hostileLabel = labelParts(nodeLine(toMermaid(escaped), escaped, hostile.id))[0];
+  assert.match(hostileLabel, /#quot;eligible#quot;/);
+  assert.match(hostileLabel, /#40;v2#41;/);
+  assert.match(hostileLabel, /#123;chat#124;voice#125;/);
+  assert.match(hostileLabel, /#91;IN#93;/);
+  assert.match(hostileLabel, /#35;1 #96;x#96;/);
+  // Angle brackets are not entities: GitHub renders the block with htmlLabels on, where a decoded
+  // `<` would be a tag rather than text.
+  assert.match(hostileLabel, /‹5% & ›95%/);
+  const bare = hostileLabel.replace(/#(?:\d+|[a-z]+);/g, "");
+  for (const ch of ['"', "|", "(", ")", "[", "]", "{", "}", "#", "`", "<", ">"])
+    assert.ok(!bare.includes(ch), `a bare ${ch} inside a label is mermaid syntax, not text`);
+  for (const line of toMermaid(escaped, true).split("\n"))
+    assert.equal((line.match(/"/g) ?? []).length % 2, 0, `unbalanced quotes would break the GitHub renderer: ${line}`);
+
+  // ---- author is ink, and ink never touches the channel tier owns ----
+  const ink = authorInk(escaped.nodes);
+  assert.deepEqual([...ink.keys()], ["agaaz", "rachit"],
+    "ink is assigned in sorted author order: GRAPH.md re-renders on every push and must not churn");
+  assert.notEqual(ink.get("agaaz")!.color, ink.get("rachit")!.color);
+  const rendered = toMermaid(escaped);
+  for (const def of rendered.split("\n").filter((l) => /^  classDef (current|draft|retired)/.test(l)))
+    assert.doesNotMatch(def, /(?:^|,)color:/, "tier sets no label colour: that is the author's channel, and one property cannot carry two claims");
+  for (const [, v] of ink)
+    assert.ok(rendered.split("\n").includes(`  classDef ${v.cls} color:${v.color}`), `author class ${v.cls} sets ink and nothing else`);
+  assert.deepEqual(classesOf(rendered, escaped, pinned.id), ["current", ink.get("agaaz")!.cls],
+    "tier class first, author class second, one token per statement");
+  assert.deepEqual(classesOf(rendered, escaped, legacyId), ["current", ink.get("rachit")!.cls]);
+  assert.deepEqual(classesOf(rendered, escaped, d1.id), ["retired", ink.get("agaaz")!.cls],
+    "a retired record keeps its author's ink: a channel that vanishes on some nodes is not a channel");
+
+  // The two channels are orthogonal in dot as well: same tier and different people differ only in
+  // ink; same person across tiers differs only in border.
+  const dotLine = (d: string, id: string) => {
+    const l = d.split("\n").find((x) => x.startsWith(`  "${id}" [`));
+    assert.ok(l, `expected a rendered node for ${id}`);
+    return l;
+  };
+  const dotAll = toDot(escaped);
+  const border = (l: string) => l.match(/, color="(#[0-9a-f]{6})"/)![1];
+  const fontcolor = (l: string) => l.match(/fontcolor="(#[0-9a-f]{6})"/)![1];
+  assert.equal(border(dotLine(dotAll, pinned.id)), border(dotLine(dotAll, legacyId)));
+  assert.notEqual(fontcolor(dotLine(dotAll, pinned.id)), fontcolor(dotLine(dotAll, legacyId)));
+  assert.notEqual(border(dotLine(dotAll, pinned.id)), border(dotLine(dotAll, d1.id)), "tier still owns the border");
+  assert.equal(fontcolor(dotLine(dotAll, pinned.id)), fontcolor(dotLine(dotAll, d1.id)));
+  assert.equal(fontcolor(dotLine(dotAll, pinned.id)), ink.get("agaaz")!.color);
+
+  // ---- the legend says which colour is whose, in words ----
+  const legendMermaid = toMermaid(escaped, true);
+  assert.match(legendMermaid, /subgraph authors\["who recorded it/);
+  const legendDot = toDot(escaped, true);
+  assert.match(legendDot, /subgraph cluster_authors/);
+  for (const [author, v] of ink) {
+    assert.ok(legendMermaid.includes(`["by ${author}"]`), "the legend names the person, so the key is readable without the colour");
+    assert.match(legendMermaid, new RegExp(`^    class A\\d+ ${v.cls}$`, "m"));
+    assert.ok(legendDot.includes(`[label="by ${author}", shape=plaintext, fontcolor="${v.color}"]`));
+  }
+  // The tier legend is still the first key drawn, and still shows tier as border and fill.
+  assert.ok(legendMermaid.indexOf("subgraph legend[") < legendMermaid.indexOf("subgraph authors["));
+  assert.ok(legendDot.indexOf("cluster_legend") < legendDot.indexOf("cluster_authors"));
+
+  // ---- --labels id: the address leads, the words stay ----
+  assert.equal(buildGraph(cfg).labels, "question", "the default leads with the question; the id is an address, not information");
+  const byId = buildGraph(cfg, { labels: "id" });
+  assert.equal(byId.labels, "id");
+  assert.deepEqual(labelParts(nodeLine(toMermaid(byId), byId, pinned.id)).slice(0, 3),
+    [pinned.id, "Pinned to the definition", "by agaaz"]);
+  assert.match(byId.scope, /labelled by id/);
+  assert.match(escaped.scope, /labelled by question/);
+
+  // ---- neither the new label nor the new ink introduced an ordering or downgraded a named edge ----
+  const decisionToPinned = rendered.split("\n").find((l) =>
+    l.startsWith(`  ${aliasOf(escaped, decision.id)} `) && l.endsWith(` ${aliasOf(escaped, pinned.id)}`))!;
+  assert.match(decisionToPinned, /-\.->\|"evidence: no pinned version"\|/, "a named reference is still dashed and still labelled");
+  for (const out of [rendered, legendMermaid, dotAll, legendDot, toMermaid(byId), toDot(byId, true)]) {
+    assert.doesNotMatch(out, /\brank\s*=/, "a rank constraint would let position assert recency");
+    assert.doesNotMatch(out, /\b20\d\d-\d\d-\d\d\b/, "no date reaches the rendered graph, not even through a label");
+  }
+
+  console.log("graph: pinned-vs-named edges, tier styling, no date in the layout, correction blast radius, reproduction, ego walk, undirected unresolved conflicts, per-type labels, mermaid escaping, and the author ink channel tests passed");
 } finally {
   fs.rmSync(tmp, { recursive: true, force: true });
 }
