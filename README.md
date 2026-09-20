@@ -30,6 +30,7 @@ Codex (app or CLI) ───────┘                              ├─�
 - Nothing is edited in place. Refreshes and reversals are new files with `supersedes`; the old one is marked `deprecated` and drops out of the brief but stays in history.
 - Every record also rebuilds the data repo's `README.md`, per-directory `index.md`, and `log.md` from the full set of objects, and commits them alongside. They are derived files: byte-identical on every machine, never edited, never merged. **GitHub is the dashboard**: open the data repo and you see definitions, decisions in force, and the last 14 days of changes and findings as tables; `log.md` is the newest-first feed; commit history is the audit trail.
 - Session start injects a brief: all definitions, decisions in force, last 14 days of findings and changes. That's it. Small enough to always be in context.
+- `memory.md` is the interpretability view, regenerated alongside the others: disagreements the ledger refused to settle, corrections and the recorded results they put back under review, and work one person pinned from another's by exact version. It counts only what lineage proves, reports what it cannot prove in a Gaps section, and is anchored to the newest record rather than the clock so two machines emit the same bytes. `ledger memory [--days N] [--json]` prints the same view.
 
 ## Install
 
