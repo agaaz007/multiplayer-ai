@@ -31,13 +31,13 @@ function currentDiskUsage(): { bytes: number; checked: number } {
   const walk = (dir: string) => { if (!fs.existsSync(dir)) return; for (const e of fs.readdirSync(dir, { withFileTypes: true })) { const f = path.join(dir, e.name); if (e.isDirectory()) walk(f); else bytes += fs.lstatSync(f).size; } };
   walk(root); const value = { bytes, checked: Date.now() }; diskUsage.set(root, value); return value;
 }
-function atomic(file: string, bytes: string): void {
+function atomic(file: string, bytes: string, acknowledgment = false): void {
   // Retention is bounded even when all segments are acknowledged. Capacity
   // failures leave the source unadvanced; pruning is an explicit operation.
   const budget = Number(process.env.LEDGER_SPOOL_MAX_BYTES ?? 512 * 1024 * 1024);
   if (!Number.isSafeInteger(budget) || budget < 4096) throw new Error("invalid LEDGER_SPOOL_MAX_BYTES (minimum 4096)");
   const usage = currentDiskUsage(), size = Buffer.byteLength(bytes);
-  if (usage.bytes + size > budget) throw new Error("spool disk budget exceeded; source and pending data retained; prune acknowledged retention explicitly");
+  if (!acknowledgment && usage.bytes + size > budget) throw new Error("spool disk budget exceeded; source and pending data retained; prune acknowledged retention explicitly");
   const disk = fs.statfsSync(path.dirname(file));
   if (Number(disk.bavail) * Number(disk.bsize) < size + (64 << 20)) throw new Error("spool free-space reserve reached; source retained");
   const previous = fs.existsSync(file) ? fs.statSync(file).size : 0;
@@ -137,7 +137,7 @@ export function spoolAck(id: string, throughCount: number): void {
   return withSpoolLock(id, () => {
   const m = manifest(id, true);
   if (!Number.isSafeInteger(throughCount) || throughCount < m.acked || throughCount > m.next) throw new Error("invalid spool acknowledgment");
-  m.acked = throughCount; atomic(manifestFile(id), JSON.stringify(m));
+  m.acked = throughCount; atomic(manifestFile(id), JSON.stringify(m), true);
   });
 }
 export function spoolStatus(id: string): { pending_batches: number; pending_bytes: number; oldest_at: string | null; source_cursor: number } {
@@ -148,4 +148,16 @@ export function spoolStatus(id: string): { pending_batches: number; pending_byte
 export function spoolSessions(): string[] {
   if (!fs.existsSync(spoolDir())) return [];
   return [...new Set(fs.readdirSync(spoolDir()).filter(f => f.endsWith(".jsonl") || f.endsWith(".v2")).map(f => f.replace(/\.(jsonl|v2)$/, "")))];
+}
+
+/** Explicit maintenance only. Never delete pending segments or legacy originals.
+ * The default seven-day window exceeds the release's 72-hour rollback canary. */
+export function spoolPruneAcknowledged(id: string, before = new Date(Date.now() - 7 * 86_400_000)): number {
+  if (!Number.isFinite(before.getTime()) || before.getTime() > Date.now() - 72 * 3_600_000) throw new Error("acknowledged spool retention must cover at least 72 hours");
+  return withSpoolLock(id, () => {
+    const m = manifest(id, true); let removed = 0;
+    for (let n = 0; n < m.acked; n++) { const file = segmentFile(id, n); if (fs.existsSync(file) && fs.statSync(file).mtimeMs < before.getTime()) { fs.unlinkSync(file); removed++; } }
+    if (removed) { syncDir(directory(id)); diskUsage.delete(spoolDir()); }
+    return removed;
+  });
 }

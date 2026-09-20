@@ -357,7 +357,7 @@ export async function materializeArtifacts(pool: pg.Pool, sessionId: string, eve
 
 export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<PassSummary> {
   const release = acquireProcessLease(path.join(ledgerHome(), "helper-pass.lock"));
-  try { return await withUsageInvocation(cfg, { tool: "helper_capture", traffic_class: "maintenance", purpose: "capture_write", version: process.env.LEDGER_BUILD_COMMIT ?? "0.1.0" }, () => helperOnceImpl(cfg, opts)); }
+  try { return await withUsageInvocation(cfg, { tool: "helper:pass", traffic_class: process.env.LEDGER_SELFTEST === "1" ? "evaluation" : "unknown", purpose: "capture_write", version: process.env.LEDGER_BUILD_COMMIT ?? "0.1.0" }, () => helperOnceImpl(cfg, opts)); }
   finally { release(); }
 }
 async function helperOnceImpl(cfg: Config, opts: HelperOpts): Promise<PassSummary> {
