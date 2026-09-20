@@ -18,12 +18,8 @@ import { verifyAcceptanceEvidence } from './acceptance-evidence.js';
 import { validateRecordCoverage, acknowledgeLocalCapture, reconcileSharedCapture } from './capture-boundary.js';
 import { investigation } from './investigation.js';
 import { correctionImpact, objectVersion, resolveAccepted } from './authority.js';
-<<<<<<< HEAD
-import { buildGraph, renderGraph, type GraphFormat } from './graph.js';
-import { memoryReport, renderMemoryReport } from './interpret.js';
-=======
 import { buildGraph, renderGraph, type GraphFormat, type LabelMode } from './graph.js';
->>>>>>> worktree-agent-aaed50ebfa5a4b2c8
+import { memoryReport, renderMemoryReport } from './interpret.js';
 import { AnalysisScopeSchema, AnalyticalDateSchema } from './schema.js';
 import { DEFAULT_QUIET_MS, pendingDrafts, reconcile } from "./extract.js";
 import { continuityConfigured, getPool, migrate, tableList, closePools } from "./continuity/db.js";
