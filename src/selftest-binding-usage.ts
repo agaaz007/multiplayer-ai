@@ -109,5 +109,9 @@ const report=await usageSummary(pool,{from:"2020-01-01T00:00:00Z",to:"2100-01-01
 assert.ok(report.invocations.some(r=>r.tool === "ledger_brief" && r.purpose === "interactive_read"),"explicit MCP brief is intentional use");
 assert.ok(report.invocations.some(r=>r.tool === "ledger_brief" && r.purpose === "automatic_brief"),"automatic brief is separate");
 assert.equal(report.local_spool.pending_files,0);
+await pool.query(`update cont_usage_invocations set started_at='2026-09-20T23:59:59Z' where invocation_id=$1`,[inv.invocation_id]);
+await pool.query(`update cont_usage_storage_ops set started_at='2026-09-21T00:00:01Z' where invocation_id=$1`,[inv.invocation_id]);
+const boundaryReport=await usageSummary(pool,{from:"2026-09-21T00:00:00Z",to:"2026-09-21T00:00:02Z",actor:cfg.author,traffic_class:"evaluation"});
+assert.equal(boundaryReport.storage_operations.reduce((n,r)=>n+r.operations,0),2,"SQL operations cross the reporting boundary independently of their parent invocation");
 console.log("ok usage integration: concurrent MCP server IDs, read-tool classification, persistent disk backlog, grouped summary");
 await closePools();

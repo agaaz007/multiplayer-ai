@@ -1,6 +1,6 @@
 # Ledger production readiness: Agaaz and Rachit
 
-Date: 20 September 2026. Status: proposed engineering plan; no implementation or production validation claimed. Code inspected: `9beb92b375612a066d2c234d6c4ba8690d8d9156`.
+Date: 20 September 2026. Updated 21 September: local implementation is described in the [implementation report](production-readiness-implementation-2026-09-21.md); production acceptance remains pending. Original code inspected: `9beb92b375612a066d2c234d6c4ba8690d8d9156`.
 
 ## Recommendation and delivery target
 
@@ -80,7 +80,7 @@ Invariants: replay may repeat an upload but cannot duplicate a producer event; r
 
 All eight tasks are **P1 release blockers** for this production scope. Smaller discovery/binding fixes may ship to the existing pilot earlier. Estimates include review and targeted testing; autonomous-agent elapsed time is unmeasured. Owners below are engineering roles to assign, not commitments attributed to either teammate.
 
-Build checklist (machine-readable: [task JSONL](production-readiness-tasks-2026-09-20.jsonl)):
+Original release checklist (unchecked items include outstanding live acceptance; see the implementation report for completed code and local checks). Machine-readable status: [task JSONL](production-readiness-tasks-2026-09-20.jsonl).
 
 - [ ] T1 — Safe fixtures, contracts, and operational baseline.
 - [ ] T2 — Candidate discovery and scope propagation.

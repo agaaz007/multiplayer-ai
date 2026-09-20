@@ -47,7 +47,7 @@ export interface SessState {
   file: string;
   harness: "claude" | "codex";
   offset: number;
-  sourceFingerprint?: { bytes: number; sha256: string };
+  sourceFingerprint?: { bytes: number; sha256: string; tail_offset?: number; tail_bytes?: number; tail_sha256?: string };
   cwd?: string;
   root?: string | null;
   repo?: string;
@@ -114,7 +114,7 @@ export interface HelperLoopOpts extends HelperOpts {
 const classifyInFlight = new Map<string, Promise<void>>();
 const snapshotPublications = new Set<Promise<void>>();
 let usageFlush: Promise<unknown> | null = null;
-const snapshotCompleted = new Map<string, Partial<SessState>>();
+const snapshotCompleted = new Map<string, { root: string; patch: Partial<SessState> }>();
 const snapshotPublishingRoots = new Set<string>();
 
 /** Embeddings per pass (optional feature): at most this many newly uploaded events, and no new provider batch after this long. */
@@ -376,7 +376,7 @@ async function helperOnceImpl(cfg: Config, opts: HelperOpts): Promise<PassSummar
   const snapEvery = (opts.snapshotIntervalS ?? cfg.continuity.snapshot_interval_s ?? 30) * 1000;
   const roots = { ...transcriptRoots(), ...(opts.roots ?? {}) };
   const st = loadState();
-  for (const [sid, patch] of snapshotCompleted) { if (st[sid]) Object.assign(st[sid], patch); snapshotCompleted.delete(sid); }
+  for (const [sid, result] of snapshotCompleted) { if (st[sid]?.root === result.root) Object.assign(st[sid], result.patch); snapshotCompleted.delete(sid); }
   // The source transcript can be moved/deleted after durable admission. Recover
   // enough trusted source metadata from the spool to drain independently.
   for (const sid of spoolSessions()) {
@@ -424,6 +424,11 @@ async function helperOnceImpl(cfg: Config, opts: HelperOpts): Promise<PassSummar
         const fd = fs.openSync(file, "r"), bytes = Buffer.alloc(s.sourceFingerprint.bytes);
         try { fs.readSync(fd, bytes, 0, bytes.length, 0); } finally { fs.closeSync(fd); }
         if (crypto.createHash("sha256").update(bytes).digest("hex") !== s.sourceFingerprint.sha256) throw new Error("transcript prefix changed; source generation repair required, no events discarded");
+        if (s.sourceFingerprint.tail_sha256 && s.sourceFingerprint.tail_bytes) {
+          const tailFd = fs.openSync(file, "r"), tail = Buffer.alloc(s.sourceFingerprint.tail_bytes);
+          try { fs.readSync(tailFd, tail, 0, tail.length, s.sourceFingerprint.tail_offset ?? 0); } finally { fs.closeSync(tailFd); }
+          if (crypto.createHash("sha256").update(tail).digest("hex") !== s.sourceFingerprint.tail_sha256) throw new Error("transcript admitted boundary changed; source generation repair required, no events discarded");
+        }
       }
       const r = streamTranscript(file, from, harness, cfg.data_tools, { maxBytes: 1 << 20, maxLines: 200, initialCwd: s?.cwd, stopAtCwdChange: true });
       if (!sid) { sid = sessionIdFor(file, harness, r.session_id); s = st[sid] ?? { file, harness, offset: 0, lastSeenMtime: 0, seenCallIds: [], reconciled: [], unknown: {} }; st[sid] = s; byFile.set(file, sid); }
@@ -476,6 +481,11 @@ async function helperOnceImpl(cfg: Config, opts: HelperOpts): Promise<PassSummar
         const fd = fs.openSync(file, "r"), bytes = Buffer.alloc(Math.min(256, r.offset));
         try { fs.readSync(fd, bytes, 0, bytes.length, 0); } finally { fs.closeSync(fd); }
         s.sourceFingerprint = { bytes: bytes.length, sha256: crypto.createHash("sha256").update(bytes).digest("hex") };
+      }
+      if (s.sourceFingerprint && r.offset) {
+        const tailBytes = Math.min(1024, r.offset), tailOffset = r.offset - tailBytes, tailFd = fs.openSync(file, "r"), tail = Buffer.alloc(tailBytes);
+        try { fs.readSync(tailFd, tail, 0, tail.length, tailOffset); } finally { fs.closeSync(tailFd); }
+        Object.assign(s.sourceFingerprint, { tail_offset: tailOffset, tail_bytes: tailBytes, tail_sha256: crypto.createHash("sha256").update(tail).digest("hex") });
       }
       retainOffloadedOutputs(r.events, { transcriptFile: file, harness });
       if (r.offset !== s.offset || r.events.length) spoolAppend(sid, { offset: r.offset, events: r.events, at: now.toISOString(), source: { file, harness, author, cwd: s.cwd, root: s.root, repo: s.repo, branch: s.branch, baseCommit: s.baseCommit, wipRef: s.wipRef, startedAtMs: s.startedAtMs, lastSeenMtime: mtime, sourceFingerprint: s.sourceFingerprint } });
@@ -548,8 +558,21 @@ async function helperOnceImpl(cfg: Config, opts: HelperOpts): Promise<PassSummar
       await S.updateSession(pool, sid, { transcript_offset: s.offset, coverage: { unknown_shapes: s.unknown, sidechain: Boolean(s.sidechain), unbound_reason: s.unbound_reason ?? null, hooks_index_entries: readIndex(sid).length } });
 
       // ---- upload ----
-      const routing = await S.resolveRouting(pool, sid);
+      let routing = await S.resolveRouting(pool, sid);
       if (routing.forked && routing.fork_thread_id && s.threadId !== routing.fork_thread_id) { s.threadId = routing.fork_thread_id; log(`session ${sid.slice(0, 8)} diverged → fork ${routing.fork_thread_id.slice(0, 8)}`); }
+      let executionScopeMismatch = false;
+      if (routing.thread_id && s.repo) {
+        const boundThread = await S.getThread(pool, routing.thread_id);
+        if (boundThread && boundThread.repo !== s.repo) {
+          executionScopeMismatch = true;
+          s.unbound_reason = "execution repository changed; explicit thread rebind required before snapshots";
+          sum.errors.push(`${sid}: ${s.unbound_reason}`);
+          // Preserve historical A checkpoints but never label B code/evidence as
+          // belonging to A. A current-session verification pointer is invalid.
+          await S.updateSession(pool, sid, { wip_commit: null, last_verified_snapshot_at: null, coverage: { ...stored.coverage, execution_repo_mismatch: { expected: boundThread.repo, captured: s.repo, status: "requires_rebind" } } });
+          routing = { ...routing, thread_id: null, generation: null };
+        }
+      }
       const pending = spoolPending(sid);
       let acked = pending.acked;
       for (const batch of pending.batches) {
@@ -603,7 +626,7 @@ async function helperOnceImpl(cfg: Config, opts: HelperOpts): Promise<PassSummar
       // A quiet session has no new agent edits to capture (its last live snapshot already has them), so it is only
       // snapshotted on an explicit turn/end signal. Snapshotting every quiet tracked session each pass ran a synchronous
       // `git add -A` of the same worktree dozens of times per pass and starved uploads and heartbeats (2026-09-13).
-      if (process.env.LEDGER_SNAPSHOTS !== "0" && s.root && !snapshotPublishingRoots.has(s.root) && s.wipRef && (cpSignal || (due && !quiet)) && !s.ended && !s.sidechain) {
+      if (!executionScopeMismatch && process.env.LEDGER_SNAPSHOTS !== "0" && s.root && !snapshotPublishingRoots.has(s.root) && s.wipRef && (cpSignal || (due && !quiet)) && !s.ended && !s.sidechain) {
         // Freeze coverage BEFORE starting Git. Later uploads must never be
         // attributed to an earlier snapshot, and a changed claim stays fenced.
         const throughSeq = (await S.appendEvents(pool, sid, [], null, null)).lastSeq;
@@ -641,7 +664,7 @@ async function helperOnceImpl(cfg: Config, opts: HelperOpts): Promise<PassSummar
               if (cp.advanced && sh.verified) await pool.query(`update cont_sessions set wip_commit=$2, last_verified_snapshot_at=$3 where id=$1 and claim_generation=$4 and thread_id=$5 and exists(select 1 from cont_threads where id=$5 and head_checkpoint_id=$6)`, [sid, sh.commit, sh.verified_at, source.generation, source.thread_id, cp.id]);
             }
             if (!source.thread_id && sh.verified) await pool.query(`update cont_sessions set wip_commit=$2, last_verified_snapshot_at=$3, coverage=jsonb_set(coverage, '{snapshot_dispatch_order}', to_jsonb($4::bigint)) where id=$1 and thread_id is null and claim_generation is null and coalesce((coverage->>'snapshot_dispatch_order')::numeric, 0) < $4`, [sid, sh.commit, sh.verified_at, dispatchOrder]);
-            Object.assign(s, patch); snapshotCompleted.set(sid, patch);
+            Object.assign(s, patch); snapshotCompleted.set(sid, { root: publishingRoot, patch });
             if (cpSignal) classifyAfterTurn(cfg, pool, sid, s, now, sum, log);
           }).catch((e: any) => { log(`snapshot publication ${sid.slice(0, 8)} failed: ${String(e?.message ?? e).slice(0, 200)}`); })
             .finally(() => { snapshotPublications.delete(publication); snapshotPublishingRoots.delete(publishingRoot); });
