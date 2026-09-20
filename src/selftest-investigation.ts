@@ -56,6 +56,42 @@ const intervalPack=analyticalContext(loadAll(cfg),{question:'bounded trial rate'
 assert.ok(intervalPack.resolutions.some(r=>r.status==='unavailable'));
 assert.match(intervalPack.text,/split the analysis window/);
 
+// Legacy discoveries cannot become authority, even beside applicable results or with no scope supplied.
+const legacy = record(cfg,{type:'definition',fields:{title:'Funnel handoff prior evidence',metric:'funnel_rate',formula:'known retained funnel formula',source:'fixture',owner:'agaaz',valid_from:'2026-08-01'}});
+// Sanitized regression for the audit's actual failed question. Content is synthetic; no production numbers or transcript bytes.
+const funnelQuestion = 'What are the largest drop-off points in the HiAstro user journey before the first paywall impression?';
+const funnelPrior = record(cfg,{type:'definition',fields:{title:'HiAstro pre-paywall funnel: first impression drop-off points',metric:'funnel_fixture',formula:'Synthetic fixture describing user journey stages; inspect retained evidence before reuse',source:'fixture',owner:'agaaz',valid_from:'2026-08-01'}});
+const funnelLookup = analyticalContext(loadAll(cfg),{question:funnelQuestion,scope:{...scope,product:'HiAstro',metric:'funnel_fixture'}});
+assert.ok(funnelLookup.legacy_candidates.slice(0,5).some(c=>c.id===funnelPrior.id));
+assert.ok(!funnelLookup.current.some(o=>o.id===funnelPrior.id));
+const partialLegacy = record(cfg,{type:'definition',fields:{title:'Funnel handoff partial draft',metric:'funnel_rate',formula:'partial candidate',source:'fixture',owner:'agaaz',valid_from:'2026-08-01',status:'draft',analysis_scope:{product:scope.product}}});
+const incompatible = record(cfg,{type:'definition',fields:{title:'Funnel handoff other product',metric:'funnel_rate',formula:'wrong product',source:'fixture',owner:'agaaz',valid_from:'2026-08-01',status:'draft',analysis_scope:{product:'wrong-product'}}});
+const discovery = analyticalContext(loadAll(cfg),{question:'Funnel handoff',scope});
+assert.equal(discovery.discovery_status,'candidates_available');
+assert.equal(discovery.availability,'available');
+assert.ok(discovery.legacy_candidates.some(c=>c.id===legacy.id && c.content_version===legacy.content_version && c.scope_gaps.includes('product')));
+assert.ok(discovery.legacy_candidates.some(c=>c.id===partialLegacy.id && c.authority_label==='draft'));
+assert.ok(!discovery.legacy_candidates.some(c=>c.id===incompatible.id));
+assert.ok(!discovery.current.some(o=>[legacy.id,partialLegacy.id].includes(o.id)));
+assert.ok(!discovery.objects.some(o=>[legacy.id,partialLegacy.id].includes(o.id)));
+assert.match(discovery.text,/Candidate only/);
+assert.equal(analyticalContext(loadAll(cfg),{question:'utterly_nonmatching_token',scope:{...scope,metric:'nonexistent_metric'}}).discovery_status,'no_matches');
+assert.throws(()=>analyticalContext(loadAll(cfg),{question:'   ',scope}),/must not be empty/);
+assert.throws(()=>analyticalContext(loadAll(cfg),{question:'Funnel',scope,candidate_limit:0}),/limits/);
+const unscopedDiscovery = analyticalContext(loadAll(cfg),{question:'Funnel handoff'});
+assert.ok(!unscopedDiscovery.current.some(o=>o.id===legacy.id),'a missing task scope cannot promote a legacy candidate');
+assert.equal(analyticalContext(loadAll(cfg),{question:'Funnel handoff',scope,candidate_limit:1}).legacy_candidates.length,1);
+assert.ok(!analyticalContext(loadAll(cfg),{question:'Funnel handoff',definition_ids:[legacy.id]}).current.some(o=>o.id===legacy.id),'explicit legacy id does not bypass unknown scope');
+assert.throws(()=>analyticalContext(loadAll(cfg),{question:'Funnel',scope,candidate_limit:51}),/limits/);
+const lifecycleFixture = getById(cfg,legacy.id)!;
+const discardedCandidate = {...lifecycleFixture,id:'discarded-legacy-fixture',status:'deprecated' as const,fields:{...lifecycleFixture.fields,stance:'discarded'}};
+const supersededCandidate = {...lifecycleFixture,id:'superseded-legacy-fixture',status:'deprecated' as const,superseded_by:'replacement-fixture'};
+const labels = analyticalContext([discardedCandidate,supersededCandidate],{question:'Funnel handoff',scope,candidate_limit:50}).legacy_candidates;
+assert.equal(labels.find(c=>c.id===discardedCandidate.id)?.authority_label,'discarded cut');
+assert.equal(labels.find(c=>c.id===supersededCandidate.id)?.authority_label,'superseded by replacement-fixture');
+// Missing scope never edits or enriches the original record during a read.
+assert.equal(objectVersion(getById(cfg,legacy.id)!),legacy.content_version);
+
 await verifyAcceptanceEvidence(cfg,{acceptance});
 await assert.rejects(verifyAcceptanceEvidence(cfg,{acceptance:{...acceptance,evidence_refs:[{artifact_id:d1.id,sha256:'f'.repeat(64),role:'review'}]}}),/version mismatch/);
 await assert.rejects(verifyAcceptanceEvidence(cfg,{acceptance:{...acceptance,evidence_refs:[{sha256:'f'.repeat(64),role:'review'}]}}),/unavailable/);
@@ -69,6 +105,11 @@ assert.ok(JSON.stringify(resolved).includes(d2.id),'get old evidence includes ap
 const retrieved=await client.callTool({name:'ledger_investigation',arguments:{question:'trial conversion',analysis_scope:scope,limit:1}});
 assert.ok(!retrieved.isError,JSON.stringify(retrieved));
 assert.ok(JSON.stringify(retrieved).includes(d2.id));
+const candidateResponse=await client.callTool({name:'ledger_investigation',arguments:{question:'Funnel handoff',analysis_scope:{...scope,metric:'funnel_rate'},candidate_limit:1}}) as any;
+assert.ok(!candidateResponse.isError,JSON.stringify(candidateResponse));
+assert.equal(candidateResponse.structuredContent.investigation.discovery_status,'candidates_available');
+assert.equal(candidateResponse.structuredContent.investigation.legacy_candidates.length,1);
+assert.ok(!JSON.stringify(candidateResponse.structuredContent.receipt).includes('No matching records'),'candidate-only discovery must not produce a false empty receipt');
 const impact=await client.callTool({name:'ledger_impact',arguments:{correction_id:d2.id}});
 assert.ok(JSON.stringify(impact).includes(finding.id));
 const invalidDate=await client.callTool({name:'ledger_get',arguments:{id:d1.id,as_of:'2026-02-31'}});

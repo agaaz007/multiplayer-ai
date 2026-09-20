@@ -4,7 +4,7 @@ import crypto from "node:crypto";
 import { isDataTool, summarize, DEFAULT_DATA_TOOLS } from "../hooks.js";
 import { codexExecCommands, codexOutputText, type Agent } from "../transcript.js";
 import { redactText } from "./redact.js";
-import { dataToolCalls, evidenceId, inputText } from "../capture-tools.js";
+import { dataToolCalls, evidenceId, inputText, normalizeToolCalls } from "../capture-tools.js";
 
 /**
  * Streaming emitters: read a harness transcript from a byte offset and yield
@@ -101,16 +101,24 @@ function compact<T extends Record<string, unknown>>(o: T): T {
  * string or a multibyte character. If the file is now shorter than `offset`, it was rotated or
  * rewritten: read again from 0.
  */
-function readNewLines(file: string, offset: number): { lines: { at: number; text: string }[]; offset: number } {
+export interface TranscriptLimits { maxBytes?: number; maxLines?: number }
+function readNewLines(file: string, offset: number, limits: TranscriptLimits = {}): { lines: { at: number; text: string }[]; offset: number } {
   const size = fs.statSync(file).size;
   if (size < offset) offset = 0;
   if (size === offset) return { lines: [], offset };
   const fd = fs.openSync(file, "r");
   let buf: Buffer;
   try {
-    buf = Buffer.alloc(size - offset);
+    buf = Buffer.alloc(Math.min(size - offset, limits.maxBytes ?? size));
     const n = fs.readSync(fd, buf, 0, buf.length, offset);
     if (n < buf.length) buf = buf.subarray(0, n);
+    // A single admitted tool result may exceed the ordinary chunk budget. Read
+    // that one frame up to the existing 32 MiB parser safety ceiling; never skip it.
+    if (buf.indexOf(10) === -1 && n < size - offset && limits.maxBytes) {
+      buf = Buffer.alloc(Math.min(size - offset, 32 << 20));
+      const extended = fs.readSync(fd, buf, 0, buf.length, offset); buf = buf.subarray(0, extended);
+      if (buf.indexOf(10) === -1 && extended < size - offset) throw new Error("transcript frame exceeds 32 MiB; cursor retained, repair required");
+    }
   } finally {
     fs.closeSync(fd);
   }
@@ -124,6 +132,7 @@ function readNewLines(file: string, offset: number): { lines: { at: number; text
     if (text.trim()) lines.push({ at: offset + pos, text });
     pos = nl + 1;
     consumed = pos;
+    if (lines.length >= (limits.maxLines ?? Infinity)) break;
   }
   return { lines, offset: offset + consumed };
 }
@@ -154,6 +163,7 @@ function isHarnessInjected(raw: string): boolean {
 
 function toolRequested(id: string, tool: string, input: unknown, at: string | undefined, dataTools: string[]): NormEvent {
   const calls = dataToolCalls(tool, input, id, dataTools);
+  const ledgerCalls = normalizeToolCalls(tool, input, id).filter(c => /(?:^|_)ledger_/.test(c.tool));
   const summary = summarize(calls.length === 1 && calls[0].wrapper && calls[0].input_complete ? calls[0].input : input, INPUT_MAX);
   const full = inputText(input), sourceBytes = Buffer.byteLength(full, "utf8");
   // Do not run expensive full-text redaction on material we cannot store anyway.
@@ -163,7 +173,8 @@ function toolRequested(id: string, tool: string, input: unknown, at: string | un
     tool, input: clean(summary, INPUT_MAX), input_hash: crypto.createHash("sha256").update(full).digest("hex"),
     is_data_tool: calls.length > 0, input_preview_truncated: full.length > INPUT_MAX || summary !== full,
   };
-  if (calls.length) {
+  if (calls.length || ledgerCalls.length) {
+    payload.input_capture_reason = calls.length ? "analytics" : "ledger";
     payload.evidence_ids = calls.map(call => evidenceId(call.call_id, call.tool, at, call.input));
     if (sourceBytes <= ARTIFACT_MAX) payload.input_sha256 = crypto.createHash("sha256").update(redacted.text).digest("hex");
     payload.input_format = typeof input === "string" ? "text" : "json";
@@ -230,9 +241,9 @@ export function claudeCompactSummaryText(raw: string): string {
 
 // ---------- Claude Code ----------
 
-function streamClaude(file: string, fromOffset: number, dataTools: string[]): StreamResult {
+function streamClaude(file: string, fromOffset: number, dataTools: string[], limits: TranscriptLimits = {}): StreamResult {
   const res: StreamResult = { harness: "claude", events: [], offset: fromOffset, unknown: {} };
-  const { lines, offset } = readNewLines(file, fromOffset);
+  const { lines, offset } = readNewLines(file, fromOffset, limits);
   res.offset = offset;
   if (!res.session_id) res.session_id = path.basename(file, ".jsonl");
   for (const { at, text } of lines) {
@@ -354,11 +365,25 @@ const CODEX_KNOWN = new Set([
  * 100 ms. A read boundary can fall between any two of them.
  */
 
+function decodeRuntimeResult(value: any): any {
+  if (typeof value === "string" && value.length <= ARTIFACT_MAX) { try { return JSON.parse(value); } catch { return {}; } }
+  return value && typeof value === "object" ? value : {};
+}
+function runtimeInvocationId(value: any, depth = 0): string | undefined {
+  if (depth > 3) return undefined;
+  const v = decodeRuntimeResult(value), usage = v.structuredContent?.usage;
+  if (usage?.source === "ledger_server" && typeof usage.invocation_id === "string" && /^[a-f0-9-]{36}$/i.test(usage.invocation_id)) return usage.invocation_id;
+  for (const c of Array.isArray(v.content) ? v.content : []) {
+    if (c?.type === "text") { const id = runtimeInvocationId(c.text, depth + 1); if (id) return id; }
+  }
+  return undefined;
+}
+
 interface PatchRef { ev?: NormEvent; path: string; call_id?: string; ts?: string }
 
-function streamCodex(file: string, fromOffset: number, dataTools: string[]): StreamResult {
+function streamCodex(file: string, fromOffset: number, dataTools: string[], limits: TranscriptLimits = {}): StreamResult {
   const res: StreamResult = { harness: "codex", events: [], offset: fromOffset, unknown: {} };
-  const { lines, offset } = readNewLines(file, fromOffset);
+  const { lines, offset } = readNewLines(file, fromOffset, limits);
   res.offset = offset;
   const recentTexts = new Set<string>(); // legacy + new message shapes can both carry one turn
   const remember = (t: string) => { recentTexts.add(t); if (recentTexts.size > 64) recentTexts.delete(recentTexts.values().next().value!); };
@@ -392,10 +417,10 @@ function streamCodex(file: string, fromOffset: number, dataTools: string[]): Str
    * stored event is never amended. Emitted at the *_end line's position and withdrawn if the output turns
    * up later in the same read.
    */
-  const attachMeta = (callId: string, fields: Record<string, unknown>, ts: string | undefined) => {
+  const attachMeta = (callId: string, fields: Record<string, unknown>, ts: string | undefined, correlate = true) => {
     const fin = finishedByCall.get(callId);
     if (fin) { Object.assign(fin.payload, fields); return; }
-    const ev: NormEvent = { producer_event_id: `${callId}:meta`, kind: "tool.result_meta", call_id: callId, occurred_at: ts, payload: { call_id: callId, ...fields, ...enclosing(callId) } };
+    const ev: NormEvent = { producer_event_id: `${callId}:meta`, kind: "tool.result_meta", call_id: callId, occurred_at: ts, payload: { call_id: callId, ...fields, ...(correlate ? enclosing(callId) : {}) } };
     metaByCall.set(callId, { ev, fields });
     res.events.push(ev);
   };
@@ -473,16 +498,27 @@ function streamCodex(file: string, fromOffset: number, dataTools: string[]): Str
       const callId = String(p.call_id ?? "");
       const r = p.result && typeof p.result === "object" ? p.result : {};
       const err = r.Err != null ? clean(typeof r.Err === "string" ? r.Err : JSON.stringify(r.Err), 600) : undefined;
-      const failed = err !== undefined || r.Ok?.is_error === true;
+      const decoded = decodeRuntimeResult(r.Ok);
+      const failed = err !== undefined || decoded?.is_error === true || decoded?.isError === true;
+      const serverId = runtimeInvocationId(decoded);
+      const runtimeInput = typeof p.invocation?.tool === "string" && p.invocation.arguments !== undefined
+        ? toolRequested(callId, `mcp__${p.invocation.server ?? "unknown"}__${p.invocation.tool}`, p.invocation.arguments, ts, dataTools).payload : {};
+      // Runtime completion proves execution; lexical wrapper matches do not.
+      // Do not infer the parent wrapper merely because one call is in flight.
+
       if (callId) attachMeta(callId, compact({
+        ...runtimeInput,
         meta_source: "mcp_tool_call_end",
+        invocation_source: "runtime_completion",
+        server_invocation_id: serverId,
+        invocation_correlation: serverId ? "server_identity" : "unknown",
         duration_ms: durationMs(p.duration),
         mcp_server: typeof p.invocation?.server === "string" ? p.invocation.server : undefined,
         mcp_tool: typeof p.invocation?.tool === "string" ? p.invocation.tool : undefined,
         success: !failed,
         error: err,
         is_error: failed ? true : undefined,
-      }), ts);
+      }), ts, false);
     } else if (t === "response_item" && p.type === "message") {
       const body = codexOutputText(p.content);
       if (!body.trim()) continue;
@@ -586,7 +622,7 @@ export function detectHarness(file: string): Agent {
   return file.includes(`${path.sep}.codex${path.sep}`) || path.basename(file).startsWith("rollout-") ? "codex" : "claude";
 }
 
-export function streamTranscript(file: string, fromOffset = 0, harness?: Agent, dataTools: string[] = DEFAULT_DATA_TOOLS): StreamResult {
+export function streamTranscript(file: string, fromOffset = 0, harness?: Agent, dataTools: string[] = DEFAULT_DATA_TOOLS, limits: TranscriptLimits = {}): StreamResult {
   const h = harness ?? detectHarness(file);
-  return h === "codex" ? streamCodex(file, fromOffset, dataTools) : streamClaude(file, fromOffset, dataTools);
+  return h === "codex" ? streamCodex(file, fromOffset, dataTools, limits) : streamClaude(file, fromOffset, dataTools, limits);
 }

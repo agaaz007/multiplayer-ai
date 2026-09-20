@@ -1,3 +1,4 @@
+import { assertSafeSelftestDatabase, assertSelftestDatabaseMarker } from "../selftest-db-guard.js";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -18,6 +19,7 @@ import { execFileSync } from "node:child_process";
  */
 
 const DB = process.env.LEDGER_CONTINUITY_DB || "postgresql://localhost:5432/ledger_selftest_eval_c";
+assertSafeSelftestDatabase(DB);
 const evalRoot = path.join(os.tmpdir(), "ledger-eval");
 fs.mkdirSync(evalRoot, { recursive: true });
 const root = fs.mkdtempSync(path.join(evalRoot, "selftest-conditions-"));
@@ -136,6 +138,7 @@ ok("trial ledger initialised under the trial config dir; ambient LEDGER_CONFIG_D
 
 const cfgDb = { ledger_dir: ledgerDir, author: "test", git_sync: false, continuity: { database_url: DB, machine: "eval-test" } };
 const pool = getPool(cfgDb);
+await assertSelftestDatabaseMarker(pool);
 await pool.query(`drop table if exists cont_state_updates, cont_record_links, cont_records, cont_notifications, cont_artifacts, cont_claims, cont_checkpoints, cont_events, cont_sessions, cont_threads cascade`);
 await migrate(pool);
 ok(`schema reset on ${DB.replace(/\/\/[^@]*@/, "//…@")}`);

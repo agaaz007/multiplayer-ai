@@ -1,4 +1,7 @@
 import pg from "pg";
+import { HANDOFF_SCHEMA } from "./handoffs.js";
+import { USAGE_SCHEMA, instrumentUsageClient } from "./usage.js";
+import { assertSafeSelftestDatabase } from "../selftest-db-guard.js";
 import type { Config } from "../store.js";
 import { embeddingsConfigured, ensureEmbeddingSchema } from "./embeddings.js";
 
@@ -21,6 +24,7 @@ export function continuityConfigured(cfg: Config): boolean {
 export function getPool(cfg: Config): pg.Pool {
   const url = cfg.continuity?.database_url;
   if (!url) throw new Error("continuity not configured: set continuity.database_url in ~/.ledger/config.json or LEDGER_CONTINUITY_DB");
+  if (process.env.LEDGER_SELFTEST === "1") assertSafeSelftestDatabase(url);
   let p = pools.get(url);
   if (!p) {
     // pg 8.23 treats sslmode=require as verify-full and prints a security warning while parsing the URL.
@@ -33,6 +37,7 @@ export function getPool(cfg: Config): pg.Pool {
     // (a laptop sleep or DNS loss). query_timeout is the client-side bound and TCP keepalive surfaces dead
     // sockets; without both the helper once waited 39 h on one query while launchd reported it running.
     p = new pg.Pool({ connectionString: u.toString(), ssl: wantSsl ? { rejectUnauthorized: true } : false, max: 4, idleTimeoutMillis: 10_000, connectionTimeoutMillis: 8_000, statement_timeout: 20_000, query_timeout: 30_000, keepAlive: true, keepAliveInitialDelayMillis: 10_000 });
+    p.on("connect", instrumentUsageClient);
     p.on("error", () => { /* idle client errors are retried on next query */ });
     pools.set(url, p);
   }
@@ -154,6 +159,20 @@ create table if not exists cont_notifications (
   delivered_at timestamptz
 );
 
+-- Additive readiness schema; old clients ignore these fields/tables.
+alter table cont_sessions add column if not exists identity_provenance jsonb not null default '{}'::jsonb;
+alter table cont_sessions add column if not exists identity_history jsonb not null default '[]'::jsonb;
+create table if not exists cont_binding_operations (
+  actor text not null,
+  session_id text not null,
+  request_id text not null,
+  kind text not null,
+  input_hash text not null,
+  result jsonb not null,
+  committed_at timestamptz not null default now(),
+  primary key(actor,session_id,request_id)
+);
+
 create index if not exists cont_events_thread_idx on cont_events(thread_id, id);
 create index if not exists cont_sessions_thread_idx on cont_sessions(thread_id);
 create index if not exists cont_sessions_seen_idx on cont_sessions(last_seen_at desc);
@@ -234,6 +253,10 @@ update cont_records set touched_repos = array_append(touched_repos, repo), repo 
  where kind = 'investigation' and repo is not null and not (repo = any(touched_repos));
 update cont_records set repo = null where kind = 'investigation' and repo is not null;
 
+alter table cont_records add column if not exists investigation_question_key text;
+create unique index if not exists cont_records_open_question_idx on cont_records(investigation_question_key)
+ where kind='investigation' and status='open' and investigation_question_key is not null;
+
 create index if not exists cont_records_repo_idx on cont_records(repo, status, updated_at desc);
 create index if not exists cont_records_updated_idx on cont_records(updated_at desc);
 create index if not exists cont_record_links_record_idx on cont_record_links(record_id);
@@ -254,7 +277,15 @@ create index if not exists cont_events_fts_idx on cont_events using gin (
  */
 export async function migrate(pool: pg.Pool, cfg?: Config): Promise<string[]> {
   const before = await tableList(pool);
-  await pool.query(SCHEMA);
+  const c = await pool.connect();
+  try {
+    await c.query("begin");
+    await c.query("set local lock_timeout = '2s'");
+    await c.query(SCHEMA);
+    await c.query(USAGE_SCHEMA);
+    await c.query(HANDOFF_SCHEMA);
+    await c.query("commit");
+  } catch (e) { await c.query("rollback").catch(() => {}); throw e; } finally { c.release(); }
   if (cfg && embeddingsConfigured(cfg)) await ensureEmbeddingSchema(pool, cfg);
   const after = await tableList(pool);
   return after.filter((t) => !before.includes(t));

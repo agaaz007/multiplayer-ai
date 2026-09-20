@@ -1,3 +1,4 @@
+import { assertSafeSelftestDatabase, assertSelftestDatabaseMarker } from "./selftest-db-guard.js";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -29,6 +30,7 @@ import path from "node:path";
 // the MCP tools resolve the caller's session from these; unset them so provenance assertions do not depend on the shell running the test
 for (const k of ["CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID", "CODEX_THREAD_ID"]) delete process.env[k];
 const DB = process.env.LEDGER_CONTINUITY_DB || "postgresql://localhost:5432/ledger_selftest_recordpack";
+assertSafeSelftestDatabase(DB);
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ledger-recpack-"));
 process.env.LEDGER_CONFIG_DIR = path.join(tmp, ".ledger");
 process.env.LEDGER_GIT_SYNC = "0";
@@ -64,6 +66,7 @@ const ledgerDir = path.join(tmp, "ledger");
 initLedger(ledgerDir, "test");
 const cfg: Config = { ledger_dir: ledgerDir, git_sync: false, author: "agaaz", continuity: { database_url: DB, machine: "agaaz-mac" } };
 const pool = getPool(cfg);
+await assertSelftestDatabaseMarker(pool);
 await pool.query(`drop table if exists cont_session_bindings, cont_state_updates, cont_record_links, cont_records, cont_notifications, cont_artifacts, cont_claims, cont_checkpoints, cont_events, cont_sessions, cont_threads cascade`);
 await migrate(pool);
 assert.equal((await tableList(pool)).length, 11, "all eleven cont_* tables present (cont_session_bindings added 2026-09-17)");

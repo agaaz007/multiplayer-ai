@@ -50,9 +50,13 @@ type Q = pg.Pool | pg.PoolClient;
 
 export async function upsertSession(q: Q, s: { id: string; author: string; harness: string; machine?: string | null; cwd?: string | null; repo?: string | null; branch?: string | null; transcript_path?: string | null; started_at?: Date | string | null; last_seen_at?: Date | string | null }): Promise<SessionRow> {
   const r = await q.query<SessionRow>(
-    `insert into cont_sessions (id, author, harness, machine, cwd, repo, branch, transcript_path, started_at, last_seen_at)
-     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,coalesce($10, now()))
+    `insert into cont_sessions (id, author, harness, machine, cwd, repo, branch, transcript_path, started_at, last_seen_at, identity_provenance)
+     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,coalesce($10, now()), case when $8::text is not null and $3::text in ('claude','codex') then jsonb_build_object('source','captured_transcript','verified',true,'harness',$3::text) else '{}'::jsonb end)
      on conflict (id) do update set
+       harness = case when excluded.transcript_path is not null and excluded.harness in ('claude','codex') then excluded.harness else cont_sessions.harness end,
+       identity_history = case when excluded.transcript_path is not null and excluded.harness in ('claude','codex') and cont_sessions.harness <> excluded.harness then
+         coalesce(cont_sessions.identity_history, '[]'::jsonb) || jsonb_build_array(jsonb_build_object('harness', cont_sessions.harness, 'provenance', cont_sessions.identity_provenance, 'corrected_at', now())) else cont_sessions.identity_history end,
+       identity_provenance = case when excluded.transcript_path is not null and excluded.harness in ('claude','codex') then jsonb_build_object('source','captured_transcript','verified',true,'harness',excluded.harness) else cont_sessions.identity_provenance end,
        machine = coalesce(excluded.machine, cont_sessions.machine),
        cwd = coalesce(excluded.cwd, cont_sessions.cwd),
        repo = coalesce(excluded.repo, cont_sessions.repo),
@@ -60,9 +64,11 @@ export async function upsertSession(q: Q, s: { id: string; author: string; harne
        transcript_path = coalesce(excluded.transcript_path, cont_sessions.transcript_path),
        started_at = coalesce(cont_sessions.started_at, excluded.started_at),
        last_seen_at = greatest(cont_sessions.last_seen_at, excluded.last_seen_at)
+     where cont_sessions.author = excluded.author
      returning *`,
     [s.id, s.author, s.harness, s.machine ?? null, s.cwd ?? null, s.repo ?? null, s.branch ?? null, s.transcript_path ?? null, s.started_at ?? null, s.last_seen_at ?? null]
   );
+  if (!r.rows[0]) throw new Error("session belongs to a different configured author");
   return r.rows[0];
 }
 
@@ -103,16 +109,21 @@ export async function appendEvents(pool: pg.Pool, sessionId: string, events: Nor
     await c.query(`select id from cont_sessions where id = $1 for update`, [sessionId]);
     const existing = await c.query<{ producer_event_id: string }>(`select producer_event_id from cont_events where session_id = $1 and producer_event_id = any($2)`, [sessionId, events.map((e) => e.producer_event_id)]);
     const have = new Set(existing.rows.map((x) => x.producer_event_id));
-    const fresh = events.filter((e) => !have.has(e.producer_event_id));
+    const fresh = events.filter((e) => { if (have.has(e.producer_event_id)) return false; have.add(e.producer_event_id); return true; });
     const m = await c.query<{ m: number }>(`select coalesce(max(seq),0)::int as m from cont_events where session_id = $1`, [sessionId]);
     let seq = m.rows[0].m;
-    for (const e of fresh) {
-      seq++;
-      await c.query(
-        `insert into cont_events (session_id, seq, producer_event_id, call_id, thread_id, kind, occurred_at, generation, payload)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9) on conflict (session_id, producer_event_id) do nothing`,
-        [sessionId, seq, e.producer_event_id, e.call_id ?? null, threadId, e.kind, e.occurred_at ?? null, generation, jsonbSafe(JSON.stringify(e.payload))]
-      );
+    // One statement per bounded chunk, preserving input order after in-batch and
+    // persisted deduplication under the session lock. Sequence allocation and
+    // event rows commit together, so retries cannot strand a neighboring event.
+    for (let start = 0; start < fresh.length; start += 200) {
+      const part = fresh.slice(start, start + 200).map(e => ({
+        seq: ++seq, producer_event_id: e.producer_event_id, call_id: e.call_id ?? null,
+        kind: e.kind, occurred_at: e.occurred_at ?? null, payload: e.payload,
+      }));
+      await c.query(`insert into cont_events (session_id, seq, producer_event_id, call_id, thread_id, kind, occurred_at, generation, payload)
+        select $1, e.seq, e.producer_event_id, e.call_id, $2, e.kind, e.occurred_at, $3, e.payload
+        from jsonb_to_recordset($4::jsonb) as e(seq int, producer_event_id text, call_id text, kind text, occurred_at timestamptz, payload jsonb)
+        order by e.seq`, [sessionId, threadId, generation, jsonbSafe(JSON.stringify(part))]);
     }
     await c.query(`update cont_sessions set last_acked_event_at = now() where id = $1`, [sessionId]);
     await c.query("commit");
@@ -356,8 +367,11 @@ export async function latestCheckpointAny(q: Q, threadId: string): Promise<Check
 export async function putArtifact(q: Q, a: { sha256: string; kind: string; bytes: Buffer; session_id?: string | null }): Promise<{ id: string; existed: boolean }> {
   const ex = await q.query<{ id: string }>(`select id from cont_artifacts where sha256 = $1`, [a.sha256]);
   if (ex.rows[0]) return { id: ex.rows[0].id, existed: true };
-  const r = await q.query<{ id: string }>(`insert into cont_artifacts (sha256, kind, byte_size, inline, session_id) values ($1,$2,$3,$4,$5) returning id`, [a.sha256, a.kind, a.bytes.length, a.bytes, a.session_id ?? null]);
-  return { id: r.rows[0].id, existed: false };
+  const r = await q.query<{ id: string }>(`insert into cont_artifacts (sha256, kind, byte_size, inline, session_id) values ($1,$2,$3,$4,$5) on conflict (sha256) do nothing returning id`, [a.sha256, a.kind, a.bytes.length, a.bytes, a.session_id ?? null]);
+  if (r.rows[0]) return { id: r.rows[0].id, existed: false };
+  const raced = await q.query<{ id: string }>(`select id from cont_artifacts where sha256=$1`, [a.sha256]);
+  if (!raced.rows[0]) throw new Error("artifact insert outcome unavailable; retry required");
+  return { id: raced.rows[0].id, existed: true };
 }
 
 export async function addNotification(q: Q, author: string, machine: string | null, message: string): Promise<void> {

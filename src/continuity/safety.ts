@@ -26,7 +26,10 @@ export type SessionResolution =
  */
 export function resolveHarnessSession(given: string | undefined | null, env: NodeJS.ProcessEnv, hasTranscript: (id: string) => boolean): SessionResolution {
   const explicit = String(given ?? "").trim();
-  if (explicit) return { ok: true, id: explicit, source: "explicit" };
+  if (explicit) {
+    if (!/^[A-Za-z0-9_-]{8,200}$/.test(explicit)) return { ok: false, error: "Invalid harness session_id. Pass the exact ID printed by SessionStart; nothing was claimed or bound." };
+    return { ok: true, id: explicit, source: "explicit" };
+  }
   const unmatched: string[] = [];
   for (const name of SESSION_ENV_VARS) {
     const v = String(env[name] ?? "").trim();
@@ -102,4 +105,26 @@ export function threadTitleFor(firstInstruction: string | undefined | null, repo
   const t = String(firstInstruction ?? "").trim();
   if (t.split(/\s+/).filter(Boolean).length >= TITLE_MIN_WORDS) return t;
   return `${path.basename(repo) || "repo"} work (session ${sessionId.slice(0, 8)})`;
+}
+
+
+export interface HarnessIdentity {
+  harness: "claude" | "codex" | "unknown";
+  source: string;
+  verified: boolean;
+}
+
+/** Resolve the harness from a matching local transcript, never UUID shape or a stale
+ * unrelated environment variable. Unknown is deliberately retained as unknown. */
+export function localTranscriptHarness(id: string, roots = transcriptRoots()): HarnessIdentity {
+  if (!/^[A-Za-z0-9_-]{8,200}$/.test(id)) return {harness:"unknown",source:"invalid_id",verified:false};
+  const claude = localTranscriptExists(id, {claude:roots.claude,codex:path.join(roots.codex,"__no_such_ledger_root__")});
+  const codex = localTranscriptExists(id, {claude:path.join(roots.claude,"__no_such_ledger_root__"),codex:roots.codex});
+  if (claude === codex) return {harness:"unknown",source:claude ? "ambiguous_transcript" : "explicit_unverified",verified:false};
+  return {harness:codex ? "codex" : "claude",source:"local_transcript",verified:true};
+}
+
+export function resolveHarnessIdentity(given: string | undefined | null, env: NodeJS.ProcessEnv = process.env, lookup: (id: string) => HarnessIdentity = localTranscriptHarness): SessionResolution & { identity?: HarnessIdentity } {
+  const resolution = resolveHarnessSession(given,env,id => lookup(id).verified);
+  return resolution.ok ? {...resolution,identity:lookup(resolution.id)} : resolution;
 }

@@ -1,18 +1,35 @@
+import type pg from "pg";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { availableSection, boundedRead, type AvailableSection } from "./availability.js";
 import type { Config } from "../store.js";
 import { continuityConfigured, getPool } from "./db.js";
 import { listThreads } from "./store.js";
 import { threadLine } from "./resume.js";
-import { repoIdentity, repoRoot } from "./shadow.js";
+import { canonicalRepoUrl } from "./shadow.js";
 import { takeLocalNotifications } from "../helper/signals.js";
 import { unassignedSpans } from "./records.js";
 import { listRecordSummaries, recordLine, unassignedLine } from "./recordpack.js";
 import { investigationLine, listInvestigations } from "./investigations.js";
 
+const exec = promisify(execFile);
+
+/** Repository priority is a best-effort hint, not an access boundary. Never block read deadlines on synchronous Git. */
+async function briefRepo(cwd: string | undefined, budget: number): Promise<string | null> {
+  if (!cwd) return null;
+  const options = {cwd, timeout:Math.max(1,Math.min(250,Math.floor(budget / 4))), maxBuffer:64 << 10,
+    env:{...process.env,GIT_TERMINAL_PROMPT:'0'}};
+  try {
+    const root = (await exec('git',['rev-parse','--show-toplevel'],options)).stdout.trim();
+    try { return canonicalRepoUrl((await exec('git',['remote','get-url','origin'],options)).stdout.trim()) || root; }
+    catch { return root; }
+  } catch { return null; }
+}
+
 /**
  * The "Open threads" section for SessionStart and `ledger brief`. Teammates'
  * threads only (your own are in your local sessions), last 48 h, capped, in
- * the current repo first. Fails open: any store error yields an empty string
- * so a session never waits on Postgres. The work-record sections from
+ * the current repo first. Read deadlines bound waiting and surface unavailable sections distinctly from empty work. The work-record sections from
  * openWorkText are appended so every entry point gets them.
  */
 export async function openThreadsText(cfg: Config, opts: { cwd?: string; hours?: number; limit?: number; includeOwn?: boolean; timeoutMs?: number } = {}): Promise<string> {
@@ -20,15 +37,10 @@ export async function openThreadsText(cfg: Config, opts: { cwd?: string; hours?:
   const hours = opts.hours ?? 48;
   const limit = opts.limit ?? 5;
   const budget = opts.timeoutMs ?? 4000;
-  // Each section races the budget on its own and the three run in parallel: a slow Neon connect for one
-  // section (seen 2026-09-17: 7-8 s connects) must not drop the others, and a sequential chain of three
-  // connects cannot fit any sane budget. A section that loses its race is omitted, never partially printed.
-  const raced = (p: Promise<string>): Promise<string> =>
-    Promise.race([p.catch(() => ""), new Promise<string>((res) => setTimeout(() => res(""), budget))]);
-  const threads = raced((async () => {
-    const pool = getPool(cfg);
-    const root = opts.cwd ? repoRoot(opts.cwd) : null;
-    const repo = root ? repoIdentity(root) : null;
+  const threadSection = availableSection("Open threads", () => boundedRead(getPool(cfg), budget, async (client) => {
+    // These read APIs only use query; the borrowed connection is owned by boundedRead.
+    const pool = client as unknown as pg.Pool;
+    const repo = await briefRepo(opts.cwd, budget);
     const filt = { sinceHours: hours, status: "open", limit, ...(opts.includeOwn ? {} : { excludeAuthor: cfg.author }) };
     let rows = repo ? await listThreads(pool, { ...filt, repo }) : [];
     if (rows.length < limit) {
@@ -42,12 +54,13 @@ export async function openThreadsText(cfg: Config, opts: { cwd?: string; hours?:
       for (const r of rows) out.push(threadLine(r));
     }
     return out.join("\n");
-  })());
-  // Open investigations sit before the work records: an analysis session must bind to one (or declare a new
-  // question) before its first data query, whatever repo it is in, or none.
-  const investigations = raced(openInvestigationsText(cfg, { timeoutMs: budget }));
-  const records = raced(openWorkText(cfg, { cwd: opts.cwd, timeoutMs: budget }));
-  const [t, i, r] = await Promise.all([threads, investigations, records]);
+  }));
+  const [threadResult, investigationResult, workResult] = await Promise.all([
+    threadSection,
+    investigationSection(cfg, { timeoutMs: budget }),
+    workSection(cfg, { ...opts, timeoutMs: budget }),
+  ]);
+  const [t, i, r] = [threadResult, investigationResult, workResult].map(section => section.text);
   const out: string[] = [];
   const notes = takeLocalNotifications();
   if (notes.length) {
@@ -65,22 +78,20 @@ export const INVESTIGATIONS_CONTRACT = `Analysis sessions must bind to one of th
  * "## Open investigations (all repos, last N days)": open `investigation` work records from every repo and
  * from no repo, newest first, one line each (title · created_by · updated · proposed/confirmed · bound sessions
  * · id), followed by the bind-or-declare contract. Empty string when there are none (the contract still applies:
- * ledger_investigation_new declares the first). Fails open like the other sections.
+ * ledger_investigation_new declares the first). Unavailable sections are labelled explicitly.
  */
-export async function openInvestigationsText(cfg: Config, opts: { hours?: number; limit?: number; timeoutMs?: number; now?: Date } = {}): Promise<string> {
-  if (!continuityConfigured(cfg)) return "";
+export async function investigationSection(cfg: Config, opts: { hours?: number; limit?: number; timeoutMs?: number; now?: Date } = {}): Promise<AvailableSection> {
+  if (!continuityConfigured(cfg)) return {name: "Open investigations", status: "not_configured", text: "", observed_at: (opts.now ?? new Date()).toISOString()};
   const hours = opts.hours ?? 24 * 14;
   const limit = opts.limit ?? 8;
   const now = opts.now ?? new Date();
-  const work = (async () => {
-    const { items } = await listInvestigations(getPool(cfg), cfg, { hours, limit });
+  return availableSection("Open investigations", () => boundedRead(getPool(cfg), opts.timeoutMs ?? 4000, async (client) => {
+    const { items } = await listInvestigations(client as unknown as pg.Pool, cfg, { hours, limit });
     if (!items.length) return "";
     const out = [`## Open investigations (all repos, last ${Math.round(hours / 24)} days)`, INVESTIGATIONS_CONTRACT];
     for (const it of items) out.push(investigationLine(it, now));
     return out.join("\n");
-  })();
-  const timeout = new Promise<string>((res) => setTimeout(() => res(""), opts.timeoutMs ?? 4000));
-  try { return await Promise.race([work, timeout]); } catch { return ""; }
+  }), now);
 }
 
 /**
@@ -89,20 +100,19 @@ export async function openInvestigationsText(cfg: Config, opts: { hours?: number
  * others, last 14 days, up to 8, each with its newest proposed update so an
  * unconfirmed claim is visible before anyone builds on it. Unassigned spans
  * (last 48 h, up to 5) come from teammates' and own sessions alike; they are
- * listed, never turned into records here. Fails open like openThreadsText.
+ * listed, never turned into records here. Unavailable sections are labelled explicitly.
  */
-export async function openWorkText(cfg: Config, opts: { cwd?: string; hours?: number; limit?: number; unassignedHours?: number; unassignedLimit?: number; timeoutMs?: number; now?: Date } = {}): Promise<string> {
-  if (!continuityConfigured(cfg)) return "";
+export async function workSection(cfg: Config, opts: { cwd?: string; hours?: number; limit?: number; unassignedHours?: number; unassignedLimit?: number; timeoutMs?: number; now?: Date } = {}): Promise<AvailableSection> {
+  if (!continuityConfigured(cfg)) return {name: "Open work", status: "not_configured", text: "", observed_at: (opts.now ?? new Date()).toISOString()};
   const hours = opts.hours ?? 24 * 14;
   const limit = opts.limit ?? 8;
   const uHours = opts.unassignedHours ?? 48;
   const uLimit = opts.unassignedLimit ?? 5;
   const now = opts.now ?? new Date();
   const clip = (s: string, n: number) => { const t = s.replace(/\s+/g, " ").trim(); return t.length > n ? t.slice(0, n - 1) + "…" : t; };
-  const work = (async () => {
-    const pool = getPool(cfg);
-    const root = opts.cwd ? repoRoot(opts.cwd) : null;
-    const repo = root ? repoIdentity(root) : null;
+  return availableSection("Open work", () => boundedRead(getPool(cfg), opts.timeoutMs ?? 4000, async (client) => {
+    const pool = client as unknown as pg.Pool;
+    const repo = await briefRepo(opts.cwd, opts.timeoutMs ?? 4000);
     const filt = { sinceHours: hours, status: "open" as const, limit };
     const rows = repo ? await listRecordSummaries(pool, { ...filt, repo }) : [];
     if (rows.length < limit) {
@@ -126,7 +136,13 @@ export async function openWorkText(cfg: Config, opts: { cwd?: string; hours?: nu
       for (const s of un) out.push(unassignedLine(s, now));
     }
     return out.join("\n");
-  })();
-  const timeout = new Promise<string>((res) => setTimeout(() => res(""), opts.timeoutMs ?? 4000));
-  try { return await Promise.race([work, timeout]); } catch { return ""; }
+  }), now);
+}
+
+/** Text adapters retain the existing CLI/hook API while exposing typed section readers. */
+export async function openInvestigationsText(cfg: Config, opts: Parameters<typeof investigationSection>[1] = {}): Promise<string> {
+  return (await investigationSection(cfg, opts)).text;
+}
+export async function openWorkText(cfg: Config, opts: Parameters<typeof workSection>[1] = {}): Promise<string> {
+  return (await workSection(cfg, opts)).text;
 }

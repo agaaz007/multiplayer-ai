@@ -4,11 +4,14 @@ import path from "node:path";
 import crypto from "node:crypto";
 import type pg from "pg";
 import { ledgerHome, type Config } from "../store.js";
+import { withUsageInvocation } from "../usage.js";
+import { flushUsage } from "../continuity/usage.js";
 import { getPool } from "../continuity/db.js";
 import { streamTranscript, detectHarness, type NormEvent } from "../continuity/events.js";
-import { shadowCommit, repoRoot, repoIdentity, currentBranch, headCommit } from "../continuity/shadow.js";
+import { repoRoot, repoIdentity, currentBranch, headCommit } from "../continuity/shadow.js";
 import * as S from "../continuity/store.js";
-import { spoolAppend, spoolPending, spoolAck } from "./spool.js";
+import { queueSnapshot, snapshotQueueSize } from "./snapshot-queue.js";
+import { spoolAppend, spoolPending, spoolAck, spoolCursor, spoolStatus } from "./spool.js";
 import { readBinding, takeSignal, readIndex, appendLocalNotifications } from "./signals.js";
 import { redactText } from "../continuity/redact.js";
 import { classifySession, classifyAllowed, unclassifiedCount } from "../continuity/classify.js";
@@ -54,6 +57,7 @@ export interface SessState {
   lastCommit?: string | null;
   lastTree?: string;
   lastShadowAt?: number;
+  pendingSnapshotTurn?: boolean;
   lastHeartbeatAt?: number;
   lastSeenMtime: number;
   sidechain?: boolean;
@@ -74,6 +78,8 @@ export interface SessState {
 
 export interface HelperOpts {
   roots?: { claude?: string; codex?: string };
+  /** Explicit dependency injection for isolated fault tests. */
+  pool?: pg.Pool;
   /** transcripts modified within this many minutes are "active" */
   activeWindowMin?: number;
   /** a session with no activity for this long is released and marked ended */
@@ -85,6 +91,8 @@ export interface HelperOpts {
   push?: boolean;
   /** how long helperOnce waits for detached classifications before returning; 0 (default) = do not wait. Tests set it so results are visible on return. */
   classifyWaitMs?: number;
+  /** Tests can wait for snapshot publication; production always detaches. */
+  snapshotWaitMs?: number;
 }
 
 export interface HelperLoopOpts extends HelperOpts {
@@ -101,6 +109,9 @@ export interface HelperLoopOpts extends HelperOpts {
 
 /** Detached classifications by session id; a pass never blocks on them, and a session never runs two. */
 const classifyInFlight = new Map<string, Promise<void>>();
+const snapshotPublications = new Set<Promise<void>>();
+let usageFlush: Promise<unknown> | null = null;
+const snapshotCompleted = new Map<string, Partial<SessState>>();
 
 /** Embeddings per pass (optional feature): at most this many newly uploaded events, and no new provider batch after this long. */
 export const EMBED_PASS_MAX_EVENTS = 256;
@@ -130,7 +141,8 @@ export function loadState(): Record<string, SessState> {
 export function saveState(st: Record<string, SessState>): void {
   fs.mkdirSync(ledgerHome(), { recursive: true });
   const tmp = stateFile() + ".tmp";
-  fs.writeFileSync(tmp, JSON.stringify(st));
+  const fd = fs.openSync(tmp, "w", 0o600);
+  try { fs.writeFileSync(fd, JSON.stringify(st)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
   fs.renameSync(tmp, stateFile());
 }
 
@@ -280,9 +292,28 @@ async function awaitClassifications(ms: number): Promise<void> {
  * artifact id. Above the cap, the event carries an explicit `oversized` gap
  * with size and, when known, the local path; nothing is silently dropped.
  */
+export function retainOffloadedOutputs(events: NormEvent[]): void {
+  for (const event of events) {
+    const p = event.payload as Record<string, any>;
+    if (event.kind !== "tool.finished" || typeof p._full === "string" || typeof p.offloaded_path !== "string") continue;
+    try {
+      const bytes = fs.statSync(p.offloaded_path).size;
+      if (bytes > 8 * 1024 * 1024) {
+        p.output_availability = "oversized";
+        p.oversized = { byte_size: bytes, note: "offloaded output exceeds ARTIFACT_MAX" };
+      } else { p._full = redactText(fs.readFileSync(p.offloaded_path, "utf8")).text; p.output_availability = "pending_artifact"; }
+    } catch (error: any) {
+      // The original source path and a permanent explicit gap are retained; do
+      // not pretend an unreadable offload was captured in full.
+      p.output_availability = "unavailable";
+      p.output_gap = { kind: "offloaded_output_unreadable", code: String(error?.code ?? "unknown") };
+    }
+  }
+}
+
 export async function materializeArtifacts(pool: pg.Pool, sessionId: string, events: NormEvent[], storeArtifact: typeof putArtifact = putArtifact): Promise<void> {
   for (const e of events) {
-    if (e.kind === "tool.requested") {
+    if (e.kind === "tool.requested" || typeof e.payload._full_input === "string") {
       const p = e.payload as Record<string, any>;
       if (typeof p._full_input === "string") {
         const bytes = Buffer.from(p._full_input, "utf8"), sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
@@ -293,12 +324,12 @@ export async function materializeArtifacts(pool: pg.Pool, sessionId: string, eve
         p.input_availability = "stored";
         delete p._full_input;
       }
-      continue;
+      if (e.kind === "tool.requested") continue;
     }
     if (e.kind !== "tool.finished") continue;
     const p = e.payload as Record<string, any>;
     let full: string | undefined = typeof p._full === "string" ? p._full : undefined;
-    delete p._full;
+
     if (!full && typeof p.offloaded_path === "string" && fs.existsSync(p.offloaded_path)) {
       try {
         const size = fs.statSync(p.offloaded_path).size;
@@ -309,22 +340,25 @@ export async function materializeArtifacts(pool: pg.Pool, sessionId: string, eve
     if (!full) continue;
     const buf = Buffer.from(full, "utf8");
     const sha = crypto.createHash("sha256").update(buf).digest("hex");
-    try {
-      const a = await storeArtifact(pool, { sha256: sha, kind: "tool_output", bytes: buf, session_id: sessionId });
-      p.artifact_id = a.id;
-      p.artifact_sha256 = sha;
-    } catch (err: any) {
-      p.oversized = { byte_size: buf.length, note: `artifact store failed: ${String(err?.message ?? err).slice(0, 120)}` };
-    }
+    // Transient output failures are retryable exactly like input failures. The
+    // immutable spool still holds _full; acknowledgment cannot pass this event.
+    const a = await storeArtifact(pool, { sha256: sha, kind: "tool_output", bytes: buf, session_id: sessionId });
+    p.artifact_id = a.id;
+    p.artifact_sha256 = sha;
+    p.output_availability = "stored";
+    delete p._full;
   }
 }
 
 export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<PassSummary> {
+  return withUsageInvocation(cfg, { tool: "helper_capture", traffic_class: "maintenance", purpose: "capture_write", version: process.env.LEDGER_BUILD_COMMIT ?? "0.1.0" }, () => helperOnceImpl(cfg, opts));
+}
+async function helperOnceImpl(cfg: Config, opts: HelperOpts): Promise<PassSummary> {
   const now = opts.now ?? new Date();
   const log = opts.log ?? (() => {});
   const sum: PassSummary = { at: now.toISOString(), sessions: 0, events_spooled: 0, events_uploaded: 0, snapshots: 0, checkpoints: 0, bound: 0, classified: 0, errors: [] };
   if (!cfg.continuity) throw new Error("continuity not configured");
-  const pool = getPool(cfg);
+  const pool = opts.pool ?? getPool(cfg);
   const author = cfg.author;
   const machine = cfg.continuity.machine ?? os.hostname();
   const activeMs = (opts.activeWindowMin ?? 10) * 60_000;
@@ -332,12 +366,13 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
   const snapEvery = (opts.snapshotIntervalS ?? cfg.continuity.snapshot_interval_s ?? 30) * 1000;
   const roots = { ...transcriptRoots(), ...(opts.roots ?? {}) };
   const st = loadState();
+  for (const [sid, patch] of snapshotCompleted) { if (st[sid]) Object.assign(st[sid], patch); snapshotCompleted.delete(sid); }
   let lastSave = Date.now();
   /** sessions that had events inserted this pass; only their new events are embedded (backfill is the CLI's job) */
   const uploadedSessions = new Set<string>();
   /** sessions bound to an investigation (ledger_investigation_bind/_new); one SELECT per pass, then one UPDATE per bound session below */
   let boundSessions = new Set<string>();
-  try { boundSessions = new Set(await boundSessionIds(pool)); } catch (e: any) { sum.errors.push(`investigation bindings: ${String(e?.message ?? e).slice(0, 120)}`); }
+
 
   // ---- discover ----
   const files = [...walk(roots.claude, 3), ...walk(roots.codex, 5)];
@@ -354,6 +389,7 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
   const byFile = new Map<string, string>();
   for (const [sid, s] of Object.entries(st)) byFile.set(s.file, sid);
 
+  const admitted: { file: string; mtime: number; sid: string; s: SessState; resumed: boolean }[] = [];
   for (const { file, mtime } of active.values()) {
     try {
       const harness = detectHarness(file);
@@ -362,11 +398,11 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
 
       // ---- tail ----
       const readFromStart = !s || !s.offset;
-      const r = streamTranscript(file, s?.offset ?? 0, harness, cfg.data_tools);
+      const r = streamTranscript(file, sid ? (spoolCursor(sid) ?? s?.offset ?? 0) : 0, harness, cfg.data_tools, { maxBytes: 1 << 20, maxLines: 200 });
       if (!sid) { sid = sessionIdFor(file, harness, r.session_id); s = st[sid] ?? { file, harness, offset: 0, lastSeenMtime: 0, seenCallIds: [], reconciled: [], unknown: {} }; st[sid] = s; byFile.set(file, sid); }
       s = s!;
       if (s.startedAtMs == null) s.startedAtMs = startedAtFor(file, readFromStart ? r.events : []);
-      s.offset = r.offset;
+
       s.lastSeenMtime = mtime;
       if (r.cwd) s.cwd = r.cwd;
       if (r.branch) s.branch = r.branch;
@@ -394,25 +430,31 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
       for (const e of r.events) if (e.call_id && e.kind === "tool.requested") s.seenCallIds.push(e.call_id);
       if (s.seenCallIds.length > 5000) s.seenCallIds = s.seenCallIds.slice(-5000);
       const quiet = now.getTime() - mtime > quietMs;
-      if (r.events.length) {
-        spoolAppend(sid, { offset: r.offset, events: r.events, at: now.toISOString() });
-        sum.events_spooled += r.events.length;
-        if (s.ended) {
-          s.ended = false;
-          log(`session ${sid.slice(0, 8)} resumed after end/quiet; capture continues (routing may be a fork)`);
-          // the quiet-end released our claim; take it back if nobody else has, so checkpoints advance the head again
-          if (s.threadId) {
-            try {
-              const note = await claimUnlessLiveHolder(pool, st, s.threadId, sid, author, now.getTime(), quietMs);
-              log(`session ${sid.slice(0, 8)} re-claim on thread ${s.threadId.slice(0, 8)}: ${note}`);
-            } catch (e: any) { log(`re-claim failed for ${sid.slice(0, 8)}: ${String(e?.message ?? e).slice(0, 120)}`); }
-          }
-        }
-      }
+      const resumed = Boolean(s.ended && r.events.length);
+      // Persist even an empty normalized chunk: source cursor and admission share
+      // the same fsynced manifest. A crash before saveState replays, never skips.
+      retainOffloadedOutputs(r.events);
+      if (r.offset !== s.offset || r.events.length) spoolAppend(sid, { offset: r.offset, events: r.events, at: now.toISOString() });
+      s.offset = r.offset;
+      sum.events_spooled += r.events.length;
+      if (resumed) s.ended = false;
       sum.sessions++;
-
+      admitted.push({ file, mtime, sid, s, resumed });
+    } catch (e: any) { sum.errors.push(`local capture ${path.basename(file)}: ${String(e?.message ?? e).slice(0, 200)}`); }
+  }
+  // All local capture is committed before the first network operation. A failed
+  // connection cannot prevent other sessions' transcript admission this pass.
+  saveState(st);
+  try { boundSessions = new Set(await boundSessionIds(pool)); } catch (e: any) {
+    sum.errors.push(`remote unavailable; local spool retained: ${String(e?.message ?? e).slice(0, 120)}`);
+    return sum; // one failed connection per pass, not one full timeout per session
+  }
+  for (const { file, mtime, sid, s, resumed } of admitted) {
+    const quiet = now.getTime() - mtime > quietMs;
+    try {
+      if (resumed && s.threadId) await claimUnlessLiveHolder(pool, st, s.threadId, sid, author, now.getTime(), quietMs);
       // ---- session row ----
-      const stored = await S.upsertSession(pool, { id: sid, author, harness, machine, cwd: s.cwd, repo: s.repo, branch: s.branch, transcript_path: file, started_at: s.startedAtMs != null ? new Date(s.startedAtMs) : undefined, last_seen_at: new Date(mtime) });
+      const stored = await S.upsertSession(pool, { id: sid, author, harness: s.harness, machine, cwd: s.cwd, repo: s.repo, branch: s.branch, transcript_path: file, started_at: s.startedAtMs != null ? new Date(s.startedAtMs) : undefined, last_seen_at: new Date(mtime) });
 
       // ---- bind ----
       if (!s.threadId && !s.sidechain && s.repo) {
@@ -500,41 +542,58 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
 
       // ---- signals & snapshot ----
       const endSignal = takeSignal(sid, "end");
-      const cpSignal = takeSignal(sid, "checkpoint") || endSignal;
+      const cpSignal = takeSignal(sid, "checkpoint") || endSignal || Boolean(s.pendingSnapshotTurn);
+      if (cpSignal) s.pendingSnapshotTurn = true;
       const due = !s.lastShadowAt || now.getTime() - s.lastShadowAt >= snapEvery;
       // subagent transcripts share the parent's worktree; the parent session snapshots it
       // A quiet session has no new agent edits to capture (its last live snapshot already has them), so it is only
       // snapshotted on an explicit turn/end signal. Snapshotting every quiet tracked session each pass ran a synchronous
       // `git add -A` of the same worktree dozens of times per pass and starved uploads and heartbeats (2026-09-13).
       if (s.root && s.wipRef && (cpSignal || (due && !quiet)) && !s.ended && !s.sidechain) {
-        const sh = shadowCommit(s.root, { ref: s.wipRef, parent: s.lastCommit ?? undefined, lastTree: s.lastTree, deny: cfg.continuity.deny, include: cfg.continuity.include, push: opts.push ?? true, now, message: `wip ${sid.slice(0, 8)} ${now.toISOString()}` });
-        s.lastShadowAt = now.getTime();
-        // a push or verify failure is a pass error even when the local commit exists: the snapshot is not saved until the remote has it
-        if (sh.error) sum.errors.push(`shadow ${sid.slice(0, 8)}: ${sh.error.replace(/\s+/g, " ").trim()}`);
-        if (sh.tree) s.lastTree = sh.tree;
-        if (sh.commit) {
-          s.lastCommit = sh.commit;
-          sum.snapshots++;
-          if (sh.verified) await S.updateSession(pool, sid, { wip_commit: sh.commit, last_verified_snapshot_at: new Date(sh.verified_at!) });
-          if (routing.thread_id) {
-            const cp = await S.publishCheckpoint(pool, {
-              thread_id: routing.thread_id, session_id: sid, generation: routing.generation, kind: cpSignal ? "turn" : "snapshot",
-              through_event_seq: (await S.appendEvents(pool, sid, [], null, null)).lastSeq,
-              base_commit: s.baseCommit, wip_ref: s.wipRef, wip_commit: sh.commit,
-              verified_snapshot_at: sh.verified ? new Date(sh.verified_at!) : null, verified_events_at: now,
-              structured_state: cpSignal ? await structuredState(pool, sid, routing.thread_id, sh.files) : { snapshot_files: sh.files.slice(0, 200) },
-              capture_gaps: [...sh.gaps, ...(sh.verified ? [] : [{ kind: "snapshot_not_verified", detail: sh.error ?? "push or verify failed" }])],
-            });
-            sum.checkpoints++;
-            if (!cp.advanced) log(`checkpoint ${cp.id.slice(0, 8)} did not advance head: ${cp.reason}`);
+        // Freeze coverage BEFORE starting Git. Later uploads must never be
+        // attributed to an earlier snapshot, and a changed claim stays fenced.
+        const throughSeq = (await S.appendEvents(pool, sid, [], null, null)).lastSeq;
+        const source = { thread_id: routing.thread_id, generation: routing.generation, base: s.baseCommit, ref: s.wipRef, previous: s.lastCommit };
+        const stateAtDispatch = cpSignal && routing.thread_id ? await structuredState(pool, sid, routing.thread_id, []) : {};
+        const work = queueSnapshot(s.root, { ref: s.wipRef, parent: s.lastCommit ?? undefined, lastTree: s.lastTree, deny: cfg.continuity.deny, include: cfg.continuity.include, push: opts.push ?? true, now, message: `wip ${sid.slice(0, 8)} ${now.toISOString()}` });
+        if (work) {
+          s.lastShadowAt = now.getTime();
+          s.pendingSnapshotTurn = false;
+          let publication: Promise<void>;
+          publication = work.then(async sh => {
+            if (sh.error) {
+              log(`shadow ${sid.slice(0, 8)}: ${sh.error.replace(/\s+/g, " ").trim()}`);
+              writeHeartbeat({ snapshot_last_error: sh.error.slice(0, 200), snapshot_queue_depth: snapshotQueueSize() });
+              sum.errors.push(`shadow ${sid.slice(0, 8)}: ${sh.error}`);
+            }
+            if (sh.commit) sum.snapshots++;
+            // A failed push must be retried even if the worktree is unchanged.
+            const patch: Partial<SessState> = {};
+            if (sh.commit) patch.lastCommit = sh.commit;
+            if (sh.tree && (sh.verified || opts.push === false)) patch.lastTree = sh.tree;
+            if (source.thread_id && (sh.commit || cpSignal)) {
+              const cp = await S.publishCheckpoint(pool, {
+                thread_id: source.thread_id, session_id: sid, generation: source.generation, kind: cpSignal ? "turn" : "snapshot",
+                through_event_seq: throughSeq, base_commit: source.base, wip_ref: source.ref, wip_commit: sh.commit ?? source.previous ?? null,
+                verified_snapshot_at: sh.verified ? new Date(sh.verified_at!) : null, verified_events_at: now,
+                structured_state: { ...stateAtDispatch, snapshot_files: sh.files.slice(0, 200) },
+                capture_gaps: [...sh.gaps, ...(sh.verified || sh.skipped === "unchanged" ? [] : [{ kind: "snapshot_not_verified", detail: sh.error ?? sh.skipped ?? "push or verify failed" }])],
+              });
+              sum.checkpoints++;
+              if (!cp.advanced) log(`checkpoint ${cp.id.slice(0, 8)} did not advance head: ${cp.reason}`);
+              // Session verification cannot be advanced by a waking predecessor.
+              if (cp.advanced && sh.verified) await pool.query(`update cont_sessions set wip_commit=$2, last_verified_snapshot_at=$3 where id=$1 and claim_generation=$4 and thread_id=$5`, [sid, sh.commit, sh.verified_at, source.generation, source.thread_id]);
+            }
+            Object.assign(s, patch); snapshotCompleted.set(sid, patch);
             if (cpSignal) classifyAfterTurn(cfg, pool, sid, s, now, sum, log);
-          }
-        } else if (cpSignal && routing.thread_id) {
-          // nothing new on disk but a turn ended: still record the turn boundary
-          const cp = await S.publishCheckpoint(pool, { thread_id: routing.thread_id, session_id: sid, generation: routing.generation, kind: "turn", through_event_seq: (await S.appendEvents(pool, sid, [], null, null)).lastSeq, base_commit: s.baseCommit, wip_ref: s.wipRef, wip_commit: s.lastCommit ?? null, verified_events_at: now, structured_state: await structuredState(pool, sid, routing.thread_id, []), capture_gaps: sh.gaps });
-          sum.checkpoints++;
-          if (!cp.advanced) log(`turn checkpoint did not advance head: ${cp.reason}`);
-          classifyAfterTurn(cfg, pool, sid, s, now, sum, log);
+          }).catch((e: any) => { log(`snapshot publication ${sid.slice(0, 8)} failed: ${String(e?.message ?? e).slice(0, 200)}`); })
+            .finally(() => { snapshotPublications.delete(publication); });
+          snapshotPublications.add(publication);
+          // Explicit test mode preserves deterministic helperOnce assertions.
+          if (opts.push === false || opts.snapshotWaitMs) await withDeadline(publication, opts.snapshotWaitMs ?? 30_000);
+        } else if (cpSignal) {
+          // Retain turn intent while another worktree owns the bounded worker.
+          s.lastShadowAt = 0;
         }
       }
 
@@ -555,13 +614,14 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
       // ---- heartbeat / end ----
       // An unbound session that goes quiet leaves the active set too. It used to stay tracked forever and was re-processed
       // every pass; new transcript lines un-end it (see the tail step).
-      if (!s.threadId && !s.ended && (endSignal || quiet) && !holdForClassify) {
+      const drained = spoolStatus(sid).pending_batches === 0 && s.offset >= fs.statSync(file).size;
+      if (!s.threadId && !s.ended && (endSignal || quiet) && !holdForClassify && drained) {
         await S.updateSession(pool, sid, { ended_at: now });
         s.ended = true;
         log(`session ${sid.slice(0, 8)} ${endSignal ? "ended" : "went quiet"} unbound${s.unbound_reason ? ` (${s.unbound_reason})` : ""}`);
       }
       if (s.threadId && !s.ended) {
-        if (endSignal || quiet) {
+        if ((endSignal || quiet) && drained && !snapshotQueueSize()) {
           await S.releaseClaim(pool, s.threadId, sid);
           await S.updateSession(pool, sid, { ended_at: now });
           s.ended = true;
@@ -601,11 +661,17 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
     }
   }
 
+  // Independent, bounded telemetry drain. Never await it on the capture path;
+  // the uploader is single-flight and DB queries have server/client deadlines.
+  if (!usageFlush) usageFlush = flushUsage(pool, 100).then(r => { if (r.error) log(`usage telemetry: ${r.error}; pending=${r.pending}`); }).catch(() => { log("usage telemetry upload failed; local queue retained"); }).finally(() => { usageFlush = null; });
+
   // ---- notifications ----
   try {
     const notes = await S.takeNotifications(pool, author, machine);
     if (notes.length) { appendLocalNotifications(notes.map((n) => `${now.toISOString()} ${n}`)); for (const n of notes) log(`NOTICE ${n}`); }
   } catch (e: any) { sum.errors.push(`notifications: ${String(e?.message ?? e).slice(0, 120)}`); }
+
+  writeHeartbeat({ snapshot_queue_depth: snapshotQueueSize(), capture_sessions: Object.fromEntries(admitted.map(({ sid, s }) => [sid, spoolStatus(sid)])) });
 
   // prune ended sessions from state after a day
   for (const [sid, s] of Object.entries(st)) if (s.ended && now.getTime() - s.lastSeenMtime > 86_400_000) delete st[sid];
