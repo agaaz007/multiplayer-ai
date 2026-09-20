@@ -5,7 +5,7 @@ import crypto from "node:crypto";
 import type pg from "pg";
 import { ledgerHome, type Config } from "../store.js";
 import { acquireProcessLease } from "./process-lock.js";
-import { withUsageInvocation } from "../usage.js";
+import { withUsageInvocation, type TrafficClass } from "../usage.js";
 import { flushUsage } from "../continuity/usage.js";
 import { getPool } from "../continuity/db.js";
 import { streamTranscript, detectHarness, type NormEvent } from "../continuity/events.js";
@@ -357,7 +357,9 @@ export async function materializeArtifacts(pool: pg.Pool, sessionId: string, eve
 
 export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<PassSummary> {
   const release = acquireProcessLease(path.join(ledgerHome(), "helper-pass.lock"));
-  try { return await withUsageInvocation(cfg, { tool: "helper:pass", traffic_class: process.env.LEDGER_SELFTEST === "1" ? "evaluation" : "unknown", purpose: "capture_write", version: process.env.LEDGER_BUILD_COMMIT ?? "0.1.0" }, () => helperOnceImpl(cfg, opts)); }
+  const configuredTraffic = process.env.LEDGER_TRAFFIC_CLASS;
+  const traffic: TrafficClass = process.env.LEDGER_SELFTEST === "1" ? "evaluation" : configuredTraffic && ["ordinary", "evaluation", "audit", "maintenance", "unknown"].includes(configuredTraffic) ? configuredTraffic as TrafficClass : "unknown";
+  try { return await withUsageInvocation(cfg, { tool: "helper:pass", traffic_class: traffic, purpose: "capture_write", version: process.env.LEDGER_BUILD_COMMIT ?? "0.1.0" }, () => helperOnceImpl(cfg, opts)); }
   finally { release(); }
 }
 async function helperOnceImpl(cfg: Config, opts: HelperOpts): Promise<PassSummary> {

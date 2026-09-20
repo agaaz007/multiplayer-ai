@@ -327,7 +327,7 @@ export async function buildResumePack(cfg: Config, pool: pg.Pool, threadId: stri
     if (asOfLine) L.push(asOfLine);
     L.push(``);
     L.push(`## Honesty`);
-    L.push(`Snapshot ${snapshot?.commit.slice(0,12) ?? "unavailable"} verified at ${fmt(vSnap)}${snapshot ? ` (checkpoint ${snapshot.checkpoint_id})` : ""}. Events acknowledged through ${fmt(vEv)}. Source session last seen ${fmt(lastSeen)}${srcSession?.ended_at ? ", ended" : ", not marked ended"}.`);
+    L.push(`Snapshot ${snapshot?.commit.slice(0,12) ?? "unavailable"} verified at ${fmt(vSnap)}${snapshot ? ` (remote-verified; checkpoint ${snapshot.checkpoint_id})` : ""}. Events acknowledged through ${fmt(vEv)}. Source session last seen ${fmt(lastSeen)}${srcSession?.ended_at ? ", ended" : ", not marked ended"}.`);
     if (snapshot) L.push(`Verification applies only to commit ${snapshot.commit}; its timestamp does not bound later uncaptured edits. ${pend.length} in-flight tool call(s) have unknown outcomes.`);
     else L.push(`No exact verified snapshot: treat the code state as unverified.`);
     L.push(`The claim is advisory. It protects the shared record, not the other machine. Any narrative below is generated and unreviewed; machine fields are the evidence.`);
