@@ -50,8 +50,8 @@ type Q = pg.Pool | pg.PoolClient;
 
 export async function upsertSession(q: Q, s: { id: string; author: string; harness: string; machine?: string | null; cwd?: string | null; repo?: string | null; branch?: string | null; transcript_path?: string | null; started_at?: Date | string | null; last_seen_at?: Date | string | null }): Promise<SessionRow> {
   const r = await q.query<SessionRow>(
-    `insert into cont_sessions (id, author, harness, machine, cwd, repo, branch, transcript_path, started_at, last_seen_at)
-     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,coalesce($10, now()))
+    `insert into cont_sessions (id, author, harness, machine, cwd, repo, branch, transcript_path, started_at, last_seen_at, identity_provenance)
+     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,coalesce($10, now()), case when $8::text is not null and $3::text in ('claude','codex') then jsonb_build_object('source','captured_transcript','verified',true,'harness',$3::text) else '{}'::jsonb end)
      on conflict (id) do update set
        harness = case when excluded.transcript_path is not null and excluded.harness in ('claude','codex') then excluded.harness else cont_sessions.harness end,
        identity_history = case when excluded.transcript_path is not null and excluded.harness in ('claude','codex') and cont_sessions.harness <> excluded.harness then
@@ -367,8 +367,11 @@ export async function latestCheckpointAny(q: Q, threadId: string): Promise<Check
 export async function putArtifact(q: Q, a: { sha256: string; kind: string; bytes: Buffer; session_id?: string | null }): Promise<{ id: string; existed: boolean }> {
   const ex = await q.query<{ id: string }>(`select id from cont_artifacts where sha256 = $1`, [a.sha256]);
   if (ex.rows[0]) return { id: ex.rows[0].id, existed: true };
-  const r = await q.query<{ id: string }>(`insert into cont_artifacts (sha256, kind, byte_size, inline, session_id) values ($1,$2,$3,$4,$5) returning id`, [a.sha256, a.kind, a.bytes.length, a.bytes, a.session_id ?? null]);
-  return { id: r.rows[0].id, existed: false };
+  const r = await q.query<{ id: string }>(`insert into cont_artifacts (sha256, kind, byte_size, inline, session_id) values ($1,$2,$3,$4,$5) on conflict (sha256) do nothing returning id`, [a.sha256, a.kind, a.bytes.length, a.bytes, a.session_id ?? null]);
+  if (r.rows[0]) return { id: r.rows[0].id, existed: false };
+  const raced = await q.query<{ id: string }>(`select id from cont_artifacts where sha256=$1`, [a.sha256]);
+  if (!raced.rows[0]) throw new Error("artifact insert outcome unavailable; retry required");
+  return { id: raced.rows[0].id, existed: true };
 }
 
 export async function addNotification(q: Q, author: string, machine: string | null, message: string): Promise<void> {

@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import { withUsageInvocation, drainUsageWrites, usageHealth, type TrafficClass } from "./usage.js";
+import { flushUsage } from "./continuity/usage.js";
+import { handoffSummary, updateHandoff } from "./continuity/handoffs.js";
 import { resolveHarnessIdentity } from "./continuity/safety.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -100,6 +103,10 @@ const USAGE = `ledger — shared definitions, findings, changes, decisions for y
                                          spans no record claims: preview, seq range, author, harness, time
   ledger events --thread <id> | --session <id> [--kinds a,b] [--path p] [--q text] [--after N] [--before N] [--limit N] [--chars N]
                                          evidence: one line per captured event (seq · HH:MM · kind · preview); --chars widens the preview
+  ledger usage health|flush|report --from <ISO> --to <ISO>
+                                         inspect telemetry coverage or export invocation/Neon-read counts
+  ledger handoff report --from <ISO> --to <ISO>
+                                         export evidenced continuation outcomes
   ledger artifact <id|sha256> [--offset N] [--max N]
                                          read a stored tool output (artifact) slice; the trailer gives the next offset
 
@@ -426,6 +433,35 @@ async function main() {
         return;
 
       // ---------- execution continuity ----------
+      case "usage": {
+        const cfg = loadConfig();
+        const sub = args[0] ?? "health";
+        if (sub === "health") { console.log(JSON.stringify(usageHealth(), null, 2)); return; }
+        if (sub === "flush") { console.log(JSON.stringify(await flushUsage(getPool(cfg)), null, 2)); await closePools(); return; }
+        if (sub === "report") {
+          const from = flag(args, "--from"), to = flag(args, "--to");
+          if (!from || !to) throw new Error("usage: ledger usage report --from <ISO> --to <ISO>");
+          const {usageSummary} = await import("./continuity/usage.js");
+          console.log(JSON.stringify(await usageSummary(getPool(cfg), from, to), null, 2));
+          await closePools(); return;
+        }
+        throw new Error("usage: ledger usage health|flush|report --from <ISO> --to <ISO>");
+      }
+      case "handoff": {
+        const cfg = loadConfig(), pool = getPool(cfg);
+        if (args[0] === "report") {
+          const from = flag(args, "--from"), to = flag(args, "--to");
+          if (!from || !to) throw new Error("usage: ledger handoff report --from <ISO> --to <ISO>");
+          console.log(JSON.stringify(await handoffSummary(pool,from,to),null,2));
+        } else if (args[0] === "update") {
+          const input = JSON.parse(readStdin());
+          const identity = resolveHarnessIdentity(flag(args,"--session") ?? input.session_id);
+          if (!identity.ok) throw new Error(identity.error);
+          if (!["verified","completed","failed","abandoned"].includes(input.status)) throw new Error("Invalid handoff status");
+          console.log(JSON.stringify(await updateHandoff(pool,{id:input.id,author:cfg.author,session_id:identity.id,status:input.status,evidence:input.evidence ?? [],note:input.note}),null,2));
+        } else throw new Error("usage: ledger handoff report --from <ISO> --to <ISO> | update --session <id> < progress.json");
+        await closePools(); return;
+      }
       case "continuity": {
         const cfg = loadConfig();
         if (!continuityConfigured(cfg)) throw new Error("continuity not configured: add continuity.database_url to ~/.ledger/config.json (or set LEDGER_CONTINUITY_DB)");
@@ -435,6 +471,8 @@ async function main() {
           const created = await migrate(pool, cfg);
           console.log(created.length ? `created: ${created.join(", ")}` : "schema up to date");
           console.log(`tables: ${(await tableList(pool)).join(", ")}`);
+        } else if (sub === "health") {
+          console.log(JSON.stringify({heartbeat:readHeartbeat(),sessions:loadState(),usage:usageHealth(),note:"A missing heartbeat is unknown coverage, not proof of inactivity or healthy capture."},null,2));
         } else if (sub === "status") {
           const t = await tableList(pool);
           const counts = await Promise.all(t.map(async (n) => `${n}=${(await pool.query(`select count(*)::int as c from ${n}`)).rows[0].c}`));
@@ -443,8 +481,8 @@ async function main() {
           // Neon (or any Postgres) password rotation: prove the new URL works before anything is
           // written, never print it, then restart the launchd helper so the running process
           // and the file agree. The old password stays valid until you revoke it upstream.
-          const url = args[1];
-          if (!url || !/^postgres(ql)?:\/\//.test(url)) throw new Error("usage: ledger continuity rotate <postgresql://…>  (the new URL; it is not echoed)");
+          const url = args.includes("--stdin") ? readStdin().trim() : flag(args, "--url-file") ? fs.readFileSync(flag(args, "--url-file")!, "utf8").trim() : args[1];
+          if (!url || !/^postgres(ql)?:\/\//.test(url)) throw new Error("usage: ledger continuity rotate --stdin (or --url-file <private-file>); the new URL is never echoed");
           const { default: pg } = await import("pg");
           const probe = new pg.Client({ connectionString: url, connectionTimeoutMillis: 15_000 });
           await probe.connect();
@@ -678,7 +716,7 @@ async function main() {
   } catch (e: any) {
     if (cmd === "hook") process.exit(0); // never break the agent's session
     console.error(`ledger: ${e.message}`);
-    process.exit(1);
+    process.exitCode = 1;
   }
 }
 
@@ -762,4 +800,17 @@ function loadAuthorFallback(): string {
   }
 }
 
-main();
+async function runCli() {
+  const [cmd,...args] = process.argv.slice(2);
+  const observable = new Set(["brief","search","get","investigate","impact","graph","record","drafts","discard","stats","threads","resume","thread","records","investigation","unassigned","events","artifact","handoff"]);
+  if (!observable.has(cmd)) return main();
+  let cfg: ReturnType<typeof loadConfig>;
+  try { cfg = loadConfig(); } catch { return main(); }
+  const identity = resolveHarnessIdentity(flag(args,"--session") ?? process.env.LEDGER_SESSION_ID);
+  const classes = new Set(["ordinary","evaluation","audit","maintenance","unknown"]);
+  const traffic = process.env.LEDGER_SELFTEST === "1" ? "evaluation" : classes.has(process.env.LEDGER_TRAFFIC_CLASS ?? "") ? process.env.LEDGER_TRAFFIC_CLASS as TrafficClass : "unknown";
+  try {
+    await withUsageInvocation(cfg,{tool:`cli:${cmd}`,session_id:identity.ok ? identity.id : undefined,identity:identity.ok ? identity.identity : undefined,traffic_class:traffic,purpose:cmd === "brief" && args.includes("--hook") ? "automatic_brief" : ["record","discard","handoff"].includes(cmd) ? "maintenance" : "interactive_read"},main,()=>({outcome:process.exitCode ? "error" : "success"}));
+  } finally { await drainUsageWrites(); await closePools(); }
+}
+void runCli().catch(e => {console.error(`ledger: ${e.message}`);process.exitCode=1;});

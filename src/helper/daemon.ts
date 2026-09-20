@@ -287,6 +287,25 @@ async function awaitClassifications(ms: number): Promise<void> {
  * artifact id. Above the cap, the event carries an explicit `oversized` gap
  * with size and, when known, the local path; nothing is silently dropped.
  */
+export function retainOffloadedOutputs(events: NormEvent[]): void {
+  for (const event of events) {
+    const p = event.payload as Record<string, any>;
+    if (event.kind !== "tool.finished" || typeof p._full === "string" || typeof p.offloaded_path !== "string") continue;
+    try {
+      const bytes = fs.statSync(p.offloaded_path).size;
+      if (bytes > 8 * 1024 * 1024) {
+        p.output_availability = "oversized";
+        p.oversized = { byte_size: bytes, note: "offloaded output exceeds ARTIFACT_MAX" };
+      } else { p._full = redactText(fs.readFileSync(p.offloaded_path, "utf8")).text; p.output_availability = "pending_artifact"; }
+    } catch (error: any) {
+      // The original source path and a permanent explicit gap are retained; do
+      // not pretend an unreadable offload was captured in full.
+      p.output_availability = "unavailable";
+      p.output_gap = { kind: "offloaded_output_unreadable", code: String(error?.code ?? "unknown") };
+    }
+  }
+}
+
 export async function materializeArtifacts(pool: pg.Pool, sessionId: string, events: NormEvent[], storeArtifact: typeof putArtifact = putArtifact): Promise<void> {
   for (const e of events) {
     if (e.kind === "tool.requested") {
@@ -321,6 +340,7 @@ export async function materializeArtifacts(pool: pg.Pool, sessionId: string, eve
     const a = await storeArtifact(pool, { sha256: sha, kind: "tool_output", bytes: buf, session_id: sessionId });
     p.artifact_id = a.id;
     p.artifact_sha256 = sha;
+    p.output_availability = "stored";
     delete p._full;
   }
 }
@@ -405,6 +425,7 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
       const resumed = Boolean(s.ended && r.events.length);
       // Persist even an empty normalized chunk: source cursor and admission share
       // the same fsynced manifest. A crash before saveState replays, never skips.
+      retainOffloadedOutputs(r.events);
       if (r.offset !== s.offset || r.events.length) spoolAppend(sid, { offset: r.offset, events: r.events, at: now.toISOString() });
       s.offset = r.offset;
       sum.events_spooled += r.events.length;

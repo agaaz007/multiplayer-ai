@@ -1,3 +1,4 @@
+import { instrumentMcpTools } from "./usage.js";
 import { startHandoff, updateHandoff } from "./continuity/handoffs.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -78,6 +79,7 @@ function coverageOf(fields: Record<string, unknown>): CaptureCoverage[] {
 
 export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) {
   const server = new McpServer({ name: "ledger", version: "0.1.0" });
+  instrumentMcpTools(server, cfg);
   const evidenceUi = { ui: { resourceUri: EVIDENCE_URI } };
   const readOnly = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
   // An explicit session_id, else a harness env id with a local transcript. Never a synthetic id: the helper
