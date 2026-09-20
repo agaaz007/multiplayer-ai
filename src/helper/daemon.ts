@@ -4,6 +4,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import type pg from "pg";
 import { ledgerHome, type Config } from "../store.js";
+import { withUsageInvocation } from "../usage.js";
 import { flushUsage } from "../continuity/usage.js";
 import { getPool } from "../continuity/db.js";
 import { streamTranscript, detectHarness, type NormEvent } from "../continuity/events.js";
@@ -350,6 +351,9 @@ export async function materializeArtifacts(pool: pg.Pool, sessionId: string, eve
 }
 
 export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<PassSummary> {
+  return withUsageInvocation(cfg, { tool: "helper_capture", traffic_class: "maintenance", purpose: "capture_write", version: process.env.LEDGER_BUILD_COMMIT ?? "0.1.0" }, () => helperOnceImpl(cfg, opts));
+}
+async function helperOnceImpl(cfg: Config, opts: HelperOpts): Promise<PassSummary> {
   const now = opts.now ?? new Date();
   const log = opts.log ?? (() => {});
   const sum: PassSummary = { at: now.toISOString(), sessions: 0, events_spooled: 0, events_uploaded: 0, snapshots: 0, checkpoints: 0, bound: 0, classified: 0, errors: [] };
