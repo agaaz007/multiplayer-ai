@@ -59,7 +59,7 @@ export async function flushUsage(pool: pg.Pool, limit=100): Promise<{uploaded:nu
   try { return await withoutUsage(async () => {
     await drainUsageWrites();
     const dir=usageDirectory();const files=await fs.readdir(dir).catch(()=>[]);let uploaded=0;
-    for(const file of files.filter(f=>/^(invocation|storage)-[a-f0-9-]{36}\.json$/.test(f)).slice(0,Math.max(1,Math.min(1000,limit)))) {
+    for(const file of files.filter(f=>/^(?:invocation-[a-f0-9-]{36}-(?:started|finished)|storage-[a-f0-9-]{36})\.json$/.test(f)).slice(0,Math.max(1,Math.min(1000,limit)))) {
       const filename=path.join(dir,file);
       try {
         const bytes=await fs.readFile(filename,"utf8");const e=JSON.parse(bytes) as UsageEnvelope;const v=e.value;

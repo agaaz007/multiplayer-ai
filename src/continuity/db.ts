@@ -1,4 +1,5 @@
 import pg from "pg";
+import { HANDOFF_SCHEMA } from "./handoffs.js";
 import { USAGE_SCHEMA, instrumentUsageClient } from "./usage.js";
 import { assertSafeSelftestDatabase } from "../selftest-db-guard.js";
 import type { Config } from "../store.js";
@@ -282,6 +283,7 @@ export async function migrate(pool: pg.Pool, cfg?: Config): Promise<string[]> {
     await c.query("set local lock_timeout = '2s'");
     await c.query(SCHEMA);
     await c.query(USAGE_SCHEMA);
+    await c.query(HANDOFF_SCHEMA);
     await c.query("commit");
   } catch (e) { await c.query("rollback").catch(() => {}); throw e; } finally { c.release(); }
   if (cfg && embeddingsConfigured(cfg)) await ensureEmbeddingSchema(pool, cfg);

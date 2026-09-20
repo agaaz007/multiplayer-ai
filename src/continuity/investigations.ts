@@ -219,7 +219,7 @@ async function bindOnClient(c: pg.PoolClient, cfg: Config, opts: BindingContext 
     await linkSpan(c, { record_id:rec.id,session_id,from_seq:from,to_seq:Math.max(from,m),source:"explicit",note:`${BOUND_NOTE_PREFIX}${cfg.author}`,created_by:cfg.author });
   } else await extendBoundLink(c, session_id);
   await touchBoundRepo(c, session_id);
-  return { text: `${already_bound ? "Session already bound" : "Bound session"} ${session_id.slice(0,8)} to investigation "${rec.title}" (${rec.id}). Data queries accumulate on this record; propose findings at query grain with ledger_propose_finding.`, record_id:rec.id,title:rec.title,already_bound };
+  return { text: `${already_bound ? "Session already bound" : "Bound session"} ${session_id.slice(0,8)} to investigation "${rec.title}" (${rec.id})${existing && !already_bound ? ` (rebound from ${existing.record_id})` : ""}. Data queries accumulate on this record; propose findings at query grain with ledger_propose_finding.`, record_id:rec.id,title:rec.title,already_bound };
 }
 
 /**
@@ -242,7 +242,9 @@ export async function declareInvestigation(pool: pg.Pool, cfg: Config, opts: Bin
     const rec = await createRecord(c,{kind:"investigation",title,goal:opts.goal?.trim() || null,touched_repos:opts.repo ? [opts.repo] : [],created_by:cfg.author});
     await c.query(`update cont_records set investigation_question_key=$2 where id=$1`,[rec.id,normalizeTitle(question)]);
     const bound = await bindOnClient(c,cfg,{...opts,record_id:rec.id,question});
-    return { text:`Declared investigation "${rec.title}" (${rec.id}), keyed by its question. ${bound.text}`,record_id:rec.id };
+    const touched=(await getRecord(c,rec.id))?.touched_repos ?? [];
+    const where=touched.length ? ` (keyed by its question; repos it may read: ${touched.map(r=>path.basename(r)).join(", ")})` : " as non-repo work (keyed by its question; no repo touched yet)";
+    return { text:`Declared investigation "${rec.title}" (${rec.id})${where}. ${bound.text}`,record_id:rec.id };
   });
 }
 

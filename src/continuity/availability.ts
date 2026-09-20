@@ -41,7 +41,8 @@ export async function boundedRead<T>(pool: pg.Pool, timeoutMs: number, read: (cl
 
 export async function availableSection(name: string, read: () => Promise<string>, now = new Date()): Promise<AvailableSection> {
   try {
-    const text = await read();
+    const result = await read();
+    const text = result.trim() ? result : "";
     return { name, status: text ? "available" : "available_empty", text, observed_at: now.toISOString() };
   } catch (e: any) {
     const reason = e?.code === "LEDGER_READ_TIMEOUT" ? "timeout" : "backend_error";

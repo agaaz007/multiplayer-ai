@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import type { Config } from "./store.js";
-import type { HarnessIdentity } from "./continuity/safety.js";
+import { resolveHarnessIdentity, type HarnessIdentity } from "./continuity/safety.js";
 
 export type TrafficClass = "ordinary" | "evaluation" | "audit" | "maintenance" | "unknown";
 export type UsagePurpose = "interactive_read" | "automatic_brief" | "capture_write" | "maintenance" | "telemetry";
@@ -65,7 +65,7 @@ function emit(envelope: UsageEnvelope): void {
     const encoded=JSON.stringify(envelope);
     if (bytes+Buffer.byteLength(encoded)>MAX_SPOOL_BYTES) { dropped++; lastError="spool_capacity"; return; }
     const id=envelope.kind === "invocation" ? envelope.value.invocation_id : envelope.value.operation_id;
-    const dest=path.join(dir,`${envelope.kind}-${id}.json`);
+    const dest=path.join(dir,`${envelope.kind}-${id}${envelope.kind === "invocation" ? (envelope.value.finished_at ? "-finished" : "-started") : ""}.json`);
     const tmp=`${dest}.${randomUUID()}.tmp`;
     const f=await fs.open(tmp,"wx",0o600);
     try { await f.writeFile(encoded); await f.sync(); } finally { await f.close(); }
@@ -77,8 +77,8 @@ function emit(envelope: UsageEnvelope): void {
 export async function drainUsageWrites(): Promise<void> { await Promise.all([...pending]); }
 
 function recordsOf(value: unknown): UsageSummary["records"] {
-  const r=value as {structuredContent?:{results?:unknown[];objects?:unknown[]};results?:unknown[];objects?:unknown[]};
-  const rows=r?.structuredContent?.results ?? r?.structuredContent?.objects ?? r?.results ?? r?.objects ?? [];
+  const r=value as {structuredContent?:{results?:unknown[];objects?:unknown[];sources?:unknown[]};results?:unknown[];objects?:unknown[]};
+  const rows=r?.structuredContent?.sources ?? r?.structuredContent?.results ?? r?.structuredContent?.objects ?? r?.results ?? r?.objects ?? [];
   return rows.flatMap(x => {
     const v=x as {id?:unknown;content_version?:unknown;author?:unknown};
     if (typeof v?.id !== "string" || !/^(?:def|fnd|chg|dec)-[A-Za-z0-9-]+$/.test(v.id)) return [];
@@ -126,4 +126,30 @@ export function sqlOperationClass(sql: unknown): string {
   if (/^(begin|commit|rollback|savepoint|release)\b/i.test(text)) return "transaction";
   if (/^(create|alter|drop|set|vacuum|analyze)\b/i.test(text)) return "maintenance";
   return "unknown";
+}
+
+
+/** Decorate registration before registering tools (including registerAppTool). Only
+ * handler metadata and vetted result identities enter usage, never args or content. */
+export function instrumentMcpTools(server: {registerTool: (...args:any[]) => any}, cfg: Config): void {
+  const register=server.registerTool.bind(server);
+  server.registerTool=((name:string,config:any,handler:(...args:any[])=>Promise<any>) => register(name,config,async (...args:any[]) => {
+    const resolved=resolveHarnessIdentity(typeof args[0]?.session_id === "string" ? args[0].session_id : undefined);
+    const allowed=new Set<TrafficClass>(["ordinary","evaluation","audit","maintenance","unknown"]);
+    const configured=process.env.LEDGER_TRAFFIC_CLASS as TrafficClass;
+    const traffic_class=process.env.LEDGER_SELFTEST === "1" ? "evaluation" : allowed.has(configured) ? configured : "unknown";
+    const purpose:UsagePurpose=name === "ledger_brief" ? "automatic_brief" : config?.annotations?.readOnlyHint ? "interactive_read" : "maintenance";
+    try {
+      return await withUsageInvocation(cfg,{tool:name,session_id:resolved.ok ? resolved.id : undefined,identity:resolved.ok ? resolved.identity : undefined,traffic_class,purpose,version:"0.1.0"},async () => {
+        const result=await handler(...args);
+        return {...result,structuredContent:{...result?.structuredContent,usage:{invocation_id:currentUsageInvocationId(),source:"ledger_server"}}};
+      },result => ({outcome:result?.isError ? "refusal" : "success",availability:result?.isError ? "unavailable" : Array.isArray(result?.structuredContent?.sources) ? result.structuredContent.sources.length ? "available" : "empty" : "unknown",records:recordsOf(result)}));
+    } finally {
+      // Background, bounded upload. It neither delays this tool result nor starts
+      // a new analytical query/evidence obligation. CLI drains explicitly at exit.
+      if(cfg.continuity?.database_url) void import("./continuity/db.js").then(async ({getPool}) => {
+        const {flushUsage}=await import("./continuity/usage.js");await flushUsage(getPool(cfg));
+      }).catch(()=>{});
+    }
+  })) as typeof server.registerTool;
 }

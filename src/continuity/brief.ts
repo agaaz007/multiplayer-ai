@@ -1,14 +1,30 @@
 import type pg from "pg";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { availableSection, boundedRead, type AvailableSection } from "./availability.js";
 import type { Config } from "../store.js";
 import { continuityConfigured, getPool } from "./db.js";
 import { listThreads } from "./store.js";
 import { threadLine } from "./resume.js";
-import { repoIdentity, repoRoot } from "./shadow.js";
+import { canonicalRepoUrl } from "./shadow.js";
 import { takeLocalNotifications } from "../helper/signals.js";
 import { unassignedSpans } from "./records.js";
 import { listRecordSummaries, recordLine, unassignedLine } from "./recordpack.js";
 import { investigationLine, listInvestigations } from "./investigations.js";
+
+const exec = promisify(execFile);
+
+/** Repository priority is a best-effort hint, not an access boundary. Never block read deadlines on synchronous Git. */
+async function briefRepo(cwd: string | undefined, budget: number): Promise<string | null> {
+  if (!cwd) return null;
+  const options = {cwd, timeout:Math.max(1,Math.min(250,Math.floor(budget / 4))), maxBuffer:64 << 10,
+    env:{...process.env,GIT_TERMINAL_PROMPT:'0'}};
+  try {
+    const root = (await exec('git',['rev-parse','--show-toplevel'],options)).stdout.trim();
+    try { return canonicalRepoUrl((await exec('git',['remote','get-url','origin'],options)).stdout.trim()) || root; }
+    catch { return root; }
+  } catch { return null; }
+}
 
 /**
  * The "Open threads" section for SessionStart and `ledger brief`. Teammates'
@@ -24,8 +40,7 @@ export async function openThreadsText(cfg: Config, opts: { cwd?: string; hours?:
   const threadSection = availableSection("Open threads", () => boundedRead(getPool(cfg), budget, async (client) => {
     // These read APIs only use query; the borrowed connection is owned by boundedRead.
     const pool = client as unknown as pg.Pool;
-    const root = opts.cwd ? repoRoot(opts.cwd) : null;
-    const repo = root ? repoIdentity(root) : null;
+    const repo = await briefRepo(opts.cwd, budget);
     const filt = { sinceHours: hours, status: "open", limit, ...(opts.includeOwn ? {} : { excludeAuthor: cfg.author }) };
     let rows = repo ? await listThreads(pool, { ...filt, repo }) : [];
     if (rows.length < limit) {
@@ -66,7 +81,7 @@ export const INVESTIGATIONS_CONTRACT = `Analysis sessions must bind to one of th
  * ledger_investigation_new declares the first). Unavailable sections are labelled explicitly.
  */
 export async function investigationSection(cfg: Config, opts: { hours?: number; limit?: number; timeoutMs?: number; now?: Date } = {}): Promise<AvailableSection> {
-  if (!continuityConfigured(cfg)) return {name: "Open investigations", status: "not_configured", text: "", observed_at: new Date().toISOString()};
+  if (!continuityConfigured(cfg)) return {name: "Open investigations", status: "not_configured", text: "", observed_at: (opts.now ?? new Date()).toISOString()};
   const hours = opts.hours ?? 24 * 14;
   const limit = opts.limit ?? 8;
   const now = opts.now ?? new Date();
@@ -88,7 +103,7 @@ export async function investigationSection(cfg: Config, opts: { hours?: number; 
  * listed, never turned into records here. Unavailable sections are labelled explicitly.
  */
 export async function workSection(cfg: Config, opts: { cwd?: string; hours?: number; limit?: number; unassignedHours?: number; unassignedLimit?: number; timeoutMs?: number; now?: Date } = {}): Promise<AvailableSection> {
-  if (!continuityConfigured(cfg)) return {name: "Open work", status: "not_configured", text: "", observed_at: new Date().toISOString()};
+  if (!continuityConfigured(cfg)) return {name: "Open work", status: "not_configured", text: "", observed_at: (opts.now ?? new Date()).toISOString()};
   const hours = opts.hours ?? 24 * 14;
   const limit = opts.limit ?? 8;
   const uHours = opts.unassignedHours ?? 48;
@@ -97,8 +112,7 @@ export async function workSection(cfg: Config, opts: { cwd?: string; hours?: num
   const clip = (s: string, n: number) => { const t = s.replace(/\s+/g, " ").trim(); return t.length > n ? t.slice(0, n - 1) + "…" : t; };
   return availableSection("Open work", () => boundedRead(getPool(cfg), opts.timeoutMs ?? 4000, async (client) => {
     const pool = client as unknown as pg.Pool;
-    const root = opts.cwd ? repoRoot(opts.cwd) : null;
-    const repo = root ? repoIdentity(root) : null;
+    const repo = await briefRepo(opts.cwd, opts.timeoutMs ?? 4000);
     const filt = { sinceHours: hours, status: "open" as const, limit };
     const rows = repo ? await listRecordSummaries(pool, { ...filt, repo }) : [];
     if (rows.length < limit) {

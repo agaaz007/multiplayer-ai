@@ -90,9 +90,9 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
   };
   const handoffResult = async (pack: any, source_kind: "record" | "thread", source_id: string, sid: string | undefined, mode: "continue" | "fork" | "inspect") => {
     if (!sid || mode === "inspect") return text(pack.text);
-    if (source_kind === "thread" && !pack.claim.acquired) return { ...text(pack.text), isError: true as const };
-    const code = source_kind === "thread" || Boolean(pack.record?.repo) || Boolean(pack.contributing_sessions?.some((s: any) => s.repo));
-    const verified = source_kind === "thread" ? Boolean(pack.loss_window?.verified_snapshot_at) : Boolean(pack.bootstrap?.length && pack.contributing_sessions?.some((s: any) => s.verified_snapshot_at));
+    if ((source_kind === "thread" || pack.claim.thread_id) && !pack.claim.acquired) return { ...text(pack.text), isError: true as const };
+    const code = source_kind === "thread" || pack.record?.kind === "implementation";
+    const verified = source_kind === "thread" ? Boolean(pack.loss_window?.verified_snapshot_at) : Boolean(pack.bootstrap?.length && pack.contributing_sessions?.some((s: any) => s.verified_snapshot_at && s.wip_commit && pack.bootstrap.join("\n").includes(s.wip_commit)));
     try {
       const id = await startHandoff(getPool(cfg), {source_kind,source_id,destination_session:sid,author:cfg.author,mode,work_kind:code ? "code" : "analysis",source_snapshot_verified:verified,pending_operations:pack.pending_operations?.length ?? 0});
       return {...text(`${pack.text}\n\nHandoff attempt: ${id} (pack delivered, not completed). After verifying the evidence or bootstrap and delivering the continuation, report exact captured events with ledger_handoff_update. Pending mutations must be reconciled before retrying.`), structuredContent:{handoff:{id,status:"pack_delivered",source_kind,source_id,source_snapshot_verified:verified,attribution:"agent-reported"}}};
