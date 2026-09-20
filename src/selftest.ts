@@ -951,6 +951,7 @@ assert.deepEqual(names, [
   "ledger_get",
   "ledger_impact",
   "ledger_investigation",
+  "ledger_memory",
   "ledger_propose_finding",
   "ledger_record_change",
   "ledger_record_decision",

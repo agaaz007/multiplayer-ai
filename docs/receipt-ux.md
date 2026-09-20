@@ -10,6 +10,7 @@ Ledger gives users a visible account of what an agent retrieved, attributed, and
 | Open | Record title, author, date | Full source record |
 | Attribute | Referenced unique-record count, authors, agent-reported qualifier | Exact answer passages and the agent's explanation of each contribution |
 | Record | Saved type/title, actual sync outcome, explicit prior links | Saved record ID, linked records and unresolved IDs |
+| Summarize | The memory view's five numbers, as of the newest record | Each disagreement's competing claims as peers, corrections and the results they put back under review, cross-person pins, and the lineage gaps |
 
 Counts represent unique stored records, not claims, verified facts, conversations, or people. Authors come from storage. Similar-findings warnings do not count as references. A saved record's links come from `prior.ids`, `based_on`, `related_findings`, and `supersedes`; metric names in `definitions_used` are not resolved into versioned references by this receipt.
 
@@ -31,7 +32,7 @@ Covered tools return `structuredContent.receipt` with:
 
 - `schema: "ledger-receipt/v1"`, `action`, and a deterministic plain-text `message`.
 - `display.text` and `display.markdown`: the boxed plain-text and fenced Markdown presentations of that message. The guide instructs agents to copy the appropriate presentation verbatim.
-- `records`: unique objects with canonical `id`, `title`, `author`, and `status`.
+- `records`: unique objects with canonical `id`, `title`, `author`, and `status`. A `summarized` receipt leaves this empty: a computed view retrieved no record, and must not imply it did.
 - Writes also include `record_id`, `sync`, `references`, and `unresolved_references`. `metadata_unavailable` indicates source details could not be loaded after the write.
 
 `sync` is one of `pushed`, `local_commit`, `sync_failed`, `commit_failed`, `disabled`, or `unconfirmed`. Only `pushed` represents an acknowledged remote push. A successful later push does not retroactively update an old receipt.
