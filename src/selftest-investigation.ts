@@ -92,6 +92,11 @@ assert.ok(JSON.stringify(resolved).includes(d2.id),'get old evidence includes ap
 const retrieved=await client.callTool({name:'ledger_investigation',arguments:{question:'trial conversion',analysis_scope:scope,limit:1}});
 assert.ok(!retrieved.isError,JSON.stringify(retrieved));
 assert.ok(JSON.stringify(retrieved).includes(d2.id));
+const candidateResponse=await client.callTool({name:'ledger_investigation',arguments:{question:'Funnel handoff',analysis_scope:{...scope,metric:'funnel_rate'},candidate_limit:1}}) as any;
+assert.ok(!candidateResponse.isError,JSON.stringify(candidateResponse));
+assert.equal(candidateResponse.structuredContent.investigation.discovery_status,'candidates_available');
+assert.equal(candidateResponse.structuredContent.investigation.legacy_candidates.length,1);
+assert.ok(!JSON.stringify(candidateResponse.structuredContent.receipt).includes('No matching records'),'candidate-only discovery must not produce a false empty receipt');
 const impact=await client.callTool({name:'ledger_impact',arguments:{correction_id:d2.id}});
 assert.ok(JSON.stringify(impact).includes(finding.id));
 const invalidDate=await client.callTool({name:'ledger_get',arguments:{id:d1.id,as_of:'2026-02-31'}});

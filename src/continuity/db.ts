@@ -1,4 +1,6 @@
 import pg from "pg";
+import { USAGE_SCHEMA, instrumentUsageClient } from "./usage.js";
+import { assertSafeSelftestDatabase } from "../selftest-db-guard.js";
 import type { Config } from "../store.js";
 import { embeddingsConfigured, ensureEmbeddingSchema } from "./embeddings.js";
 
@@ -21,6 +23,7 @@ export function continuityConfigured(cfg: Config): boolean {
 export function getPool(cfg: Config): pg.Pool {
   const url = cfg.continuity?.database_url;
   if (!url) throw new Error("continuity not configured: set continuity.database_url in ~/.ledger/config.json or LEDGER_CONTINUITY_DB");
+  if (process.env.LEDGER_SELFTEST === "1") assertSafeSelftestDatabase(url);
   let p = pools.get(url);
   if (!p) {
     // pg 8.23 treats sslmode=require as verify-full and prints a security warning while parsing the URL.
@@ -33,6 +36,7 @@ export function getPool(cfg: Config): pg.Pool {
     // (a laptop sleep or DNS loss). query_timeout is the client-side bound and TCP keepalive surfaces dead
     // sockets; without both the helper once waited 39 h on one query while launchd reported it running.
     p = new pg.Pool({ connectionString: u.toString(), ssl: wantSsl ? { rejectUnauthorized: true } : false, max: 4, idleTimeoutMillis: 10_000, connectionTimeoutMillis: 8_000, statement_timeout: 20_000, query_timeout: 30_000, keepAlive: true, keepAliveInitialDelayMillis: 10_000 });
+    p.on("connect", instrumentUsageClient);
     p.on("error", () => { /* idle client errors are retried on next query */ });
     pools.set(url, p);
   }
@@ -272,7 +276,14 @@ create index if not exists cont_events_fts_idx on cont_events using gin (
  */
 export async function migrate(pool: pg.Pool, cfg?: Config): Promise<string[]> {
   const before = await tableList(pool);
-  await pool.query(SCHEMA);
+  const c = await pool.connect();
+  try {
+    await c.query("begin");
+    await c.query("set local lock_timeout = '2s'");
+    await c.query(SCHEMA);
+    await c.query(USAGE_SCHEMA);
+    await c.query("commit");
+  } catch (e) { await c.query("rollback").catch(() => {}); throw e; } finally { c.release(); }
   if (cfg && embeddingsConfigured(cfg)) await ensureEmbeddingSchema(pool, cfg);
   const after = await tableList(pool);
   return after.filter((t) => !before.includes(t));

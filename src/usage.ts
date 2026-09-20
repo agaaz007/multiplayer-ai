@@ -1,0 +1,129 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+import { randomUUID } from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
+import os from "node:os";
+import type { Config } from "./store.js";
+import type { HarnessIdentity } from "./continuity/safety.js";
+
+export type TrafficClass = "ordinary" | "evaluation" | "audit" | "maintenance" | "unknown";
+export type UsagePurpose = "interactive_read" | "automatic_brief" | "capture_write" | "maintenance" | "telemetry";
+export interface UsageMetadata {
+  tool: string;
+  session_id?: string;
+  identity?: HarnessIdentity;
+  traffic_class?: TrafficClass;
+  purpose?: UsagePurpose;
+  /** Stable across one transport retry only when the transport supplies one. */
+  invocation_id?: string;
+  parent_invocation_id?: string;
+  version?: string;
+}
+export interface UsageSummary {
+  outcome?: "success" | "refusal" | "error";
+  availability?: "available" | "empty" | "unavailable" | "stale" | "unknown";
+  records?: {id:string;version?:string;author?:string}[];
+}
+export interface UsageInvocation {
+  invocation_id: string; actor: string; session_id: string | null; harness: string; identity_source: string;
+  identity_verified: boolean; machine: string | null; version: string; tool: string; traffic_class: TrafficClass;
+  purpose: UsagePurpose; parent_invocation_id: string | null; started_at: string; finished_at: string | null;
+  duration_ms: number | null; outcome: "started" | "success" | "refusal" | "error";
+  availability: string; records: {id:string;version?:string;author?:string}[];
+}
+export interface UsageStorageOperation {
+  operation_id: string; invocation_id: string; backend: "git" | "neon";
+  operation_class: string; purpose: UsagePurpose; started_at: string; duration_ms: number;
+  success: boolean; returned_rows: number | null; evidence_returned: boolean | null; attempt: number;
+}
+export type UsageEnvelope = {kind:"invocation";value:UsageInvocation} | {kind:"storage";value:UsageStorageOperation};
+interface Context { invocation: UsageInvocation; disabled?: boolean }
+const context = new AsyncLocalStorage<Context>();
+const pending = new Set<Promise<void>>();
+const queues = new Map<string,Promise<void>>();
+const MAX_PENDING = 1000;
+const MAX_SPOOL_BYTES = 16 * 1024 * 1024;
+let dropped = 0;
+let lastError: string | null = null;
+const safe = (v: unknown, fallback = "unknown", max = 200): string => typeof v === "string" && /^[A-Za-z0-9_.:@/ -]+$/.test(v) && !v.includes("://") ? v.slice(0,max) : fallback;
+export function usageDirectory(): string { return path.join(process.env.LEDGER_CONFIG_DIR ?? path.join(os.homedir(),".ledger"),"usage-spool-v1"); }
+export function usageHealth(): {pending:number;dropped:number;last_error:string|null} { return {pending:pending.size,dropped,last_error:lastError}; }
+export function currentUsageInvocationId(): string | undefined { return context.getStore()?.invocation.invocation_id; }
+export function withoutUsage<T>(fn: () => T): T { const c=context.getStore(); return c ? context.run({...c,disabled:true},fn) : fn(); }
+
+/** Usage is never awaited by the user's operation. Bounded, separate spool; failures
+ * are exposed through health, not recursively reported as database operations. */
+function emit(envelope: UsageEnvelope): void {
+  if (pending.size >= MAX_PENDING) { dropped++; return; }
+  const dir=usageDirectory();
+  const previous=queues.get(dir) ?? Promise.resolve();
+  const task=previous.then(async () => {
+    await fs.mkdir(dir,{recursive:true,mode:0o700});
+    const files=await fs.readdir(dir);
+    let bytes=0;
+    for (const file of files) if (file.endsWith(".json")) bytes+=(await fs.stat(path.join(dir,file))).size;
+    const encoded=JSON.stringify(envelope);
+    if (bytes+Buffer.byteLength(encoded)>MAX_SPOOL_BYTES) { dropped++; lastError="spool_capacity"; return; }
+    const id=envelope.kind === "invocation" ? envelope.value.invocation_id : envelope.value.operation_id;
+    const dest=path.join(dir,`${envelope.kind}-${id}.json`);
+    const tmp=`${dest}.${randomUUID()}.tmp`;
+    const f=await fs.open(tmp,"wx",0o600);
+    try { await f.writeFile(encoded); await f.sync(); } finally { await f.close(); }
+    await fs.rename(tmp,dest);
+    const d=await fs.open(dir,"r"); try { await d.sync(); } finally { await d.close(); }
+  }).catch(() => { dropped++; lastError="local_spool_write_failed"; }).finally(() => {pending.delete(task);});
+  queues.set(dir,task); pending.add(task);
+}
+export async function drainUsageWrites(): Promise<void> { await Promise.all([...pending]); }
+
+function recordsOf(value: unknown): UsageSummary["records"] {
+  const r=value as {structuredContent?:{results?:unknown[];objects?:unknown[]};results?:unknown[];objects?:unknown[]};
+  const rows=r?.structuredContent?.results ?? r?.structuredContent?.objects ?? r?.results ?? r?.objects ?? [];
+  return rows.flatMap(x => {
+    const v=x as {id?:unknown;content_version?:unknown;author?:unknown};
+    if (typeof v?.id !== "string" || !/^(?:def|fnd|chg|dec)-[A-Za-z0-9-]+$/.test(v.id)) return [];
+    return [{id:v.id,version:typeof v.content_version === "string" && /^[a-f0-9]{64}$/.test(v.content_version) ? v.content_version : undefined,author:typeof v.author === "string" ? safe(v.author) : undefined}];
+  }).slice(0,100);
+}
+export async function withUsageInvocation<T>(cfg: Config, metadata: UsageMetadata, fn: () => Promise<T>, summary?: (result:T) => UsageSummary): Promise<T> {
+  const id=metadata.invocation_id && /^[a-f0-9-]{36}$/.test(metadata.invocation_id) ? metadata.invocation_id : randomUUID();
+  const invocation: UsageInvocation={invocation_id:id,actor:safe(cfg.author),session_id:metadata.session_id ? safe(metadata.session_id) : null,harness:metadata.identity?.harness ?? "unknown",identity_source:safe(metadata.identity?.source),identity_verified:metadata.identity?.verified ?? false,machine:cfg.continuity?.machine ? safe(cfg.continuity.machine) : null,version:safe(metadata.version,"unknown"),tool:safe(metadata.tool),traffic_class:metadata.traffic_class ?? "unknown",purpose:metadata.purpose ?? (metadata.tool === "ledger_brief" ? "automatic_brief" : "interactive_read"),parent_invocation_id:metadata.parent_invocation_id ? safe(metadata.parent_invocation_id) : null,started_at:new Date().toISOString(),finished_at:null,duration_ms:null,outcome:"started",availability:"unknown",records:[]};
+  const began=performance.now(); emit({kind:"invocation",value:{...invocation}});
+  return context.run({invocation},async () => {
+    try {
+      const result=await fn();
+      const details=summary?.(result) ?? {};
+      const isError=(result as {isError?:boolean})?.isError === true;
+      invocation.outcome=details.outcome ?? (isError ? "error" : "success");
+      invocation.availability=details.availability ?? "unknown";
+      invocation.records=(details.records ?? recordsOf(result) ?? []).filter(r => /^(?:def|fnd|chg|dec)-[A-Za-z0-9-]+$/.test(r.id)).slice(0,100).map(r => ({id:r.id,version:r.version && /^[a-f0-9]{64}$/.test(r.version) ? r.version : undefined,author:r.author ? safe(r.author) : undefined}));
+      return result;
+    } catch (e) { invocation.outcome=(e as {code?:string})?.code === "refusal" ? "refusal" : "error"; throw e; }
+    finally { invocation.finished_at=new Date().toISOString();invocation.duration_ms=Math.max(0,performance.now()-began);emit({kind:"invocation",value:{...invocation}}); }
+  });
+}
+
+export function startStorageOperation(opts: {backend:"git"|"neon";operation_class:string;purpose?:UsagePurpose;attempt?:number}): (result:{success:boolean;returned_rows?:number|null;evidence_returned?:boolean|null}) => void {
+  const c=context.getStore();
+  if (!c || c.disabled || c.invocation.purpose === "telemetry") return () => {};
+  const at=new Date().toISOString(),began=performance.now();let done=false;
+  return result => {
+    if (done) return;done=true;
+    emit({kind:"storage",value:{operation_id:randomUUID(),invocation_id:c.invocation.invocation_id,backend:opts.backend,operation_class:safe(opts.operation_class),purpose:opts.purpose ?? c.invocation.purpose,started_at:at,duration_ms:Math.max(0,performance.now()-began),success:result.success,returned_rows:result.returned_rows ?? null,evidence_returned:result.evidence_returned ?? null,attempt:opts.attempt ?? 1}});
+  };
+}
+export async function observeStorageOperation<T>(opts: Parameters<typeof startStorageOperation>[0], fn: () => Promise<T>, summarize?: (value:T) => {returned_rows?:number;evidence_returned?:boolean}): Promise<T> {
+  const finish=startStorageOperation(opts);
+  try {const value=await fn();finish({success:true,...summarize?.(value)});return value;} catch(e) {finish({success:false});throw e;}
+}
+
+/** SQL text is classified in memory and never persisted. Unknown CTEs are not called reads. */
+export function sqlOperationClass(sql: unknown): string {
+  const text=typeof sql === "string" ? sql.trim().replace(/^(?:--[^\n]*\n|\/\*[\s\S]*?\*\/)\s*/g,"") : "";
+  if (/^(select|show|explain)\b/i.test(text)) return "read";
+  if (/^with\b/i.test(text)) return /\b(insert|update|delete|merge)\b/i.test(text) ? "write" : "read";
+  if (/^(insert|update|delete|merge|copy)\b/i.test(text)) return "write";
+  if (/^(begin|commit|rollback|savepoint|release)\b/i.test(text)) return "transaction";
+  if (/^(create|alter|drop|set|vacuum|analyze)\b/i.test(text)) return "maintenance";
+  return "unknown";
+}

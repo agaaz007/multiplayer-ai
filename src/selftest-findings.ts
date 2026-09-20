@@ -164,6 +164,18 @@ try {
   assert.deepEqual(get(explicit.id).fields.dependencies,pins);
   assert.throws(()=>proposeFinding(cfg,{...scopedInput,definition_ids:['missing-definition']},{session:sid}),/definition not found/);
 
+  // Enrichment is a new scoped finding with an exact source pin, never a scope-changing replacement.
+  const enrichmentScope = {...scoped,metric:'trial_start_cvr',population:String(accepted.fields.population)};
+  const enrichmentDef = record(cfg,{type:'definition',fields:{title:'Validated legacy conversion scope',metric:enrichmentScope.metric,formula:'trial starts / eligible users',source:'fixture',owner:'agaaz',valid_from:'2026-08-01',analysis_scope:enrichmentScope}});
+  const {acceptance:_oldAcceptance,...legacyFields} = accepted.fields;
+  const enrichmentFields = {...legacyFields,title:'Validated legacy finding with explicit scope',analysis_scope:enrichmentScope,
+    dependencies:[{relation:'derived-from',id:accepted.id,version:objectVersion(accepted)},{relation:'uses-definition',id:enrichmentDef.id,version:enrichmentDef.content_version}]};
+  const enriched = record(cfg,{type:'finding',fields:enrichmentFields});
+  assert.notEqual(enriched.id,accepted.id);
+  assert.equal(objectVersion(get(accepted.id)),objectVersion(accepted));
+  assert.equal(get(accepted.id).superseded_by,undefined);
+  assert.throws(()=>record(cfg,{type:'finding',fields:{...enrichmentFields,supersedes:accepted.id}}),/preserve analytical scope/);
+
   // ---------- MCP surface: propose + review, capture_ack shapes, refusals ----------
   const server = createMcpServer(cfg);
   const client = new Client({ name: "findings-test", version: "1" });
@@ -171,6 +183,16 @@ try {
   const names = new Set((await client.listTools()).tools.map((t) => t.name));
   for (const n of ["ledger_propose_finding", "ledger_review_finding"]) assert.ok(names.has(n), `${n} is exposed without a continuity database`);
   for (const n of ["ledger_investigations", "ledger_investigation_bind", "ledger_investigation_new"]) assert.ok(!names.has(n), `${n} needs the continuity database`);
+
+  const mcpScoped = await client.callTool({name:'ledger_propose_finding',arguments:{...scopedInput,definition_ids:[definition.id],session_id:sid}}) as any;
+  assert.ok(!mcpScoped.isError,JSON.stringify(mcpScoped));
+  const mcpScopedDraft = get(mcpScoped.structuredContent.receipt.record_id);
+  assert.deepEqual(mcpScopedDraft.fields.analysis_scope,scoped,'MCP must carry applicability through the proposal adapter');
+  assert.deepEqual(mcpScopedDraft.fields.dependencies,pins,'MCP must carry exact definition selection');
+  const mcpScopedAccepted = await client.callTool({name:'ledger_review_finding',arguments:{id:mcpScopedDraft.id,action:'accept'}}) as any;
+  assert.ok(!mcpScopedAccepted.isError,JSON.stringify(mcpScopedAccepted));
+  assert.deepEqual(get(mcpScopedAccepted.structuredContent.review.id).fields.analysis_scope,scoped);
+  assert.deepEqual(get(mcpScopedAccepted.structuredContent.review.id).fields.dependencies,pins);
 
   // a fourth call for the MCP round trip
   handleHook("PostToolUse", { session_id: sid, tool_name: "mcp__mixpanel__query", tool_use_id: "callD", tool_input: { sql: "select 'D'" }, tool_response: { result: [] } });
