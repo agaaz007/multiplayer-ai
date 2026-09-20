@@ -74,8 +74,12 @@ export async function flushUsage(pool: pg.Pool, limit=100): Promise<{uploaded:nu
   if (uploading) return {uploaded:0,pending:usageHealth().pending,dropped:usageHealth().dropped};
   uploading=true;
   try { return await withoutUsage(async () => {
-    await drainUsageWrites();
-    const dir=usageDirectory();const files=(await fs.readdir(dir).catch(()=>[])).filter(f=>/^(?:invocation-[a-f0-9-]{36}-(?:started|finished)|storage-[a-f0-9-]{36})\.json$/.test(f));let uploaded=0;const deadline=performance.now()+4000;
+    const deadline=performance.now()+4000;
+    let localTimer:ReturnType<typeof setTimeout>;
+    const ready=await Promise.race([drainUsageWrites().then(()=>true),new Promise<false>(resolve=>{localTimer=setTimeout(()=>resolve(false),2000);})]);
+    clearTimeout(localTimer!);
+    if(!ready) return {uploaded:0,pending:usageHealth().pending,dropped:usageHealth().dropped,error:"usage_local_write_budget"};
+    const dir=usageDirectory();const files=(await fs.readdir(dir).catch(()=>[])).filter(f=>/^(?:invocation-[a-f0-9-]{36}-(?:started|finished)|storage-[a-f0-9-]{36})\.json$/.test(f));let uploaded=0;
     for(const file of files.filter(f=>/^(?:invocation-[a-f0-9-]{36}-(?:started|finished)|storage-[a-f0-9-]{36})\.json$/.test(f)).slice(0,Math.max(1,Math.min(1000,limit)))) {
       if(performance.now()>=deadline) return {uploaded,pending:files.length-uploaded,dropped:usageHealth().dropped,error:"usage_batch_budget"};
       const filename=path.join(dir,file);

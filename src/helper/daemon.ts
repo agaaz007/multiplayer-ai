@@ -401,13 +401,19 @@ async function helperOnceImpl(cfg: Config, opts: HelperOpts): Promise<PassSummar
 
       // ---- tail ----
       const readFromStart = !s || !s.offset;
-      const r = streamTranscript(file, sid ? (spoolCursor(sid) ?? s?.offset ?? 0) : 0, harness, cfg.data_tools, { maxBytes: 1 << 20, maxLines: 200 });
+      const r = streamTranscript(file, sid ? (spoolCursor(sid) ?? s?.offset ?? 0) : 0, harness, cfg.data_tools, { maxBytes: 1 << 20, maxLines: 200, initialCwd: s?.cwd, stopAtCwdChange: true });
       if (!sid) { sid = sessionIdFor(file, harness, r.session_id); s = st[sid] ?? { file, harness, offset: 0, lastSeenMtime: 0, seenCallIds: [], reconciled: [], unknown: {} }; st[sid] = s; byFile.set(file, sid); }
       s = s!;
       if (s.startedAtMs == null) s.startedAtMs = startedAtFor(file, readFromStart ? r.events : []);
 
       s.lastSeenMtime = mtime;
-      if (r.cwd) s.cwd = r.cwd;
+      if (r.cwd && r.cwd !== s.cwd) {
+        s.cwd = r.cwd;
+        // Repository permissions follow the current source cwd, not whichever
+        // checkout this transcript happened to visit first.
+        s.root = undefined; s.repo = undefined; s.branch = null; s.baseCommit = null;
+        s.wipRef = undefined; s.lastCommit = null; s.lastTree = undefined;
+      }
       if (r.branch) s.branch = r.branch;
       // derived every pass from the path (self-healing: an earlier build mis-set this from mirrored lines)
       s.sidechain = s.file.includes(`${path.sep}subagents${path.sep}`) || path.basename(s.file).startsWith("agent-") || Boolean(r.sidechain);
@@ -425,7 +431,13 @@ async function helperOnceImpl(cfg: Config, opts: HelperOpts): Promise<PassSummar
           if (s.root) { s.repo = repoIdentity(s.root); s.branch = s.branch ?? currentBranch(s.root); s.baseCommit = headCommit(s.root); s.wipRef = `refs/wip/${safe(author)}/${safe(sid)}`; }
         }
       }
-      if (s.root && s.repo && !repoAllowed(cfg, s.repo, s.root)) { s.ended = true; continue; }
+      if (s.root && s.repo && !repoAllowed(cfg, s.repo, s.root)) {
+        // Policy rejection retains only a local reason and source position; no
+        // rejected prompt, result, cwd or repo content enters event storage.
+        spoolAppend(sid, { offset: r.offset, at: now.toISOString(), events: [] });
+        s.offset = r.offset; s.unbound_reason = "capture scope rejected source chunk";
+        continue;
+      }
       if (!s.firstInstruction) {
         const fi = r.events.find((e) => e.kind === "instruction.added");
         if (fi) s.firstInstruction = String(fi.payload.text ?? "").split("\n").map((l) => l.trim()).find((l) => l.length > 0)?.slice(0, 100) ?? undefined;

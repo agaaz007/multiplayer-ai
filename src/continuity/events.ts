@@ -101,7 +101,7 @@ function compact<T extends Record<string, unknown>>(o: T): T {
  * string or a multibyte character. If the file is now shorter than `offset`, it was rotated or
  * rewritten: read again from 0.
  */
-export interface TranscriptLimits { maxBytes?: number; maxLines?: number }
+export interface TranscriptLimits { maxBytes?: number; maxLines?: number; initialCwd?: string; stopAtCwdChange?: boolean }
 function readNewLines(file: string, offset: number, limits: TranscriptLimits = {}): { lines: { at: number; text: string }[]; offset: number } {
   const size = fs.statSync(file).size;
   if (size < offset) offset = 0;
@@ -125,10 +125,22 @@ function readNewLines(file: string, offset: number, limits: TranscriptLimits = {
   const lines: { at: number; text: string }[] = [];
   let pos = 0;
   let consumed = 0;
+  let chunkCwd = limits.initialCwd;
   while (pos < buf.length) {
     const nl = buf.indexOf(0x0a, pos);
     if (nl === -1) break; // partial trailing line: not consumed
     const text = buf.toString("utf8", pos, nl);
+    if (limits.stopAtCwdChange && text.trim()) {
+      try {
+        const parsed = JSON.parse(text), cwd = parsed.cwd ?? parsed.payload?.cwd;
+        if (typeof cwd === "string") {
+          // End the admitted chunk BEFORE crossing repository policy. Even an
+          // A→B→A change in one source read cannot hide B behind the final cwd.
+          if (lines.length && cwd !== chunkCwd) break;
+          chunkCwd = cwd;
+        }
+      } catch { /* emitter records malformed complete frames */ }
+    }
     if (text.trim()) lines.push({ at: offset + pos, text });
     pos = nl + 1;
     consumed = pos;

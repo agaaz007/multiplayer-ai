@@ -674,14 +674,14 @@ async function main() {
           if (!pos[1]) throw new Error(usage);
           if (!sessionArg) throw new Error(`${usage}\nbind needs the session to bind: --session <id> (or LEDGER_SESSION_ID)`);
           const r = await bindInvestigation(pool, cfg, { record_id: pos[1], session_id: sessionArg, question: flag(args, "--question"), request_id: flag(args, "--request-id"), identity: resolveHarnessIdentity(sessionArg).identity });
-          console.log(r.text);
+          console.log(`${r.text}\nrequest_id: ${r.request_id}`);
         } else if (sub === "new") {
           const question = pos.slice(1).join(" ");
           if (!question) throw new Error(usage);
           const resolved = resolveHarnessIdentity(sessionArg);
           if (!resolved.ok) throw new Error(resolved.error);
           const r = await declareInvestigation(pool, cfg, { question, goal: flag(args, "--goal"), session_id: resolved.id, repo: flag(args, "--repo") ?? null, request_id: flag(args, "--request-id"), identity: resolved.identity });
-          console.log(r.text);
+          console.log(`${r.text}\nrequest_id: ${r.request_id}`);
         } else if (sub === "show") {
           if (!sessionArg) throw new Error(usage);
           const b = await sessionBinding(pool, sessionArg);
