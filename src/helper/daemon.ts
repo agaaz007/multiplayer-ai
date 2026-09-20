@@ -60,6 +60,7 @@ export interface SessState {
   lastTree?: string;
   lastShadowAt?: number;
   pendingSnapshotTurn?: boolean;
+  pendingEnd?: boolean;
   lastHeartbeatAt?: number;
   lastSeenMtime: number;
   sidechain?: boolean;
@@ -592,8 +593,10 @@ async function helperOnceImpl(cfg: Config, opts: HelperOpts): Promise<PassSummar
       if (confirmed.length) { await S.appendEvents(pool, sid, confirmed, routing.thread_id, routing.generation); sum.events_uploaded += confirmed.length; log(`${confirmed.length} confirmed capture gap(s) in ${sid.slice(0, 8)}`); }
 
       // ---- signals & snapshot ----
-      const endSignal = takeSignal(sid, "end");
-      const cpSignal = takeSignal(sid, "checkpoint") || endSignal || Boolean(s.pendingSnapshotTurn);
+      const newEndSignal = takeSignal(sid, "end");
+      const endSignal = newEndSignal || Boolean(s.pendingEnd);
+      if (endSignal) s.pendingEnd = true;
+      const cpSignal = takeSignal(sid, "checkpoint") || newEndSignal || Boolean(s.pendingSnapshotTurn);
       if (cpSignal) s.pendingSnapshotTurn = true;
       const due = !s.lastShadowAt || now.getTime() - s.lastShadowAt >= snapEvery;
       // subagent transcripts share the parent's worktree; the parent session snapshots it
@@ -637,7 +640,7 @@ async function helperOnceImpl(cfg: Config, opts: HelperOpts): Promise<PassSummar
               // Session verification cannot be advanced by a waking predecessor.
               if (cp.advanced && sh.verified) await pool.query(`update cont_sessions set wip_commit=$2, last_verified_snapshot_at=$3 where id=$1 and claim_generation=$4 and thread_id=$5 and exists(select 1 from cont_threads where id=$5 and head_checkpoint_id=$6)`, [sid, sh.commit, sh.verified_at, source.generation, source.thread_id, cp.id]);
             }
-            if (!source.thread_id && sh.verified) await pool.query(`update cont_sessions set wip_commit=$2, last_verified_snapshot_at=$3 where id=$1 and thread_id is null and claim_generation is null`, [sid, sh.commit, sh.verified_at]);
+            if (!source.thread_id && sh.verified) await pool.query(`update cont_sessions set wip_commit=$2, last_verified_snapshot_at=$3, coverage=jsonb_set(coverage, '{snapshot_dispatch_order}', to_jsonb($4::bigint)) where id=$1 and thread_id is null and claim_generation is null and coalesce((coverage->>'snapshot_dispatch_order')::numeric, 0) < $4`, [sid, sh.commit, sh.verified_at, dispatchOrder]);
             Object.assign(s, patch); snapshotCompleted.set(sid, patch);
             if (cpSignal) classifyAfterTurn(cfg, pool, sid, s, now, sum, log);
           }).catch((e: any) => { log(`snapshot publication ${sid.slice(0, 8)} failed: ${String(e?.message ?? e).slice(0, 200)}`); })
@@ -671,14 +674,14 @@ async function helperOnceImpl(cfg: Config, opts: HelperOpts): Promise<PassSummar
       const drained = spoolStatus(sid).pending_batches === 0 && (!fs.existsSync(file) || s.offset >= fs.statSync(file).size);
       if (!s.threadId && !s.ended && (endSignal || quiet) && !holdForClassify && drained) {
         await S.updateSession(pool, sid, { ended_at: now });
-        s.ended = true;
+        s.ended = true; s.pendingEnd = false;
         log(`session ${sid.slice(0, 8)} ${endSignal ? "ended" : "went quiet"} unbound${s.unbound_reason ? ` (${s.unbound_reason})` : ""}`);
       }
       if (s.threadId && !s.ended) {
-        if ((endSignal || quiet) && drained && !snapshotQueueSize()) {
+        if ((endSignal || quiet) && drained && !snapshotPublications.size && (!s.pendingSnapshotTurn || process.env.LEDGER_SNAPSHOTS === "0")) {
           await S.releaseClaim(pool, s.threadId, sid);
           await S.updateSession(pool, sid, { ended_at: now });
-          s.ended = true;
+          s.ended = true; s.pendingEnd = false;
           log(`session ${sid.slice(0, 8)} ${endSignal ? "ended" : "went quiet"}; claim released`);
         } else if (!s.lastHeartbeatAt || now.getTime() - s.lastHeartbeatAt > 30_000) {
           // hold the claim while live: if the heartbeat finds none (released by a quiet-end, an expiry, or a restart), take it back
