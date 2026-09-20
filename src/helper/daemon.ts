@@ -47,6 +47,7 @@ export interface SessState {
   file: string;
   harness: "claude" | "codex";
   offset: number;
+  sourceFingerprint?: { bytes: number; sha256: string };
   cwd?: string;
   root?: string | null;
   repo?: string;
@@ -146,6 +147,7 @@ export function saveState(st: Record<string, SessState>): void {
   const fd = fs.openSync(tmp, "w", 0o600);
   try { fs.writeFileSync(fd, JSON.stringify(st)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
   fs.renameSync(tmp, stateFile());
+  const dir = fs.openSync(ledgerHome(), "r"); try { fs.fsyncSync(dir); } finally { fs.closeSync(dir); }
 }
 
 function walk(dir: string, depth: number): string[] {
@@ -403,7 +405,14 @@ async function helperOnceImpl(cfg: Config, opts: HelperOpts): Promise<PassSummar
 
       // ---- tail ----
       const readFromStart = !s || !s.offset;
-      const r = streamTranscript(file, sid ? (spoolCursor(sid) ?? s?.offset ?? 0) : 0, harness, cfg.data_tools, { maxBytes: 1 << 20, maxLines: 200, initialCwd: s?.cwd, stopAtCwdChange: true });
+      const from = sid ? (spoolCursor(sid) ?? s?.offset ?? 0) : 0;
+      if (fs.statSync(file).size < from) throw new Error("transcript shrank or rotated; source cursor retained, explicit generation repair required");
+      if (s?.sourceFingerprint) {
+        const fd = fs.openSync(file, "r"), bytes = Buffer.alloc(s.sourceFingerprint.bytes);
+        try { fs.readSync(fd, bytes, 0, bytes.length, 0); } finally { fs.closeSync(fd); }
+        if (crypto.createHash("sha256").update(bytes).digest("hex") !== s.sourceFingerprint.sha256) throw new Error("transcript prefix changed; source generation repair required, no events discarded");
+      }
+      const r = streamTranscript(file, from, harness, cfg.data_tools, { maxBytes: 1 << 20, maxLines: 200, initialCwd: s?.cwd, stopAtCwdChange: true });
       if (!sid) { sid = sessionIdFor(file, harness, r.session_id); s = st[sid] ?? { file, harness, offset: 0, lastSeenMtime: 0, seenCallIds: [], reconciled: [], unknown: {} }; st[sid] = s; byFile.set(file, sid); }
       s = s!;
       if (s.startedAtMs == null) s.startedAtMs = startedAtFor(file, readFromStart ? r.events : []);
@@ -453,6 +462,11 @@ async function helperOnceImpl(cfg: Config, opts: HelperOpts): Promise<PassSummar
       retainOffloadedOutputs(r.events, { transcriptFile: file, harness });
       if (r.offset !== s.offset || r.events.length) spoolAppend(sid, { offset: r.offset, events: r.events, at: now.toISOString() });
       s.offset = r.offset;
+      if (!s.sourceFingerprint && r.offset) {
+        const fd = fs.openSync(file, "r"), bytes = Buffer.alloc(Math.min(256, r.offset));
+        try { fs.readSync(fd, bytes, 0, bytes.length, 0); } finally { fs.closeSync(fd); }
+        s.sourceFingerprint = { bytes: bytes.length, sha256: crypto.createHash("sha256").update(bytes).digest("hex") };
+      }
       sum.events_spooled += r.events.length;
       if (resumed) s.ended = false;
       sum.sessions++;
