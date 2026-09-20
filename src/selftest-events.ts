@@ -180,12 +180,12 @@ const claudeFile = (name: string) => path.join(tmp, `${name}.jsonl`);
   assert.deepEqual(ids(meta), ["call_e2:meta", "exec-9999:meta"], ids(meta).join(","));
   assert.equal(meta[0].call_id, "call_e2");
   assert.deepEqual(meta[0].payload, { call_id: "call_e2", meta_source: "exec_command_end", exit_code: 0, duration_ms: 5000, status: "completed" });
-  assert.equal(meta[1].payload.success, false); assert.match(String(meta[1].payload.error), /timed out/); assert.equal(meta[1].payload.duration_ms, 120000); assert.equal(meta[1].payload.mcp_tool, "get_app_state"); assert.equal(meta[1].payload.enclosing_call_id, "call_x2");
+  assert.equal(meta[1].payload.success, false); assert.match(String(meta[1].payload.error), /timed out/); assert.equal(meta[1].payload.duration_ms, 120000); assert.equal(meta[1].payload.mcp_tool, "get_app_state"); assert.equal(meta[1].payload.enclosing_call_id, undefined); assert.equal(meta[1].payload.invocation_correlation, "unknown");
   const m1 = r2.events.find((e) => e.producer_event_id === "call_m1:finished")!;
   assert.equal(m1.payload.duration_ms, 400); assert.equal(m1.payload.mcp_server, "ledger"); assert.equal(m1.payload.success, true); assert.equal(m1.payload.meta_source, "mcp_tool_call_end"); assert.equal(m1.payload.is_error, undefined);
   assert.equal(new Set(ids([...r1.events, ...r2.events])).size, r1.events.length + r2.events.length, "no id reused across the two reads");
   ok("exec_command_end matched to a call → exit_code/duration on tool.finished; after an earlier read → tool.result_meta <call_id>:meta");
-  ok("mcp_tool_call_end: same pattern; Err → success false with the error; exec- sub-call meta names its enclosing call");
+  ok("mcp_tool_call_end: same pattern; Err → success false with the error; MCP inner calls retain unknown correlation instead of guessing a wrapper");
 }
 
 // ---------- 5. split line across two writes; rotation ----------
