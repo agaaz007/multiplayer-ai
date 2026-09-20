@@ -1,4 +1,4 @@
-import { instrumentMcpTools } from "./usage.js";
+import { instrumentMcpTools, reportInjectedContext } from "./usage.js";
 import { startHandoff, updateHandoff } from "./continuity/handoffs.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -7,7 +7,7 @@ import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { loadConfig, loadAll, record, getById, discardDraft, proposeFinding, reviewFinding, type Config } from "./store.js";
-import { brief, search, similarFindings, renderFull, stats, objectScopeLine } from "./query.js";
+import { briefReport, search, similarFindings, renderFull, stats, objectScopeLine } from "./query.js";
 import { AnalyticalDateSchema, AnalysisScopeSchema, ChangeSchema, DecisionSchema, DefinitionSchema, FindingSchema, WindowInputSchema, TYPES, type LedgerObject } from "./schema.js";
 import { correctionImpact, objectVersion, resolveAccepted, verification } from './authority.js';
 import { investigation } from './investigation.js';
@@ -147,9 +147,13 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
     },
     async ({ days, tags }) => {
       const capture = reconcileSharedCapture(cfg);
-      const b = brief(cfg, { days, tags, guidePath: opts.guidePath });
+      const report = briefReport(cfg, { days, tags, guidePath: opts.guidePath });
       const continuity = await continuityBrief(cfg, { cwd: process.cwd(), includeOwn: false });
-      return {...text([b,continuity.text,...capture.warnings].filter(Boolean).join('\n\n')),structuredContent:{availability:continuity.availability === "unavailable" ? "unavailable" : "available",continuity_sections:continuity.sections}};
+      const body = [report.text,continuity.text,...capture.warnings].filter(Boolean).join('\n\n');
+      reportInjectedContext({record_ids:report.record_ids,bytes:Buffer.byteLength(body),dropped:report.drops.reduce((n,d)=>n+d.omitted,0)});
+      return {...text(body),structuredContent:{availability:continuity.availability === "unavailable" ? "unavailable" : "available",continuity_sections:continuity.sections,
+        // What this call delivered, so `ledger replay` and the caller agree on what arrived.
+        injected:{bytes:Buffer.byteLength(body),brief_bytes:report.bytes,budget_bytes:report.budget_bytes,record_ids:report.record_ids,drops:report.drops,truncated:report.truncated}}};
     }
   );
 
