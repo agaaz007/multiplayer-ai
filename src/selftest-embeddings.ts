@@ -1,3 +1,4 @@
+import { assertSafeSelftestDatabase, assertSelftestDatabaseMarker } from "./selftest-db-guard.js";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -21,6 +22,7 @@ import crypto from "node:crypto";
  */
 
 const DB = process.env.LEDGER_CONTINUITY_DB || "postgresql://localhost:5432/ledger_selftest";
+assertSafeSelftestDatabase(DB);
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ledger-emb-"));
 process.env.LEDGER_CONFIG_DIR = path.join(tmp, ".ledger");
 process.env.LEDGER_GIT_SYNC = "0";
@@ -87,6 +89,7 @@ const cfgE: Config = { ...base, continuity: { ...base.continuity!, embeddings: {
 const pool = getPool(base);
 
 // ---------- 1. schema ----------
+await assertSelftestDatabaseMarker(pool);
 await pool.query(`drop table if exists cont_event_embeddings, cont_embedding_failures, cont_state_updates, cont_record_links, cont_records, cont_notifications, cont_artifacts, cont_claims, cont_checkpoints, cont_events, cont_sessions, cont_threads cascade`);
 E.resetEmbedSchemaCache(pool);
 assert.equal(E.embeddingsConfigured(base), false);

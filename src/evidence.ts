@@ -42,11 +42,11 @@ export interface EvidenceCard {
 export function evidenceResult(
   message: string,
   objects: LedgerObject[],
-  options: { query?: string; references?: Reference[]; missing_ids?: string[] } = {},
+  options: { query?: string; references?: Reference[]; missing_ids?: string[]; candidate_count?: number } = {},
 ) {
   const unique = [...new Map(objects.map(o => [o.id, o])).values()];
   const fullRecords = Object.fromEntries(unique.map(o => [o.id, renderFull(o)]));
-  const receipt = readReceipt(options.references ? "referenced" : options.query !== undefined ? "found" : "opened", unique, options.query);
+  const receipt = readReceipt(options.references ? "referenced" : options.query !== undefined ? "found" : "opened", unique, options.query, options.candidate_count);
   const card: EvidenceCard = {
     schema: "ledger-evidence/v1",
     mode: options.references ? "referenced" : "retrieved",

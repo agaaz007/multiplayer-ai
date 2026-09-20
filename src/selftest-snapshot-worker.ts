@@ -1,0 +1,59 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import crypto from "node:crypto";
+import { execFileSync, spawn } from "node:child_process";
+import { queueSnapshot, snapshotQueueSize } from "./helper/snapshot-queue.js";
+import { spoolAppend, spoolCursor } from "./helper/spool.js";
+import { writeHeartbeat, readHeartbeat } from "./helper/heartbeat.js";
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ledger-snapshot-worker-"));
+process.env.LEDGER_CONFIG_DIR = path.join(tmp, "config");
+const root = path.join(tmp, "repo"), remote = path.join(tmp, "remote.git");
+const git = (args: string[]) => execFileSync("git", args, { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+const hash = (f: string) => crypto.createHash("sha256").update(fs.readFileSync(f)).digest("hex");
+try {
+  fs.mkdirSync(root); execFileSync("git", ["init", "--bare", "-q", remote]); git(["init", "-q"]); git(["config", "user.email", "fixture@example.test"]); git(["config", "user.name", "Fixture"]);
+  fs.writeFileSync(path.join(root, "code.txt"), "base"); fs.writeFileSync(path.join(root, ".env"), "SECRET=fixture"); git(["add", "."]); git(["commit", "-qm", "base"]); git(["remote", "add", "origin", remote]);
+  fs.writeFileSync(path.join(root, "code.txt"), "staged"); git(["add", "code.txt"]); fs.writeFileSync(path.join(root, "code.txt"), "working");
+  const realIndex = path.join(root, ".git", "index"), before = hash(realIndex);
+  const first = queueSnapshot(root, { ref: "refs/wip/test/source", push: true })!;
+  assert.equal(queueSnapshot(root, { ref: "refs/wip/test/source" }), null);
+  const result = await first; assert.equal(result.ok, true, result.error ?? "snapshot failed"); assert.equal(result.verified, true, result.error ?? "snapshot failed"); assert.equal(hash(realIndex), before);
+  assert.equal(git(["show", `${result.commit}:code.txt`]), "working");
+  assert.throws(() => execFileSync("git", ["--git-dir", remote, "show", `${result.commit}^:.env`], { stdio: "pipe" }));
+  assert.equal(execFileSync("git", ["--git-dir", remote, "rev-list", "--all", "--", ".env"], { encoding: "utf8" }).trim(), ""); assert.ok(!git(["ls-tree", "-r", "--name-only", result.commit!]).includes(".env"));
+  const restored = path.join(tmp, "restored"); git(["worktree", "add", "--detach", restored, result.commit!]); assert.equal(fs.readFileSync(path.join(restored, "code.txt"), "utf8"), "working"); assert.equal(fs.existsSync(path.join(restored, ".env")), false);
+  console.log("ok 1. verified remote snapshot restores exact worktree; real dirty index and deny rules preserved");
+  const dirs = fs.readdirSync(path.join(process.env.LEDGER_CONFIG_DIR!, "snapshot-indexes")); assert.equal(dirs.length, 1);
+  const indexDir = path.join(process.env.LEDGER_CONFIG_DIR!, "snapshot-indexes", dirs[0]); const meta1 = fs.readFileSync(path.join(indexDir, "identity.json"), "utf8");
+  const same = await queueSnapshot(root, { ref: "refs/wip/test/source", parent: result.commit, lastTree: result.tree })!; assert.equal(same.skipped, "unchanged");
+  fs.writeFileSync(path.join(root, "policy.txt"), "excluded next");
+  const policy = await queueSnapshot(root, { ref: "refs/wip/test/source", parent: result.commit, deny: ["policy.txt"] })!; assert.equal(policy.verified, true, policy.error ?? "snapshot failed"); assert.notEqual(fs.readFileSync(path.join(indexDir, "identity.json"), "utf8"), meta1); assert.ok(!git(["ls-tree", "-r", "--name-only", policy.commit!]).includes("policy.txt"));
+  git(["commit", "-qm", "staged base advances"]);
+  const priorMeta = fs.readFileSync(path.join(indexDir, "identity.json"), "utf8");
+  await queueSnapshot(root, { ref: "refs/wip/test/source", parent: policy.commit, push: false })!; assert.notEqual(fs.readFileSync(path.join(indexDir, "identity.json"), "utf8"), priorMeta);
+  console.log("ok 2. private index reused, invalidated on policy/base changes, and busy worktree coalesced");
+  fs.writeFileSync(path.join(remote, "hooks", "pre-receive"), "#!/bin/sh\nsleep 60\n", { mode: 0o755 });
+  fs.writeFileSync(path.join(root, "code.txt"), "slow push");
+  let beats = 0;
+  const heartbeat = setInterval(() => { beats++; spoolAppend("live", { offset: beats, at: new Date().toISOString(), events: [{ producer_event_id: `e${beats}`, kind: "assistant.message", payload: { text: "while push blocked" } }] }); writeHeartbeat({ pid: process.pid }); }, 30);
+  const stalled = await queueSnapshot(root, { ref: "refs/wip/test/source", parent: policy.commit }, 1200)!;
+  clearInterval(heartbeat); assert.equal(stalled.ok, false); assert.match(stalled.error!, /deadline/); assert.ok(beats >= 15, `heartbeat ticks ${beats}`); assert.equal(spoolCursor("live"), beats); assert.ok(readHeartbeat()?.updated_at); assert.equal(snapshotQueueSize(), 0);
+  assert.equal(stalled.verified, undefined);
+  console.log(`ok 3. 60-second stalled push killed at deadline; ${beats} durable capture/heartbeat ticks continued`);
+  const parentCode = `import {queueSnapshot} from ${JSON.stringify(new URL("./helper/snapshot-queue.js", import.meta.url).href)}; await queueSnapshot(${JSON.stringify(root)}, {ref:"refs/wip/test/source"}, 60000);`;
+  const parent = spawn(process.execPath, ["--input-type=module", "-e", parentCode], { env: process.env, stdio: "ignore" });
+  let childPid = 0;
+  for (let i = 0; i < 100; i++) {
+    await new Promise(r => setTimeout(r, 20));
+    try { const owner = JSON.parse(fs.readFileSync(path.join(indexDir, "worker.lock"), "utf8")); process.kill(owner.pid, 0); childPid = owner.pid; break; } catch { /* old lock or starting */ }
+  }
+  assert.ok(childPid > 0, "snapshot job started"); parent.kill("SIGKILL");
+  let dead = false;
+  for (let i = 0; i < 100; i++) { await new Promise(r => setTimeout(r, 20)); try { process.kill(childPid, 0); } catch (e: any) { if (e.code === "ESRCH") { dead = true; break; } } }
+  assert.ok(dead, "parent disconnect terminates detached supervisor/Git group");
+  fs.unlinkSync(path.join(remote, "hooks", "pre-receive"));
+  const recovered = await queueSnapshot(root, { ref: "refs/wip/test/source" })!; assert.equal(recovered.verified, true, recovered.error ?? "worker did not recover");
+  console.log("ok 4. killed helper parent terminates snapshot group; next worker safely reclaims private index");
+} finally { fs.rmSync(tmp, { recursive: true, force: true }); }

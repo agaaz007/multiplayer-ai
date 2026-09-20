@@ -55,7 +55,7 @@ const lifecycle = (objects: LedgerObject[]) => {
   return labels.length ? ` · Includes ${labels.join(", ")}` : "";
 };
 
-export function readReceipt(action: "found" | "opened" | "referenced", objects: LedgerObject[], query?: string): LedgerReceipt {
+export function readReceipt(action: "found" | "opened" | "referenced", objects: LedgerObject[], query?: string, candidateCount = 0): LedgerReceipt {
   const records = unique(objects);
   const n = records.length;
   let message: string;
@@ -65,7 +65,8 @@ export function readReceipt(action: "found" | "opened" | "referenced", objects: 
   } else if (action === "referenced") {
     message = `Referenced ${n} record${n === 1 ? "" : "s"} from ${owners(records)} · Usage reported by agent`;
   } else {
-    message = n ? `Found ${n} record${n === 1 ? "" : "s"} from ${owners(records)}` : "No matching records";
+    message = n ? `Found ${n} record${n === 1 ? "" : "s"} from ${owners(records)}` : candidateCount ? "No applicable records" : "No matching records";
+    if (candidateCount) message += ` · ${candidateCount} scope-unknown candidate${candidateCount === 1 ? "" : "s"}; validate before reuse`;
     if (query) message += ` · “${compact(query, 70)}”`;
   }
   return withDisplay({ schema: "ledger-receipt/v1", action, message: `💡 Ledger · ${message}${lifecycle(records)}`, records: refs(records) });

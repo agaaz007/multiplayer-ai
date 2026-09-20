@@ -1,3 +1,4 @@
+import { assertSafeSelftestDatabase, assertSelftestDatabaseMarker } from "./selftest-db-guard.js";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -29,6 +30,7 @@ import path from "node:path";
 // the MCP tools resolve the caller's session from these; unset them so provenance assertions do not depend on the shell running the test
 for (const k of ["CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID", "CODEX_THREAD_ID"]) delete process.env[k];
 const DB = process.env.LEDGER_CONTINUITY_DB || "postgresql://localhost:5432/ledger_selftest_recordpack";
+assertSafeSelftestDatabase(DB);
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ledger-recpack-"));
 process.env.LEDGER_CONFIG_DIR = path.join(tmp, ".ledger");
 process.env.LEDGER_GIT_SYNC = "0";
@@ -64,9 +66,11 @@ const ledgerDir = path.join(tmp, "ledger");
 initLedger(ledgerDir, "test");
 const cfg: Config = { ledger_dir: ledgerDir, git_sync: false, author: "agaaz", continuity: { database_url: DB, machine: "agaaz-mac" } };
 const pool = getPool(cfg);
+await assertSelftestDatabaseMarker(pool);
 await pool.query(`drop table if exists cont_session_bindings, cont_state_updates, cont_record_links, cont_records, cont_notifications, cont_artifacts, cont_claims, cont_checkpoints, cont_events, cont_sessions, cont_threads cascade`);
 await migrate(pool);
-assert.equal((await tableList(pool)).length, 11, "all eleven cont_* tables present (cont_session_bindings added 2026-09-17)");
+const migratedTables = await tableList(pool);
+for (const table of ["cont_sessions","cont_threads","cont_events","cont_records","cont_session_bindings","cont_binding_operations","cont_usage_invocations","cont_usage_storage_ops","cont_handoff_attempts"]) assert.ok(migratedTables.includes(table), `${table} exists after additive migration`);
 ok(`schema reset on ${DB.replace(/\/\/[^@]*@/, "//…@")}`);
 
 // ---------- fixture: agaaz (Claude Code) then rachit (Codex) on one repo ----------
@@ -197,13 +201,13 @@ for (const t of [lean.text, pack.text]) {
   assert.ok(!t.includes("## Evidence across sessions") && !t.includes("### Session summary") && !t.includes("### Files touched") && !t.includes("## Unassigned spans") && !t.includes("## First turn contract"), "evidence-detail sections absent");
   assert.ok(!/ · \d+ · \d\d:\d\d · (instruction\.added|assistant\.message|tool\.requested|tool\.finished|file\.changed|compaction) · /.test(t), "no evidence line is inlined");
   assert.ok(!t.includes(codexSummary) && !t.includes("Attribution: compare Mixpanel") && !t.includes("Draft headline") && !t.includes("FATAL"), "no event text (instructions, summary, error output) is inlined");
-  assert.ok(approxTokens(t) < 1200 && 1200 <= LEAN_TARGET_TOKENS, `lean pack under 1200 tokens at level 0: ${approxTokens(t)}`);
+  assert.ok(approxTokens(t) <= LEAN_TARGET_TOKENS, `lean pack including exact snapshot proof and safe orphan bootstrap stays within ${LEAN_TARGET_TOKENS} tokens at level 0: ${approxTokens(t)}`);
   assert.ok(!lean.omitted.some((o) => /for budget/.test(o)), `no budget shrink was needed: ${lean.omitted.join(" | ")}`);
   assert.ok(t.length < pack.text.length / 1.5, `lean is much smaller than evidence: ${t.length} vs ${pack.text.length}`);
   assert.deepEqual(lean.evidence_summary, { total: 13, shown: [], omitted: { count: 13, fetch: [`ledger_events(session_id: "${sidA}", after_seq: 0, before_seq: 11)`, `ledger_events(session_id: "${sidR}", after_seq: 0, before_seq: 8)`] } }, "lean shows no evidence and names the per-span fetches");
   // honesty, compact: sessions on one line, the snapshot, the decision rule, no full contract
   assert.ok(t.includes(`Honesty: 2 contributing sessions: ${R8} (rachit, Codex, last seen 50m ago); ${A8} (agaaz, Claude Code, last seen 2h ago, ended).`), t.split("\n")[4]);
-  assert.ok(t.includes(`Code saved through ${fmt(T(69))} (remote-verified; session ${R8}).`) && t.includes("Act only on [in force] Ledger objects and [accepted by <person>] record decisions"), "snapshot and decision rule in the honesty block");
+  assert.ok(t.includes(`Snapshot verified at ${fmt(T(69))} (remote-verified; session ${R8}; checkpoint ${cp.id.slice(0,8)}; commit ${WIP_COMMIT.slice(0,12)}).`) && t.includes("Act only on [in force] Ledger objects and [accepted by <person>] record decisions"), "snapshot and decision rule in the honesty block");
   // state: the confirmed decision first, the ≤3 proposed items per kind in full with the acceptance labels
   assert.ok(t.includes(`- [confirmed by agaaz; how it was accepted was not recorded] Use ClickHouse paywall_resolved`) && t.includes(`- [PROPOSED] The Mixpanel gap comes from the 7-day attribution window, not distinct_id (by rachit, ${TODAY}; evidence: seq 4 of ${R8})`));
   assert.equal(LEAN_PROPOSED_FULL, 3);
@@ -217,7 +221,7 @@ for (const t of [lean.text, pack.text]) {
   assert.ok(t.includes(`## Changed since your last visit\nNo viewer given, so no delta. Totals since creation: 13 content events in 2 sessions, 5 state updates (4 proposed, 1 confirmed), 1 pending operation, 2 files touched.\n- files: src/ingest/mixpanel.ts, queries/attribution.sql`), t.slice(t.indexOf("## Changed since"), t.indexOf("## Bootstrap")));
   assert.equal(lean.changed_since?.viewer, null);
   // bootstrap: the existing block
-  assert.ok(t.includes(`## Bootstrap\nsnapshot from session ${R8} (rachit, Codex)\n\`\`\`\ngit fetch origin ${WIP_REF}:${WIP_REF}\n`));
+  assert.ok(t.includes(`## Bootstrap\nsnapshot from session ${R8}; checkpoint ${cp.id.slice(0,8)}\n\`\`\`\ngit fetch origin ${WIP_REF}:${WIP_REF}\n`));
   // drill down: one exact ledger_events call per span, the last error, the compaction summary, unassigned, search; nothing inline
   const drill = t.slice(t.indexOf("## Drill down"), t.indexOf("## Omitted"));
   assert.ok(drill.includes(`- ledger_events(session_id: "${sidA}", after_seq: 0, limit: 10)  · agaaz/Claude Code\n- ledger_events(session_id: "${sidR}", after_seq: 0, limit: 7)  · rachit/Codex\n`), drill);
@@ -316,7 +320,7 @@ for (const t of [lean.text, pack.text]) {
   assert.ok(pack.omitted.some((o) => o.startsWith("4 evidence events omitted") && o.includes(`after_seq: 0, before_seq: 8`)), `omitted names the gap: ${pack.omitted.join(" | ")}`);
   assert.deepEqual(pack.contributing_sessions.map((s) => [s.session_id, s.author, s.harness, s.ended, s.spans]), [[sidR, "rachit", "codex", false, 1], [sidA, "agaaz", "claude", true, 1]], "contributing sessions, most recent first");
   assert.ok(t.includes(`- ${R8} · rachit · Codex · last seen ${fmt(T(70))} (not marked ended) · 1 span · thread ${thread.id.slice(0, 8)}`) && t.includes(`- ${A8} · agaaz · Claude Code · last seen ${fmt(T(15))} (ended) · 1 span`), "honesty lists sessions with harness, last seen, ended");
-  assert.ok(t.includes(`Code saved through ${fmt(T(69))} (remote-verified; session ${R8}).`), "latest verified snapshot named");
+  assert.ok(t.includes(`Snapshot verified at ${fmt(T(69))} (remote-verified; session ${R8}; checkpoint ${cp.id.slice(0,8)}; commit ${WIP_COMMIT.slice(0,12)}).`), "latest verified snapshot named");
   assert.deepEqual(pack.sources, { instructions: 2, assistant_messages: 3, tool_calls: 5, compaction_summaries: 1, sessions: 2, spans: 2, proposed_updates: 4, confirmed_updates: 1 });
   assert.ok(t.includes("Sources: 2 instructions, 3 assistant messages, 5 tool calls, 1 compaction summaries across 2 sessions in 2 spans; 4 proposed and 1 confirmed state updates."), "sources line");
   assert.ok(t.includes("The claim is advisory.") && t.includes("Proposed items are unconfirmed") && t.includes("Narrative-free: everything below is machine-assembled from evidence"), "standard honesty lines");
@@ -386,12 +390,14 @@ for (const t of [lean.text, pack.text]) {
 
 // ---------- 7. bootstrap for the repo record; non-code for the other ----------
 {
-  assert.deepEqual(pack.bootstrap, [
-    `git fetch origin ${WIP_REF}:${WIP_REF}`,
-    `git worktree add --detach ../attribution-investigation ${WIP_COMMIT}`,
-    `# then, deliberately: git -C ../attribution-investigation rebase origin/master   (or merge; your call, not automatic)`,
-  ]);
-  assert.ok(pack.text.includes(`## Bootstrap\nsnapshot from session ${R8} (rachit, Codex)\n\`\`\`\ngit fetch origin ${WIP_REF}:${WIP_REF}\n`), "bootstrap block names the snapshot's session");
+  assert.equal(pack.snapshot?.commit,WIP_COMMIT);
+  assert.equal(pack.snapshot?.checkpoint_id,cp.id);
+  assert.equal(pack.bootstrap[0],`git fetch origin ${WIP_REF}:${WIP_REF}`);
+  assert.ok(pack.bootstrap.includes(`git worktree add --detach ../attribution-investigation ${WIP_COMMIT}`));
+  assert.ok(pack.bootstrap.some(line=>line.includes('Original source base:')));
+  assert.ok(pack.bootstrap.some(line=>line.includes('Do not apply a full-tree diff')));
+  assert.ok(!pack.bootstrap.some(line=>/^git .*\b(rebase|merge)\b/.test(line)));
+  assert.ok(pack.text.includes(`## Bootstrap\nsnapshot from session ${R8}; checkpoint ${cp.id.slice(0,8)}\n\`\`\`\ngit fetch origin ${WIP_REF}:${WIP_REF}\n`), "bootstrap block names the exact checkpoint's session");
   assert.ok(pack.text.includes("2. Check out the snapshot into a fresh worktree"), "code contract");
   const copyLean = await buildRecordPack(cfg, pool, recCopy.id, { mode: "inspect", author: "agaaz", now: T(120) });
   assert.ok(copyLean.text.includes("## Bootstrap\nnon-code record; no worktree") && copyLean.text.includes("Non-code record: no code snapshot applies.") && !copyLean.text.includes("First turn contract"), "lean non-code bootstrap and honesty");
@@ -405,9 +411,9 @@ for (const t of [lean.text, pack.text]) {
   await S.updateSession(pool, sidR, { wip_ref: null, wip_commit: null });
   const viaHead = await buildRecordPack(cfg, pool, recAttr.id, { mode: "inspect", author: "agaaz", now: T(120) });
   assert.equal(viaHead.bootstrap[0], `git fetch origin ${WIP_REF}:${WIP_REF}`);
-  assert.ok(viaHead.text.includes(`snapshot from thread ${thread.id.slice(0, 8)} head checkpoint`), "falls back to the thread head");
+  assert.ok(viaHead.text.includes(`snapshot from session ${R8}; checkpoint ${cp.id.slice(0,8)}`), "exact checkpoint remains authoritative when the mutable session fields disappear");
   await S.updateSession(pool, sidR, { wip_ref: WIP_REF, wip_commit: WIP_COMMIT });
-  ok("bootstrap: the repo record prints fetch + worktree commands for rachit's wip ref (session first, thread head as fallback); the non-code record says 'non-code record; no worktree' and adapts the contract");
+  ok("bootstrap: the repo record restores the exact remotely verified checkpoint into an isolated worktree with safe porting guidance; the non-code record has no worktree");
 }
 
 // ---------- 8. mode continue acquires the thread claim; inspect does not ----------
@@ -437,7 +443,7 @@ for (const t of [lean.text, pack.text]) {
   const tight = await buildRecordPack(cfg, pool, recAttr.id, { mode: "inspect", author: "agaaz", now: T(120), budgetTokens: 1500, detail: "evidence" });
   assert.ok(approxTokens(pack.text) <= 6000, `default pack within 6000 tokens: ${approxTokens(pack.text)}`);
   assert.ok(tight.text.length < pack.text.length, `tight pack is smaller: ${tight.text.length} < ${pack.text.length}`);
-  for (const must of ["## Honesty", "Sources: 2 instructions", `Code saved through ${fmt(T(69))}`, "### Decisions (1)", "- [confirmed by agaaz; how it was accepted was not recorded] Use ClickHouse paywall_resolved", "## Pending / unknown operations (1)", "seq 7 Bash: psql analytics", "## Bootstrap", `git fetch origin ${WIP_REF}:${WIP_REF}`, "## First turn contract", `NOT IN FORCE (1): ${dec1.id} → ${dec2.id}`, "## Omitted for budget or unavailable"]) {
+  for (const must of ["## Honesty", "Sources: 2 instructions", `Snapshot verified at ${fmt(T(69))}`, "### Decisions (1)", "- [confirmed by agaaz; how it was accepted was not recorded] Use ClickHouse paywall_resolved", "## Pending / unknown operations (1)", "seq 7 Bash: psql analytics", "## Bootstrap", `git fetch origin ${WIP_REF}:${WIP_REF}`, "## First turn contract", `NOT IN FORCE (1): ${dec1.id} → ${dec2.id}`, "## Omitted for budget or unavailable"]) {
     assert.ok(tight.text.includes(must), `tight pack keeps: ${must}`);
   }
   assert.ok(pack.text.includes(codexSummary) && !tight.text.includes(codexSummary), "the summary text is dropped under budget");

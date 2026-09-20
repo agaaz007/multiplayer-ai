@@ -153,7 +153,7 @@ const base = {
     .optional()
     .describe("id of the object this replaces; that object is marked superseded"),
   body: z.string().default("").describe("Free markdown. Keep it short; put facts in fields."),
-  analysis_scope: AnalysisScopeSchema.optional(),
+  analysis_scope: AnalysisScopeSchema.partial().optional().describe("Drafts may retain incomplete scope. Stable scoped records require all applicability facets; missing scope never establishes authority."),
   aliases: z.array(scopeText).optional().describe("Known metric or question aliases; not a scope grant."),
   dependencies: z.array(DependencySchema).optional().describe("Exact immutable versions used by this result; legacy names alone are unresolved lineage."),
   evidence_refs: z.array(EvidenceReferenceSchema).optional(),

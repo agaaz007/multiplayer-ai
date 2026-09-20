@@ -1,0 +1,70 @@
+import assert from "node:assert/strict";
+import crypto from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { spoolAppend, spoolPending } from "./helper/spool.js";
+import { helperOnce } from "./helper/daemon.js";
+import { execFileSync } from "node:child_process";
+import { drainUsageWrites } from "./usage.js";
+import { assertSafeSelftestDatabase, assertSelftestDatabaseMarker } from "./selftest-db-guard.js";
+import { getPool, migrate, closePools } from "./continuity/db.js";
+import { appendEvents, upsertSession, sessionEvents, putArtifact, createThread, claimThread, updateSession, publishCheckpoint, headCheckpoint } from "./continuity/store.js";
+import type { NormEvent } from "./continuity/events.js";
+const url = process.env.LEDGER_CONTINUITY_DB ?? ""; assertSafeSelftestDatabase(url);
+const pool = getPool({ author: "fixture", continuity: { database_url: url } } as any);
+try {
+  await assertSelftestDatabaseMarker(pool); await migrate(pool);
+  const id = `capture-store-${crypto.randomUUID()}`; await upsertSession(pool, { id, author: "fixture", harness: "codex" });
+  const event = (n: number): NormEvent => ({ producer_event_id: `event-${n}`, kind: "assistant.message", payload: { n } });
+  const results = await Promise.all(Array.from({ length: 20 }, (_, i) => appendEvents(pool, id, [event(i * 2), event(i * 2), event(i * 2 + 1), event(0)], null, null)));
+  assert.equal(results.reduce((n, r) => n + r.inserted, 0), 40);
+  let rows = await sessionEvents(pool, id); assert.equal(rows.length, 40); assert.deepEqual(rows.map(r => r.seq), Array.from({ length: 40 }, (_, i) => i + 1)); assert.equal(new Set(rows.map(r => r.producer_event_id)).size, 40);
+  const retry = await appendEvents(pool, id, Array.from({ length: 40 }, (_, i) => event(i)), null, null); assert.equal(retry.inserted, 0); assert.equal(retry.lastSeq, 40);
+  console.log("ok 1. 20 concurrent batches dedupe duplicates in/among batches, retaining all fresh neighbors and consecutive sequences");
+  const bad = event(42); (bad as any).kind = null;
+  await assert.rejects(appendEvents(pool, id, [event(40), bad, event(41)], null, null));
+  rows = await sessionEvents(pool, id); assert.equal(rows.length, 40);
+  const recovery = await appendEvents(pool, id, [event(40), event(41), event(42)], null, null); assert.equal(recovery.lastSeq, 43); assert.equal(recovery.inserted, 3);
+  console.log("ok 2. failed bulk statement rolls back every event and sequence; exact retry succeeds");
+  const bytes = Buffer.from(`fixture artifact ${id}`), sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
+  const artifacts = await Promise.all(Array.from({ length: 8 }, () => putArtifact(pool, { sha256, kind: "tool_output", bytes, session_id: id })));
+  assert.equal(new Set(artifacts.map(a => a.id)).size, 1); assert.equal((await pool.query("select inline from cont_artifacts where sha256=$1", [sha256])).rows[0].inline.toString(), bytes.toString());
+  console.log("ok 3. concurrent content-addressed artifact inserts converge on one exact retained body");
+  const thread = await createThread(pool, { repo: "fixture://capture", title: "snapshot order", created_by: "fixture" });
+  await updateSession(pool, id, { thread_id: thread.id });
+  const claim = await claimThread(pool, thread.id, id, "fixture"); assert.equal(claim.ok, true); if (!claim.ok) throw new Error("fixture claim failed");
+  const make = (seq: number, order: number) => publishCheckpoint(pool, { thread_id: thread.id, session_id: id, generation: claim.generation, kind: "snapshot", through_event_seq: seq, structured_state: { snapshot_dispatch_order: order } });
+  const newer = await make(43, 200); assert.equal(newer.advanced, true);
+  const older = await make(42, 100); assert.equal(older.advanced, false);
+  const sameWatermarkOldJob = await make(43, 199); assert.equal(sameWatermarkOldJob.advanced, false);
+  assert.equal((await headCheckpoint(pool, thread.id))!.id, newer.id);
+  assert.equal((await make(43, 201)).advanced, true);
+  console.log("ok 4. delayed same-generation publication cannot regress event watermark or newer snapshot dispatch");
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "ledger-spool-recovery-")); const savedConfig = process.env.LEDGER_CONFIG_DIR; process.env.LEDGER_CONFIG_DIR = temp;
+  try {
+    const missing = path.join(temp, "deleted-transcript.jsonl"), recoveredId = `recovery-${crypto.randomUUID()}`;
+    spoolAppend(recoveredId, { offset: 500, at: new Date().toISOString(), events: [event(999)], source: { file: missing, harness: "codex", author: "fixture", cwd: temp, root: null, lastSeenMtime: Date.now() } });
+    const summary = await helperOnce({ author: "fixture", continuity: { database_url: url, classify: false } } as any, { roots: { claude: path.join(temp, "absent"), codex: path.join(temp, "absent") }, pool });
+    assert.equal(summary.events_uploaded, 1, summary.errors.join(";")); assert.equal((await sessionEvents(pool, recoveredId)).length, 1); assert.equal(spoolPending(recoveredId).batches.length, 0);
+    console.log("ok 5. missing helper state and deleted source transcript recover/upload pending spool from retained metadata");
+    const a = path.join(temp, "repo-a"), b = path.join(temp, "repo-b"), transcripts = path.join(temp, "transcripts"); fs.mkdirSync(transcripts);
+    for (const dir of [a,b]) {
+      fs.mkdirSync(dir); execFileSync("git", ["init", "-q", dir]);
+      const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "pipe", env: { ...process.env, GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@example.test", GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "fixture@example.test" } });
+      fs.writeFileSync(path.join(dir, "code.txt"), "base"); git("add", "."); git("commit", "-qm", "base"); fs.writeFileSync(path.join(dir, "code.txt"), "dirty");
+    }
+    const movingId = `moving-${crypto.randomUUID()}`, transcript = path.join(transcripts, "rollout-moving.jsonl");
+    const write = (rows: unknown[]) => fs.appendFileSync(transcript, rows.map(row => JSON.stringify(row)).join("\n") + "\n");
+    write([{ type: "session_meta", payload: { id: movingId, cwd: a } }, { type: "event_msg", payload: { type: "user_message", message: "Continue code in A" } }]);
+    const movingCfg: any = { author: "fixture", continuity: { database_url: url, classify: false, repos: [a,b] } };
+    const pass = () => helperOnce(movingCfg, { roots: { claude: path.join(temp, "absent"), codex: transcripts }, pool, push: false });
+    await pass();
+    const original = (await pool.query("select thread_id from cont_sessions where id=$1", [movingId])).rows[0].thread_id;
+    assert.ok(original); const originalHead = await headCheckpoint(pool, original); assert.ok(originalHead);
+    write([{ type: "turn_context", payload: { cwd: b } }, { type: "event_msg", payload: { type: "user_message", message: "B should never be labelled A" } }]);
+    const mismatch = await pass(); assert.ok(mismatch.errors.some(e => /repository changed/.test(e))); assert.equal((await headCheckpoint(pool, original))!.id, originalHead.id);
+    const bEvents = (await sessionEvents(pool, movingId)).filter(e => String(e.payload.text).includes("B should never")); assert.equal(bEvents.length, 1); assert.equal(bEvents[0].thread_id, null);
+    console.log("ok 6. both-allowed A→B preserves A checkpoint and leaves B evidence unassigned pending explicit rebind");
+  } finally { await drainUsageWrites(); if (savedConfig === undefined) delete process.env.LEDGER_CONFIG_DIR; else process.env.LEDGER_CONFIG_DIR = savedConfig; fs.rmSync(temp, { recursive: true, force: true }); }
+} finally { await closePools(); }

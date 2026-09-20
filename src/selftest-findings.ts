@@ -60,8 +60,10 @@ try {
   assert.equal(draft.fields.result, "12.4% (n=41,200)");
   assert.equal((draft.fields.inputs as any[])[0].population, "Android IN users shown subscription_paywall");
   assert.equal((draft.fields.inputs as any[])[0].source, "mcp__mixpanel__query");
-  assert.deepEqual(draft.fields.definitions_used, ["trial_start_cvr"], "metric matching a definition fills definitions_used");
-  assert.deepEqual(draft.fields.caveats, ["single pull"]);
+  assert.deepEqual(draft.fields.definitions_used, [], "an unscoped name match cannot establish definition lineage");
+  assert.deepEqual(draft.fields.dependencies, []);
+  assert.match(String(draft.fields.caveats), /scope is missing or incomplete/);
+  assert.ok((draft.fields.caveats as string[]).includes("single pull"));
   assert.deepEqual(draft.fields.capture_coverage, [{ session_id: sid, evidence_ids: [qA] }]);
   assert.equal(draft.fields.capture_method, "query_grain_proposal");
   assert.match(String(draft.fields.capture_reason), new RegExp(`${qA}.*${RID}`));
@@ -133,6 +135,47 @@ try {
   assert.deepEqual(get(acc3.id!).fields.data_window, { from: "2026-09-10", to: "2026-09-16" });
   assert.equal(get(acc3.id!).fields.window, "last 7 days", "the stated window travels with the accepted finding");
 
+  // Fully scoped proposals resolve exact versions, preserve scope through acceptance, and refuse ambiguity.
+  const scoped = {product:'fixture',dataset:'events',environment:'test',metric:'scoped_rate',population:'eligible users',grain:'user',attribution_rule:'first exposure'};
+  const definition = record(cfg,{type:'definition',fields:{title:'Scoped conversion definition',metric:scoped.metric,formula:'trials / eligible users',source:'fixture',owner:'agaaz',valid_from:'2026-08-01',analysis_scope:scoped}});
+  const scopedInput = {population:scoped.population,metric:scoped.metric,window:'2026-08-20..2026-08-31',result:'12%',query_ref:qA,investigation_record_id:RID,analysis_scope:scoped};
+  const scopedProposal = proposeFinding(cfg,scopedInput,{session:sid});
+  const pins = [{relation:'uses-definition',id:definition.id,version:definition.content_version}];
+  assert.deepEqual(get(scopedProposal.id).fields.analysis_scope,scoped);
+  assert.deepEqual(get(scopedProposal.id).fields.dependencies,pins);
+  const scopedAccepted = reviewFinding(cfg,scopedProposal.id,'accept',{actor:cfg.author});
+  assert.deepEqual(get(scopedAccepted.id!).fields.analysis_scope,scoped);
+  assert.deepEqual(get(scopedAccepted.id!).fields.dependencies,pins);
+  assert.throws(()=>proposeFinding(cfg,{...scopedInput,population:'different'},{session:sid}),/population must match/);
+  assert.throws(()=>proposeFinding(cfg,{...scopedInput,analysis_scope:{...scoped,window:{from:'2026-08-01',to:'2026-08-03'}}},{session:sid}),/window must match/);
+  const partial = proposeFinding(cfg,{...scopedInput,analysis_scope:{product:'fixture',metric:scoped.metric}},{session:sid});
+  assert.deepEqual(get(partial.id).fields.analysis_scope,{product:'fixture',metric:scoped.metric});
+  assert.deepEqual(get(partial.id).fields.dependencies,[]);
+  assert.throws(()=>reviewFinding(cfg,partial.id,'accept',{actor:cfg.author}),/requires complete analysis_scope/);
+  assert.equal(get(partial.id).status,'draft');
+  // Same metric and scope in another independent accepted lineage is ambiguous, even if newer.
+  record(cfg,{type:'definition',fields:{title:'Competing scoped definition',metric:scoped.metric,formula:'other denominator',source:'fixture',owner:'agaaz',valid_from:'2026-08-01',analysis_scope:scoped}});
+  const ambiguous = proposeFinding(cfg,scopedInput,{session:sid});
+  assert.deepEqual(get(ambiguous.id).fields.dependencies,[]);
+  assert.match(String(get(ambiguous.id).fields.caveats),/Multiple applicable definition claims/);
+  assert.throws(()=>reviewFinding(cfg,ambiguous.id,'accept',{actor:cfg.author}),/exact uses-definition/);
+  // Explicitly named consulted definition is pinned; an unrelated product cannot win.
+  const explicit = proposeFinding(cfg,{...scopedInput,definition_ids:[definition.id]},{session:sid});
+  assert.deepEqual(get(explicit.id).fields.dependencies,pins);
+  assert.throws(()=>proposeFinding(cfg,{...scopedInput,definition_ids:['missing-definition']},{session:sid}),/definition not found/);
+
+  // Enrichment is a new scoped finding with an exact source pin, never a scope-changing replacement.
+  const enrichmentScope = {...scoped,metric:'trial_start_cvr',population:String(accepted.fields.population)};
+  const enrichmentDef = record(cfg,{type:'definition',fields:{title:'Validated legacy conversion scope',metric:enrichmentScope.metric,formula:'trial starts / eligible users',source:'fixture',owner:'agaaz',valid_from:'2026-08-01',analysis_scope:enrichmentScope}});
+  const {acceptance:_oldAcceptance,...legacyFields} = accepted.fields;
+  const enrichmentFields = {...legacyFields,title:'Validated legacy finding with explicit scope',analysis_scope:enrichmentScope,
+    dependencies:[{relation:'derived-from',id:accepted.id,version:objectVersion(accepted)},{relation:'uses-definition',id:enrichmentDef.id,version:enrichmentDef.content_version}]};
+  const enriched = record(cfg,{type:'finding',fields:enrichmentFields});
+  assert.notEqual(enriched.id,accepted.id);
+  assert.equal(objectVersion(get(accepted.id)),objectVersion(accepted));
+  assert.equal(get(accepted.id).superseded_by,undefined);
+  assert.throws(()=>record(cfg,{type:'finding',fields:{...enrichmentFields,supersedes:accepted.id}}),/preserve analytical scope/);
+
   // ---------- MCP surface: propose + review, capture_ack shapes, refusals ----------
   const server = createMcpServer(cfg);
   const client = new Client({ name: "findings-test", version: "1" });
@@ -140,6 +183,16 @@ try {
   const names = new Set((await client.listTools()).tools.map((t) => t.name));
   for (const n of ["ledger_propose_finding", "ledger_review_finding"]) assert.ok(names.has(n), `${n} is exposed without a continuity database`);
   for (const n of ["ledger_investigations", "ledger_investigation_bind", "ledger_investigation_new"]) assert.ok(!names.has(n), `${n} needs the continuity database`);
+
+  const mcpScoped = await client.callTool({name:'ledger_propose_finding',arguments:{...scopedInput,definition_ids:[definition.id],session_id:sid}}) as any;
+  assert.ok(!mcpScoped.isError,JSON.stringify(mcpScoped));
+  const mcpScopedDraft = get(mcpScoped.structuredContent.receipt.record_id);
+  assert.deepEqual(mcpScopedDraft.fields.analysis_scope,scoped,'MCP must carry applicability through the proposal adapter');
+  assert.deepEqual(mcpScopedDraft.fields.dependencies,pins,'MCP must carry exact definition selection');
+  const mcpScopedAccepted = await client.callTool({name:'ledger_review_finding',arguments:{id:mcpScopedDraft.id,action:'accept'}}) as any;
+  assert.ok(!mcpScopedAccepted.isError,JSON.stringify(mcpScopedAccepted));
+  assert.deepEqual(get(mcpScopedAccepted.structuredContent.review.id).fields.analysis_scope,scoped);
+  assert.deepEqual(get(mcpScopedAccepted.structuredContent.review.id).fields.dependencies,pins);
 
   // a fourth call for the MCP round trip
   handleHook("PostToolUse", { session_id: sid, tool_name: "mcp__mixpanel__query", tool_use_id: "callD", tool_input: { sql: "select 'D'" }, tool_response: { result: [] } });
@@ -185,7 +238,7 @@ try {
   assert.equal(discarded.structuredContent.review.stance, "discarded");
   assert.equal(discarded.structuredContent.capture_ack.status, "dismissed");
   assert.equal(get(p5.id).fields.stance, "discarded");
-  assert.equal(search(cfg, "web users dau", { includeSuperseded: true }).find((h) => h.id === p5.id)?.authority_label, "discarded cut");
+  assert.equal(search(cfg, "web users dau", { includeSuperseded: true, limit: 100 }).find((h) => h.id === p5.id)?.authority_label, "discarded cut");
 
   await client.close();
   console.log("findings: propose (mapped fields, PROPOSED, query_ref, investigation, pending_review ack), accept (new stable by the person, supersedes + acceptance, draft superseded), refusals, discard (reason required, discarded cut kept and labelled), drafts listing and MCP round trip passed");

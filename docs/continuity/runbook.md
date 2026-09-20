@@ -196,3 +196,76 @@ Neon reports `vector` 0.8.6 available; `migrate` installs it on first run. Chang
 - One helper per machine tails every active transcript under `~/.claude/projects` and `~/.codex/sessions`; scope with `continuity.repos` if needed.
 - Codex `exec` wrappers with dynamically built commands are stored as their JS source, not as shell.
 - The Neon password was pasted into this chat and is therefore in this session's transcript (redacted in the uploaded copy, but present in the local file). Rotate it after the pilot.
+
+## Reliability release: September 2026
+
+The implementation and acceptance criteria are in [the production-readiness plan](production-readiness-2026-09-20.md). Passing local tests is not completion of the two-machine canary or proof of positive ROI.
+
+### Run tests without touching the team database
+
+Install a local PostgreSQL distribution providing `initdb`, `pg_ctl`, `pg_dump`, and `pg_restore`; set `LEDGER_TEST_PG_BIN` if its binaries are not on PATH. The complete suite also needs pgvector installed in that PostgreSQL distribution; an unavailable optional extension is not an application failure, but the embeddings suite cannot be marked passed without it. Run:
+
+```sh
+npm run test:all
+npm run test:production
+node scripts/test-isolated.mjs selftest-continuity
+```
+
+The runner creates a fresh loopback-only cluster on a random port, a randomly named database, and a marker table; it stops and deletes only its own cluster afterward. Drop-capable tests refuse an unmarked or nonlocal database. Pure tests do not inherit a continuity database. Do not bypass the guard by pointing tests at the team instance. `--no-build` reuses an existing compiled build; use it only after a successful build of the same source.
+
+### Install and canary
+
+1. Preserve the current versioned runtime, configuration, pending spool files, and source transcripts. Do not install an active development worktree as the service runtime.
+2. Apply the candidate's additive migration with `ledger continuity migrate`. Old knowledge stays in Git. New usage/handoff tables and binding operation keys live in Postgres. Review migration errors before continuing; never clear tables to resolve them.
+3. Install the same candidate through the existing versioned-runtime deployment flow on Agaaz's machine first. Restart MCP processes and the helper so they actually load the candidate. Verify the helper's reported executable/build and hook trust. A package on disk does not establish the running version.
+4. Exercise a real scoped lookup, bind, ordinary captured tool call, and snapshot on an allowed test repository. Inspect local and remote watermarks. Roll to Rachit's permitted scope after the initial checks pass; do not widen repository permissions.
+5. Set `LEDGER_TRAFFIC_CLASS=ordinary` in each ordinary runtime's environment, and `evaluation` or `audit` in evaluation/audit runtimes. Unclassified traffic stays `unknown`. Set `LEDGER_BUILD_COMMIT` to the candidate commit for usage attribution.
+6. Observe both machines for 72 hours and record sample sizes, offline/unknown periods, queue growth, artifacts, and verified snapshots. Complete one analysis and one code handoff in each direction using actual work. Keep the release in pilot if any gate is failed or unknown.
+
+### Inspect health and consumption
+
+```sh
+ledger helper status
+ledger continuity health
+ledger usage health
+ledger usage flush
+ledger usage report --from 2026-09-21T00:00:00Z --to 2026-09-28T00:00:00Z
+ledger handoff report --from 2026-09-21T00:00:00Z --to 2026-09-28T00:00:00Z
+```
+
+`usage health` reports disk backlog and telemetry coverage; emission pending in memory and persisted files are different counts. Usage upload is independent of event capture. `usage report` separates logical invocations from SQL operations, operation purpose, author, and traffic class. Explicit MCP reads are intentional retrieval; SessionStart reads are automatic brief work. Empty SELECTs remain reads, and returned rows do not prove useful knowledge or a completed handoff. Inspect unknown classification and telemetry backlog alongside every report. No raw prompts or SQL are stored in usage labels.
+
+`continuity health` exposes helper state and watermarks; it does not infer why a teammate is silent. Missing heartbeat means unknown coverage. A brief that times out now says unavailable rather than no work. Retry the specific read after checking the service; don't open a duplicate investigation solely because a read failed.
+
+### Recovery by failure class
+
+| Symptom | Recovery |
+|---|---|
+| Missing session identity | Use the real `Ledger session` ID printed at SessionStart; pass `session_id` or CLI `--session`. Restart stale MCP hosts if necessary. Do not fabricate an ID or choose the newest unrelated transcript. |
+| Bind/new timed out | Retry the identical operation with the same `request_id` / `--request-id`. A conflicting reuse of the key is refused. Preserve the original question, target, and session. |
+| No applicable analytical record | Inspect labelled legacy candidates, open their evidence, and validate scope. Enrich through a new scoped finding with an exact `derived-from` pin; never bulk-promote guesses. |
+| Neon unavailable | Preserve local spool/transcripts. Local admission continues independently; read sections report unavailable and usage remains queued. Restore connectivity and observe backlog drain. |
+| Artifact storage fails | Retain retry bytes and inspect the reported error. A transient error is not an oversized artifact. Never delete the spool or advance its acknowledgment manually. |
+| Corrupt spool or cursor concern | Set `LEDGER_CAPTURE_PAUSE_UPLOAD=1` for the helper, restart it, and preserve all spool segments/manifests and transcripts for repair. No remote event acknowledgment should advance while upload is paused. |
+| Git push hangs or snapshot unsafe | Set `LEDGER_SNAPSHOTS=0` for the helper and restart. Capture continues; code continuity remains explicitly unverified. Fix Git access/permissions, then re-enable snapshots and require remote verification. |
+| Telemetry overhead/outage | `LEDGER_USAGE=0` pauses new emission without deleting queued observations. Inspect `usage health`; do not call a disabled period zero use. |
+
+`LEDGER_SPOOL_MAX_BYTES` bounds total local spool file content (default 512 MiB, plus a free-space reserve). When capacity is exhausted, admission fails visibly and retains the source cursor; it does not drop pending events. Use `ledger helper prune-spool --session <id>` to remove only old acknowledged v2 segments after the retention period. Pending segments and original v1 inputs are preserved, and the minimum rollback window cannot be bypassed.
+
+Spool v2 is a compatibility boundary. Retain original v1 inputs during rollout and use only a rollback runtime that understands v2. Do not run an old v1 writer against migrated state. Never reset `helper-state.json`, delete unacknowledged files, or rerun pending mutating tool calls as a generic recovery step.
+
+If a source transcript shrinks or is rewritten, capture stops that source visibly instead of reusing line-based producer IDs for different content. Preserve the old source and spool for a source-generation repair; deleting the cursor is not a safe repair. Offloaded Claude tool outputs are read only from a realpath-contained tool-results directory for that exact session. Unverified Codex offload layouts remain explicitly unavailable; output text alone cannot authorize reading an arbitrary local file.
+
+Snapshots now use sanitized, isolated history so denied files cannot leak through a parent commit. Resume packs select one exact remotely verified checkpoint/commit pair; newer unverified checkpoints cannot borrow an older verification timestamp. Restore the snapshot into a fresh detached worktree, then port only reviewed intended paths against the recorded base. Do not rebase/merge snapshot history or apply a full-tree diff that deletes intentionally excluded files.
+
+### Complete a handoff honestly
+
+`ledger_resume` and CLI `ledger resume` return a handoff attempt after a usable continuation pack is delivered and its destination session exists. Inspect-only reads do not count as continuations. Use the real destination session for continue/fork. Report progress through `ledger_handoff_update` or `ledger handoff update --session <id>` with JSON on stdin. Exact event references have `{session_id, seq, role}`, where role is `verification`, `validation`, `delivered_result`, or `pending_operation_resolution`.
+
+Verification must point to captured destination-session tool outcomes after the attempt began. Code work requires a remotely verified source snapshot. Completion requires validation plus a nonempty delivered assistant result, and evidence that pending source operations were reconciled. Failed/abandoned attempts require a reason and remain visible. These are agent-reported outcomes backed by retained events; the tool does not claim independent semantic verification or human acceptance.
+
+### Credential rotation and restore evidence
+
+Check the existing credential-rotation TODO against the actual credential owner. The new `ledger continuity rotate --stdin` and `--url-file <private-file>` inputs avoid placing a replacement URL in shell history. Obtain and supply the credential through the team's secret channel; never paste it into a chat or commit it. The command validates and installs the supplied URL; revoke the old credential at the provider separately and verify it fails on both machines.
+
+The isolated restore test backs up/restores continuity tables and artifact bytes/hashes and clones a synthetic Git ledger backup. It cannot prove the live database's backup schedule, retention, or recovery window. Before sign-off, restore an authorized live backup to a separate permitted target, verify retained evidence and Git versions, and record recoverable watermarks and restore duration without exposing secrets.

@@ -1,3 +1,4 @@
+import { assertSafeSelftestDatabase, assertSelftestDatabaseMarker } from "./selftest-db-guard.js";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -25,7 +26,7 @@ import { execFileSync } from "node:child_process";
 const DB = process.env.LEDGER_TEST_DATABASE_URL;
 if (!DB) throw new Error('set LEDGER_TEST_DATABASE_URL to an explicitly owned disposable localhost test database');
 const dbUrl = new URL(DB);
-if (!['localhost','127.0.0.1','[::1]'].includes(dbUrl.hostname) || !/selftest|_test(?:_|$)/.test(dbUrl.pathname) || dbUrl.search) throw new Error('classifier selftest requires a disposable localhost test database');
+if (!['localhost','127.0.0.1','[::1]'].includes(dbUrl.hostname) || !/selftest|_test(?:_|$)/.test(dbUrl.pathname)) throw new Error('classifier selftest requires a disposable localhost test database');
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ledger-cls-"));
 process.env.LEDGER_CONFIG_DIR = path.join(tmp, ".ledger");
 process.env.LEDGER_GIT_SYNC = "0";
@@ -85,7 +86,19 @@ setCanned([]);
 const ledgerDir = path.join(tmp, "ledger");
 initLedger(ledgerDir, "test");
 const cfg: Config = { ledger_dir: ledgerDir, author: "rachit", git_sync: false, continuity: { database_url: DB, machine: "rachit-mac" } };
+assertSafeSelftestDatabase(DB);
+// Fail closed if another fixture forgets to install the fake extractor command.
+{
+  const {runExtractor,runExtractorAsync}=await import("./extract.js");
+  const fakeCommand=process.env.LEDGER_EXTRACTOR_CMD;
+  delete process.env.LEDGER_EXTRACTOR_CMD;
+  try {
+    assert.throws(()=>runExtractor("fixture",cfg),/Selftest extraction refused/);
+    await assert.rejects(runExtractorAsync("fixture",cfg),/Selftest extraction refused/);
+  } finally { if(fakeCommand !== undefined) process.env.LEDGER_EXTRACTOR_CMD=fakeCommand; }
+}
 const pool = getPool(cfg);
+await assertSelftestDatabaseMarker(pool);
 await pool.query(`drop table if exists cont_state_updates, cont_record_links, cont_records, cont_notifications, cont_artifacts, cont_claims, cont_checkpoints, cont_events, cont_sessions, cont_threads cascade`);
 await migrate(pool);
 ok(`schema reset on ${DB.replace(/\/\/[^@]*@/, "//…@")}; fake extractor at ${path.basename(fake)}`);
@@ -523,7 +536,7 @@ let ra2: Awaited<ReturnType<typeof C.classifySession>>;
 
   // pass 1: no turn signal → snapshot checkpoint only, no classification
   clearPrompt();
-  const p1 = await helperOnce(cfg, { roots, now: T(101), push: true, log: quiet, classifyWaitMs: 60_000 });
+  const p1 = await helperOnce(cfg, { roots, now: T(101), push: true, snapshotWaitMs: 30000, log: quiet, classifyWaitMs: 60_000 });
   assert.equal(p1.errors.length, 0, p1.errors.join(" | "));
   assert.equal(p1.bound, 1);
   assert.equal(p1.snapshots, 1);
@@ -534,7 +547,7 @@ let ra2: Awaited<ReturnType<typeof C.classifySession>>;
 
   // pass 2: Stop hook wrote a checkpoint signal; nothing new on disk → the turn-only branch → classify
   writeSignal(sid, "checkpoint");
-  const p2 = await helperOnce(cfg, { roots, now: T(102), push: true, log: quiet, classifyWaitMs: 60_000 });
+  const p2 = await helperOnce(cfg, { roots, now: T(102), push: true, snapshotWaitMs: 30000, log: quiet, classifyWaitMs: 60_000 });
   assert.equal(p2.errors.length, 0, p2.errors.join(" | "));
   assert.equal(p2.snapshots, 0, "tree unchanged");
   assert.equal(p2.checkpoints, 1, "turn checkpoint recorded");
@@ -556,7 +569,7 @@ let ra2: Awaited<ReturnType<typeof C.classifySession>>;
   fs.utimesSync(tf, T(103), T(103));
   writeSignal(sid, "checkpoint");
   clearPrompt();
-  const p3 = await helperOnce(cfg, { roots, now: T(103), push: true, log: quiet, classifyWaitMs: 60_000 });
+  const p3 = await helperOnce(cfg, { roots, now: T(103), push: true, snapshotWaitMs: 30000, log: quiet, classifyWaitMs: 60_000 });
   assert.equal(p3.errors.length, 0, p3.errors.join(" | "));
   assert.equal(p3.checkpoints, 1);
   assert.equal(p3.classified, 0);
@@ -567,7 +580,7 @@ let ra2: Awaited<ReturnType<typeof C.classifySession>>;
   fs.writeFileSync(path.join(repo, "src", "site.ts"), "export const footer = true; // v2\n");
   writeSignal(sid, "checkpoint");
   process.env.LEDGER_CLASSIFY = "0";
-  const p4 = await helperOnce(cfg, { roots, now: T(105), push: true, log: quiet, classifyWaitMs: 60_000 });
+  const p4 = await helperOnce(cfg, { roots, now: T(105), push: true, snapshotWaitMs: 30000, log: quiet, classifyWaitMs: 60_000 });
   delete process.env.LEDGER_CLASSIFY;
   assert.equal(p4.errors.length, 0, p4.errors.join(" | "));
   assert.equal(p4.snapshots, 1, "new snapshot with the turn");
@@ -579,7 +592,7 @@ let ra2: Awaited<ReturnType<typeof C.classifySession>>;
   // pass 5: interval passed, switch off → classifies only the new events, through the snapshot+turn branch
   fs.writeFileSync(path.join(repo, "src", "site.ts"), "export const footer = true; // v3\n");
   writeSignal(sid, "checkpoint");
-  const p5 = await helperOnce(cfg, { roots, now: T(106), push: true, log: quiet, classifyWaitMs: 60_000 });
+  const p5 = await helperOnce(cfg, { roots, now: T(106), push: true, snapshotWaitMs: 30000, log: quiet, classifyWaitMs: 60_000 });
   assert.equal(p5.errors.length, 0, p5.errors.join(" | "));
   assert.equal(p5.snapshots, 1);
   assert.equal(p5.classified, 1);
@@ -596,7 +609,7 @@ let ra2: Awaited<ReturnType<typeof C.classifySession>>;
   setCanned([{ marker: "Run the nightly backup", exit: 3 }]);
   writeSignal(sid, "checkpoint");
   const logs: string[] = [];
-  const p6 = await helperOnce(cfg, { roots, now: T(110), push: true, log: (m) => logs.push(m), classifyWaitMs: 60_000 });
+  const p6 = await helperOnce(cfg, { roots, now: T(110), push: true, snapshotWaitMs: 30000, log: (m) => logs.push(m), classifyWaitMs: 60_000 });
   assert.equal(p6.errors.length, 0, "a classifier failure is not a pass error");
   assert.equal(p6.checkpoints, 1, "the turn checkpoint was still published");
   // `classified` counts classifications STARTED (the call is detached from the pass); the failure shows in the log

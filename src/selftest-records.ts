@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { assertSafeSelftestDatabase, assertSelftestDatabaseMarker } from "./selftest-db-guard.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -23,6 +24,7 @@ import { randomUUID } from "node:crypto";
  */
 
 const DB = process.env.LEDGER_CONTINUITY_DB || "postgresql://localhost:5432/ledger_selftest";
+assertSafeSelftestDatabase(DB);
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ledger-rec-"));
 process.env.LEDGER_CONFIG_DIR = path.join(tmp, ".ledger");
 process.env.LEDGER_GIT_SYNC = "0";
@@ -46,6 +48,7 @@ const cfg: Config = { ledger_dir: path.join(tmp, "ledger"), author: "rachit", gi
 const pool = getPool(cfg);
 
 // ---------- 1. schema: idempotent migrate, three new tables, FTS index ----------
+await assertSelftestDatabaseMarker(pool);
 await pool.query(`drop table if exists cont_session_bindings, cont_state_updates, cont_record_links, cont_records, cont_notifications, cont_artifacts, cont_claims, cont_checkpoints, cont_events, cont_sessions, cont_threads cascade`);
 const NEW = ["cont_records", "cont_record_links", "cont_state_updates", "cont_session_bindings"];
 const first = await migrate(pool);
