@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spoolAppend, spoolPending } from "./helper/spool.js";
 import { helperOnce } from "./helper/daemon.js";
+import { execFileSync } from "node:child_process";
 import { drainUsageWrites } from "./usage.js";
 import { assertSafeSelftestDatabase, assertSelftestDatabaseMarker } from "./selftest-db-guard.js";
 import { getPool, migrate, closePools } from "./continuity/db.js";
@@ -47,5 +48,23 @@ try {
     const summary = await helperOnce({ author: "fixture", continuity: { database_url: url, classify: false } } as any, { roots: { claude: path.join(temp, "absent"), codex: path.join(temp, "absent") }, pool });
     assert.equal(summary.events_uploaded, 1, summary.errors.join(";")); assert.equal((await sessionEvents(pool, recoveredId)).length, 1); assert.equal(spoolPending(recoveredId).batches.length, 0);
     console.log("ok 5. missing helper state and deleted source transcript recover/upload pending spool from retained metadata");
+    const a = path.join(temp, "repo-a"), b = path.join(temp, "repo-b"), transcripts = path.join(temp, "transcripts"); fs.mkdirSync(transcripts);
+    for (const dir of [a,b]) {
+      fs.mkdirSync(dir); execFileSync("git", ["init", "-q", dir]);
+      const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "pipe", env: { ...process.env, GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@example.test", GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "fixture@example.test" } });
+      fs.writeFileSync(path.join(dir, "code.txt"), "base"); git("add", "."); git("commit", "-qm", "base"); fs.writeFileSync(path.join(dir, "code.txt"), "dirty");
+    }
+    const movingId = `moving-${crypto.randomUUID()}`, transcript = path.join(transcripts, "rollout-moving.jsonl");
+    const write = (rows: unknown[]) => fs.appendFileSync(transcript, rows.map(row => JSON.stringify(row)).join("\n") + "\n");
+    write([{ type: "session_meta", payload: { id: movingId, cwd: a } }, { type: "event_msg", payload: { type: "user_message", message: "Continue code in A" } }]);
+    const movingCfg: any = { author: "fixture", continuity: { database_url: url, classify: false, repos: [a,b] } };
+    const pass = () => helperOnce(movingCfg, { roots: { claude: path.join(temp, "absent"), codex: transcripts }, pool, push: false });
+    await pass();
+    const original = (await pool.query("select thread_id from cont_sessions where id=$1", [movingId])).rows[0].thread_id;
+    assert.ok(original); const originalHead = await headCheckpoint(pool, original); assert.ok(originalHead);
+    write([{ type: "turn_context", payload: { cwd: b } }, { type: "event_msg", payload: { type: "user_message", message: "B should never be labelled A" } }]);
+    const mismatch = await pass(); assert.ok(mismatch.errors.some(e => /repository changed/.test(e))); assert.equal((await headCheckpoint(pool, original))!.id, originalHead.id);
+    const bEvents = (await sessionEvents(pool, movingId)).filter(e => String(e.payload.text).includes("B should never")); assert.equal(bEvents.length, 1); assert.equal(bEvents[0].thread_id, null);
+    console.log("ok 6. both-allowed A→B preserves A checkpoint and leaves B evidence unassigned pending explicit rebind");
   } finally { await drainUsageWrites(); if (savedConfig === undefined) delete process.env.LEDGER_CONFIG_DIR; else process.env.LEDGER_CONFIG_DIR = savedConfig; fs.rmSync(temp, { recursive: true, force: true }); }
 } finally { await closePools(); }

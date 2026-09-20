@@ -1,0 +1,31 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import {execFileSync} from "node:child_process";
+import {checkoutResumeSnapshot} from "./continuity/checkout.js";
+import {repoIdentity} from "./continuity/shadow.js";
+import type {VerifiedSnapshot} from "./continuity/snapshot-evidence.js";
+const tmp=fs.mkdtempSync(path.join(os.tmpdir(),"ledger-checkout-verified-"));
+const git=(cwd:string,...args:string[])=>execFileSync("git",args,{cwd,stdio:["ignore","pipe","pipe"],env:{...process.env,GIT_AUTHOR_NAME:"fixture",GIT_AUTHOR_EMAIL:"fixture@example.invalid",GIT_COMMITTER_NAME:"fixture",GIT_COMMITTER_EMAIL:"fixture@example.invalid"}}).toString().trim();
+try {
+ const remote=path.join(tmp,"remote.git"),source=path.join(tmp,"source"),consumer=path.join(tmp,"consumer");
+ fs.mkdirSync(source);git(tmp,"init","--bare",remote);git(source,"init");git(source,"remote","add","origin",remote);
+ fs.writeFileSync(path.join(source,"state.txt"),"verified A\n");git(source,"add","state.txt");git(source,"commit","-m","verified");
+ const a=git(source,"rev-parse","HEAD"),ref="refs/wip/fixture/source";
+ git(source,"push","origin",`${a}:${ref}`);
+ fs.writeFileSync(path.join(source,"state.txt"),"unverified B\n");git(source,"add","state.txt");git(source,"commit","-m","unverified");const b=git(source,"rev-parse","HEAD");
+ git(tmp,"clone",remote,consumer);
+ const snapshot:VerifiedSnapshot={status:"verified",checkpoint_id:"fixture",thread_id:"fixture",session_id:"fixture",repo:repoIdentity(source),ref,commit:a,base_commit:null,verified_at:new Date(),through_event_seq:1,created_at:new Date()};
+ const pack={snapshot,claim:{acquired:true},checkpoint:{wip_ref:ref,wip_commit:b}};
+ const destination=path.join(tmp,"continued");
+ checkoutResumeSnapshot(consumer,pack,"continue",destination);
+ assert.equal(git(destination,"rev-parse","HEAD"),a,"checkout uses exact verified A, not newest unverified B");
+ assert.equal(fs.readFileSync(path.join(destination,"state.txt"),"utf8"),"verified A\n");
+ const denied=path.join(tmp,"denied");
+ assert.throws(()=>checkoutResumeSnapshot(consumer,{...pack,claim:{acquired:false}},"continue",denied),/claim was refused/);
+ assert.throws(()=>checkoutResumeSnapshot(consumer,{...pack,snapshot:null},"inspect",denied),/No remotely verified/);
+ assert.throws(()=>checkoutResumeSnapshot(consumer,{...pack,snapshot:{...snapshot,repo:"other/repository"}},"inspect",denied),/repository/);
+ assert.equal(fs.existsSync(denied),false,"all refusals precede worktree mutation");
+ console.log("verified checkout selftest: exact historical snapshot, failed claim, missing verification, and repository mismatch passed");
+}finally{fs.rmSync(tmp,{recursive:true,force:true});}

@@ -25,7 +25,8 @@ import { continuityConfigured, getPool, migrate, tableList, closePools } from ".
 import { listThreads, getThread, updateThread } from "./continuity/store.js";
 import { buildResumePack, threadLine } from "./continuity/resume.js";
 import { queryEvents, getArtifact } from "./continuity/evidence.js";
-import { checkoutWip, repoRoot, repoIdentity } from "./continuity/shadow.js";
+import { checkoutResumeSnapshot } from "./continuity/checkout.js";
+import { repoRoot, repoIdentity } from "./continuity/shadow.js";
 import { openThreadsText } from "./continuity/brief.js";
 import { bindInvestigation, declareInvestigation, listInvestigations, sessionBinding } from "./continuity/investigations.js";
 import { buildRecordPack, listRecordSummaries, recordLine, unassignedLine } from "./continuity/recordpack.js";
@@ -630,10 +631,10 @@ async function main() {
         console.log(pack.text);
         await track(pack,"thread",id);
         const dest = flag(args, "--checkout");
-        if (dest && pack.checkpoint?.wip_ref && pack.checkpoint?.wip_commit) {
+        if (dest) {
           const root = repoRoot(process.cwd());
           if (!root) throw new Error("--checkout needs to run inside a checkout of the same repo");
-          console.log(`\ncheckout → ${checkoutWip(root, String(pack.checkpoint.wip_ref), String(pack.checkpoint.wip_commit), path.resolve(dest))}`);
+          console.log(`\ncheckout → ${checkoutResumeSnapshot(root, pack, mode, path.resolve(dest))}`);
         }
         await closePools();
         return;

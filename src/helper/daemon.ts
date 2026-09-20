@@ -47,7 +47,7 @@ export interface SessState {
   file: string;
   harness: "claude" | "codex";
   offset: number;
-  sourceFingerprint?: { bytes: number; sha256: string; tail_offset?: number; tail_bytes?: number; tail_sha256?: string };
+  sourceFingerprint?: { bytes: number; sha256: string; tail_offset?: number; tail_bytes?: number; tail_sha256?: string; full_bytes?: number; full_sha256?: string };
   cwd?: string;
   root?: string | null;
   repo?: string;
@@ -149,6 +149,15 @@ export function saveState(st: Record<string, SessState>): void {
   try { fs.writeFileSync(fd, JSON.stringify(st)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
   fs.renameSync(tmp, stateFile());
   const dir = fs.openSync(ledgerHome(), "r"); try { fs.fsyncSync(dir); } finally { fs.closeSync(dir); }
+}
+
+async function hashSourceRange(file: string, hash: crypto.Hash, start: number, end: number): Promise<crypto.Hash> {
+  if (end <= start) return hash;
+  const source = fs.createReadStream(file, { start, end: end - 1, highWaterMark: 64 << 10 });
+  let received = 0;
+  for await (const chunk of source) { received += chunk.length; hash.update(chunk); }
+  if (received !== end - start) throw new Error("transcript changed length during source verification; cursor retained");
+  return hash;
 }
 
 function walk(dir: string, depth: number): string[] {
@@ -420,6 +429,13 @@ async function helperOnceImpl(cfg: Config, opts: HelperOpts): Promise<PassSummar
       const from = sid ? (spoolCursor(sid) ?? s?.offset ?? 0) : 0;
       if (fs.statSync(file).size < from) throw new Error("transcript shrank or rotated; source cursor retained, explicit generation repair required");
       if (s && !s.sourceFingerprint && sid) s.sourceFingerprint = spoolSource(sid)?.sourceFingerprint as SessState["sourceFingerprint"];
+      let verifiedSourceHash: crypto.Hash | undefined;
+      let verifiedSourceBytes = 0;
+      if (s?.sourceFingerprint?.full_sha256 && (mtime !== s.lastSeenMtime || fs.statSync(file).size !== from)) {
+        verifiedSourceBytes = s.sourceFingerprint.full_bytes ?? from;
+        verifiedSourceHash = await hashSourceRange(file, crypto.createHash("sha256"), 0, verifiedSourceBytes);
+        if (verifiedSourceHash.copy().digest("hex") !== s.sourceFingerprint.full_sha256) throw new Error("transcript admitted content changed; source generation repair required, no events discarded");
+      }
       if (s?.sourceFingerprint) {
         const fd = fs.openSync(file, "r"), bytes = Buffer.alloc(s.sourceFingerprint.bytes);
         try { fs.readSync(fd, bytes, 0, bytes.length, 0); } finally { fs.closeSync(fd); }
@@ -486,6 +502,11 @@ async function helperOnceImpl(cfg: Config, opts: HelperOpts): Promise<PassSummar
         const tailBytes = Math.min(1024, r.offset), tailOffset = r.offset - tailBytes, tailFd = fs.openSync(file, "r"), tail = Buffer.alloc(tailBytes);
         try { fs.readSync(tailFd, tail, 0, tail.length, tailOffset); } finally { fs.closeSync(tailFd); }
         Object.assign(s.sourceFingerprint, { tail_offset: tailOffset, tail_bytes: tailBytes, tail_sha256: crypto.createHash("sha256").update(tail).digest("hex") });
+      }
+      if (s.sourceFingerprint && r.offset && (r.offset !== from || !s.sourceFingerprint.full_sha256)) {
+        const hash = await hashSourceRange(file, verifiedSourceHash ?? crypto.createHash("sha256"), verifiedSourceHash ? verifiedSourceBytes : 0, r.offset);
+        s.sourceFingerprint.full_bytes = r.offset;
+        s.sourceFingerprint.full_sha256 = hash.digest("hex");
       }
       retainOffloadedOutputs(r.events, { transcriptFile: file, harness });
       if (r.offset !== s.offset || r.events.length) spoolAppend(sid, { offset: r.offset, events: r.events, at: now.toISOString(), source: { file, harness, author, cwd: s.cwd, root: s.root, repo: s.repo, branch: s.branch, baseCommit: s.baseCommit, wipRef: s.wipRef, startedAtMs: s.startedAtMs, lastSeenMtime: mtime, sourceFingerprint: s.sourceFingerprint } });

@@ -99,6 +99,13 @@ const server={registerTool:(name:string,_config:any,handler:(...args:any[])=>Pro
 instrumentMcpTools(server,{...cfg,continuity:undefined});
 server.registerTool("ledger_records",{},async()=>({content:[],structuredContent:{sources:[]}}));
 server.registerTool("ledger_brief",{},async()=>({content:[]}));
+server.registerTool("ledger_resume",{},async()=>({content:[]}));
+let attempts=0;
+server.registerTool("ledger_investigation_bind",{},async()=>({content:[],isError:++attempts === 1,structuredContent:attempts === 1 ? {outcome:"error",availability:"unavailable"} : {}}));
+await handlers.get("ledger_resume")!({});
+const retryRequest={session_id:sid,request_id:"retry-test-operation"};
+await handlers.get("ledger_investigation_bind")!(retryRequest);
+await handlers.get("ledger_investigation_bind")!(retryRequest);
 const wrapped=await Promise.all([handlers.get("ledger_records")!({}),handlers.get("ledger_brief")!({})]);
 assert.ok(wrapped.every(r=>r.structuredContent.usage.source === "ledger_server"));
 assert.notEqual(wrapped[0].structuredContent.usage.invocation_id,wrapped[1].structuredContent.usage.invocation_id);
@@ -109,6 +116,10 @@ const report=await usageSummary(pool,{from:"2020-01-01T00:00:00Z",to:"2100-01-01
 assert.ok(report.invocations.some(r=>r.tool === "ledger_brief" && r.purpose === "interactive_read"),"explicit MCP brief is intentional use");
 assert.ok(report.invocations.some(r=>r.tool === "ledger_brief" && r.purpose === "automatic_brief"),"automatic brief is separate");
 assert.equal(report.local_spool.pending_files,0);
+assert.ok(report.invocations.some(r=>r.tool === "ledger_resume" && r.purpose === "interactive_read"),"MCP continuation retrieval is intentional use even when it also claims work");
+const logical=report.logical_operations.find(r=>r.tool === "ledger_investigation_bind")!;
+assert.equal(logical.invocation_attempts,2);assert.equal(logical.known_logical_operations,1);assert.equal(logical.known_retry_attempts,1);assert.equal(logical.known_operations_with_success,1);
+assert.equal(report.invocations.filter(r=>r.tool === "ledger_investigation_bind").length,2,"failed then successful retry retains two outcome groups but one logical operation");
 await pool.query(`update cont_usage_invocations set started_at='2026-09-20T23:59:59Z' where invocation_id=$1`,[inv.invocation_id]);
 await pool.query(`update cont_usage_storage_ops set started_at='2026-09-21T00:00:01Z' where invocation_id=$1`,[inv.invocation_id]);
 const boundaryReport=await usageSummary(pool,{from:"2026-09-21T00:00:00Z",to:"2026-09-21T00:00:02Z",actor:cfg.author,traffic_class:"evaluation"});
