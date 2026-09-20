@@ -145,7 +145,7 @@ function writeReadme(cfg: Config, all: LedgerObject[]): string {
     NOTE,
     `# Ledger`,
     ``,
-    `${last} ${defs.length} definitions, ${decs.length} decisions in force, ${chgs.length} changes and ${fnds.length} findings in the last 14 days. [How this works](LEDGER.md) · [Log](log.md)`,
+    `${last} ${defs.length} definitions, ${decs.length} decisions in force, ${chgs.length} changes and ${fnds.length} findings in the last 14 days. [How this works](LEDGER.md) · [What the memory is doing](memory.md) · [Log](log.md)`,
     ``,
     `## Definitions`,
     ``,
@@ -203,8 +203,18 @@ function writeReadme(cfg: Config, all: LedgerObject[]): string {
   return f;
 }
 
+/**
+ * memory.md: what the memory is doing, as opposed to what it holds. Anchored to the newest record
+ * rather than the clock, so two machines regenerating the same objects emit the same bytes.
+ */
+function writeMemory(cfg: Config, all: LedgerObject[]): string {
+  const f = path.join(cfg.ledger_dir, "memory.md");
+  fs.writeFileSync(f, renderMemoryReport(memoryReport(all), all));
+  return f;
+}
+
 /** Rebuild every derived file from the object set. Returns the paths written, for git add. */
 export function regenerateViews(cfg: Config, all: LedgerObject[]): string[] {
   const objs = ordered(all);
-  return [...writeIndexes(cfg, objs), writeLog(cfg, objs), writeReadme(cfg, objs)];
+  return [...writeIndexes(cfg, objs), writeLog(cfg, objs), writeReadme(cfg, objs), writeMemory(cfg, objs)];
 }
