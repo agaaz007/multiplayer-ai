@@ -177,6 +177,7 @@ It runs on your own login: `claude -p --tools ""` or `codex exec --ephemeral`, w
 | `ledger_skip_record` | the Stop checkpoint asked and nothing was durable; the reason is counted |
 | `ledger_discard_draft` | reject a draft from the transcript fallback, with a reason. Promote by recording a stable object with `supersedes` |
 | `ledger_stats` | pilot health, including what the checkpoint loop caught |
+| `ledger_memory` | the `memory.md` view in a chat: disagreements left unranked, corrections and their blast radius, work pinned across people, and the gaps behind those numbers |
 
 ### Standard chat receipts
 
@@ -211,6 +212,8 @@ The contribution tool resolves identity and status from storage, rejects unknown
 The card contains the record snapshot returned by that call; a later supersession appears on the next lookup, not automatically in an old card. Snapshot hashes identify returned content, not a metric-definition version or verification stamp. Full source text is delivered in result `_meta` for UI inspection. The bundled interface makes no network requests and renders record text without interpreting HTML.
 
 **Try locally:** run `npm run preview:ui`, then open `http://127.0.0.1:4318`. Set `LEDGER_UI_PORT` to change the port. This development host uses the real Ledger MCP server and official Apps bridge, reads your configured local ledger, and exposes only the three evidence tools. Git sync and recording are disabled in the preview. No public tunnel is needed.
+
+`ledger_memory` advertises a second resource, `ui://ledger/memory-v1.html`, rendering the same report as a card: the five headline numbers, each disagreement with its competing claims laid out as equal columns in no order, each correction with the results it put back under review, cross-person pins, and the gaps. Both cards build their DOM with `textContent`, so a record's title or result is never interpreted as markup. The tool's text result is capped at 4 KB and summarises; `ledger_get` fetches any record it names and `ledger memory` prints the whole view.
 
 The interface starts as a compact status pill. Click to expand sources, filter by author, and inspect an original record. In hosts that support calling server tools from Apps, **Reference this source** lets you attach a passage and describe its contribution. **Back to search results** restores the retrieved sources. Escape collapses the panel. The preview adds search suggestions, Command/Ctrl-K to focus search, and light/dark themes. Motion follows the reduced-motion preference.
 

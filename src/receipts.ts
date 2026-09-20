@@ -5,7 +5,7 @@ import boxen from "boxen";
 /** Structured data for a host, plus one sentence an agent can show in chat. */
 export interface LedgerReceipt {
   schema: "ledger-receipt/v1";
-  action: "found" | "opened" | "referenced" | "saved";
+  action: "found" | "opened" | "referenced" | "saved" | "summarized";
   message: string;
   display: { text: string; markdown: string };
   records: { id: string; title: string; author: string; status: LedgerObject["status"] }[];
@@ -54,6 +54,15 @@ const lifecycle = (objects: LedgerObject[]) => {
   });
   return labels.length ? ` · Includes ${labels.join(", ")}` : "";
 };
+
+/**
+ * A receipt for a view computed over the whole ledger. `records` is empty because no single record
+ * was retrieved: the numbers are what was returned, so the numbers are what the box shows. Each
+ * line becomes its own row, which is why they arrive already separated rather than pre-joined.
+ */
+export function summaryReceipt(lead: string, lines: string[]): LedgerReceipt {
+  return withDisplay({ schema: "ledger-receipt/v1", action: "summarized", message: `💡 Ledger · ${[compact(lead, 60), ...lines.map(l => compact(l, 90))].join(" · ")}`, records: [] });
+}
 
 export function readReceipt(action: "found" | "opened" | "referenced", objects: LedgerObject[], query?: string, candidateCount = 0): LedgerReceipt {
   const records = unique(objects);
