@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { withUsageInvocation, drainUsageWrites, usageHealth, type TrafficClass } from "./usage.js";
+import { withUsageInvocation, drainUsageWrites, usageHealth, usageSpoolHealth, type TrafficClass } from "./usage.js";
 import { flushUsage } from "./continuity/usage.js";
 import { handoffSummary, updateHandoff } from "./continuity/handoffs.js";
 import { resolveHarnessIdentity } from "./continuity/safety.js";
@@ -436,13 +436,13 @@ async function main() {
       case "usage": {
         const cfg = loadConfig();
         const sub = args[0] ?? "health";
-        if (sub === "health") { console.log(JSON.stringify(usageHealth(), null, 2)); return; }
+        if (sub === "health") { console.log(JSON.stringify(await usageSpoolHealth(), null, 2)); return; }
         if (sub === "flush") { console.log(JSON.stringify(await flushUsage(getPool(cfg)), null, 2)); await closePools(); return; }
         if (sub === "report") {
           const from = flag(args, "--from"), to = flag(args, "--to");
           if (!from || !to) throw new Error("usage: ledger usage report --from <ISO> --to <ISO>");
           const {usageSummary} = await import("./continuity/usage.js");
-          console.log(JSON.stringify(await usageSummary(getPool(cfg), from, to), null, 2));
+          console.log(JSON.stringify(await usageSummary(getPool(cfg), {from, to}), null, 2));
           await closePools(); return;
         }
         throw new Error("usage: ledger usage health|flush|report --from <ISO> --to <ISO>");
@@ -472,7 +472,7 @@ async function main() {
           console.log(created.length ? `created: ${created.join(", ")}` : "schema up to date");
           console.log(`tables: ${(await tableList(pool)).join(", ")}`);
         } else if (sub === "health") {
-          console.log(JSON.stringify({heartbeat:readHeartbeat(),sessions:loadState(),usage:usageHealth(),note:"A missing heartbeat is unknown coverage, not proof of inactivity or healthy capture."},null,2));
+          console.log(JSON.stringify({heartbeat:readHeartbeat(),sessions:loadState(),usage:await usageSpoolHealth(),note:"A missing heartbeat is unknown coverage, not proof of inactivity or healthy capture."},null,2));
         } else if (sub === "status") {
           const t = await tableList(pool);
           const counts = await Promise.all(t.map(async (n) => `${n}=${(await pool.query(`select count(*)::int as c from ${n}`)).rows[0].c}`));

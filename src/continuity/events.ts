@@ -4,7 +4,7 @@ import crypto from "node:crypto";
 import { isDataTool, summarize, DEFAULT_DATA_TOOLS } from "../hooks.js";
 import { codexExecCommands, codexOutputText, type Agent } from "../transcript.js";
 import { redactText } from "./redact.js";
-import { dataToolCalls, evidenceId, inputText } from "../capture-tools.js";
+import { dataToolCalls, evidenceId, inputText, normalizeToolCalls } from "../capture-tools.js";
 
 /**
  * Streaming emitters: read a harness transcript from a byte offset and yield
@@ -163,6 +163,7 @@ function isHarnessInjected(raw: string): boolean {
 
 function toolRequested(id: string, tool: string, input: unknown, at: string | undefined, dataTools: string[]): NormEvent {
   const calls = dataToolCalls(tool, input, id, dataTools);
+  const ledgerCalls = normalizeToolCalls(tool, input, id).filter(c => /(?:^|_)ledger_/.test(c.tool));
   const summary = summarize(calls.length === 1 && calls[0].wrapper && calls[0].input_complete ? calls[0].input : input, INPUT_MAX);
   const full = inputText(input), sourceBytes = Buffer.byteLength(full, "utf8");
   // Do not run expensive full-text redaction on material we cannot store anyway.
@@ -172,7 +173,8 @@ function toolRequested(id: string, tool: string, input: unknown, at: string | un
     tool, input: clean(summary, INPUT_MAX), input_hash: crypto.createHash("sha256").update(full).digest("hex"),
     is_data_tool: calls.length > 0, input_preview_truncated: full.length > INPUT_MAX || summary !== full,
   };
-  if (calls.length) {
+  if (calls.length || ledgerCalls.length) {
+    payload.input_capture_reason = calls.length ? "analytics" : "ledger";
     payload.evidence_ids = calls.map(call => evidenceId(call.call_id, call.tool, at, call.input));
     if (sourceBytes <= ARTIFACT_MAX) payload.input_sha256 = crypto.createHash("sha256").update(redacted.text).digest("hex");
     payload.input_format = typeof input === "string" ? "text" : "json";
@@ -363,6 +365,20 @@ const CODEX_KNOWN = new Set([
  * 100 ms. A read boundary can fall between any two of them.
  */
 
+function decodeRuntimeResult(value: any): any {
+  if (typeof value === "string" && value.length <= ARTIFACT_MAX) { try { return JSON.parse(value); } catch { return {}; } }
+  return value && typeof value === "object" ? value : {};
+}
+function runtimeInvocationId(value: any, depth = 0): string | undefined {
+  if (depth > 3) return undefined;
+  const v = decodeRuntimeResult(value), usage = v.structuredContent?.usage;
+  if (usage?.source === "ledger_server" && typeof usage.invocation_id === "string" && /^[a-f0-9-]{36}$/i.test(usage.invocation_id)) return usage.invocation_id;
+  for (const c of Array.isArray(v.content) ? v.content : []) {
+    if (c?.type === "text") { const id = runtimeInvocationId(c.text, depth + 1); if (id) return id; }
+  }
+  return undefined;
+}
+
 interface PatchRef { ev?: NormEvent; path: string; call_id?: string; ts?: string }
 
 function streamCodex(file: string, fromOffset: number, dataTools: string[], limits: TranscriptLimits = {}): StreamResult {
@@ -401,10 +417,10 @@ function streamCodex(file: string, fromOffset: number, dataTools: string[], limi
    * stored event is never amended. Emitted at the *_end line's position and withdrawn if the output turns
    * up later in the same read.
    */
-  const attachMeta = (callId: string, fields: Record<string, unknown>, ts: string | undefined) => {
+  const attachMeta = (callId: string, fields: Record<string, unknown>, ts: string | undefined, correlate = true) => {
     const fin = finishedByCall.get(callId);
     if (fin) { Object.assign(fin.payload, fields); return; }
-    const ev: NormEvent = { producer_event_id: `${callId}:meta`, kind: "tool.result_meta", call_id: callId, occurred_at: ts, payload: { call_id: callId, ...fields, ...enclosing(callId) } };
+    const ev: NormEvent = { producer_event_id: `${callId}:meta`, kind: "tool.result_meta", call_id: callId, occurred_at: ts, payload: { call_id: callId, ...fields, ...(correlate ? enclosing(callId) : {}) } };
     metaByCall.set(callId, { ev, fields });
     res.events.push(ev);
   };
@@ -482,16 +498,27 @@ function streamCodex(file: string, fromOffset: number, dataTools: string[], limi
       const callId = String(p.call_id ?? "");
       const r = p.result && typeof p.result === "object" ? p.result : {};
       const err = r.Err != null ? clean(typeof r.Err === "string" ? r.Err : JSON.stringify(r.Err), 600) : undefined;
-      const failed = err !== undefined || r.Ok?.is_error === true;
+      const decoded = decodeRuntimeResult(r.Ok);
+      const failed = err !== undefined || decoded?.is_error === true || decoded?.isError === true;
+      const serverId = runtimeInvocationId(decoded);
+      const runtimeInput = typeof p.invocation?.tool === "string" && p.invocation.arguments !== undefined
+        ? toolRequested(callId, `mcp__${p.invocation.server ?? "unknown"}__${p.invocation.tool}`, p.invocation.arguments, ts, dataTools).payload : {};
+      // Runtime completion proves execution; lexical wrapper matches do not.
+      // Do not infer the parent wrapper merely because one call is in flight.
+
       if (callId) attachMeta(callId, compact({
+        ...runtimeInput,
         meta_source: "mcp_tool_call_end",
+        invocation_source: "runtime_completion",
+        server_invocation_id: serverId,
+        invocation_correlation: serverId ? "server_identity" : "unknown",
         duration_ms: durationMs(p.duration),
         mcp_server: typeof p.invocation?.server === "string" ? p.invocation.server : undefined,
         mcp_tool: typeof p.invocation?.tool === "string" ? p.invocation.tool : undefined,
         success: !failed,
         error: err,
         is_error: failed ? true : undefined,
-      }), ts);
+      }), ts, false);
     } else if (t === "response_item" && p.type === "message") {
       const body = codexOutputText(p.content);
       if (!body.trim()) continue;

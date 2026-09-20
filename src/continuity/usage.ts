@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type pg from "pg";
-import { drainUsageWrites, usageDirectory, usageHealth, withoutUsage, type UsageEnvelope, startStorageOperation, sqlOperationClass } from "../usage.js";
+import { drainUsageWrites, usageDirectory, usageHealth, withoutUsage, type UsageEnvelope, startStorageOperation, sqlOperationClass, invalidateUsageDiskEstimate, usageSpoolHealth } from "../usage.js";
 
 export const USAGE_SCHEMA = `
 create table if not exists cont_usage_invocations (
@@ -79,7 +79,7 @@ export async function flushUsage(pool: pg.Pool, limit=100): Promise<{uploaded:nu
       } catch {return {uploaded,pending:files.length-uploaded,dropped:usageHealth().dropped,error:"usage_upload_failed"};}
     }
     return {uploaded,pending:Math.max(0,files.length-uploaded),dropped:usageHealth().dropped};
-  }); } finally {uploading=false;}
+  }); } finally {uploading=false;invalidateUsageDiskEstimate();}
 }
 
 /** Retention is an explicit maintenance action, never part of a read/tool request. */
@@ -89,5 +89,21 @@ export async function pruneUsage(pool:pg.Pool,retentionDays=30):Promise<{invocat
     const ops=await pool.query(`delete from cont_usage_storage_ops where started_at < now()-($1::int * interval '1 day')`,[retentionDays]);
     const inv=await pool.query(`delete from cont_usage_invocations where started_at < now()-($1::int * interval '1 day')`,[retentionDays]);
     return {invocations:inv.rowCount??0,operations:ops.rowCount??0};
+  });
+}
+
+
+/** Half-open window and separate grains: tool invocations, actual SQL operations,
+ * and agent-reported reference appearances. SQL row count is not usefulness. */
+export async function usageSummary(pool:pg.Pool,opts:{from:string;to:string;actor?:string;traffic_class?:string}) {
+  if(!Number.isFinite(Date.parse(opts.from)) || !Number.isFinite(Date.parse(opts.to)) || Date.parse(opts.from)>=Date.parse(opts.to)) throw new Error("Usage window must have valid from < to timestamps");
+  return withoutUsage(async () => {
+    const params=[opts.from,opts.to,opts.actor ?? null,opts.traffic_class ?? null];
+    const where=`i.started_at >= $1::timestamptz and i.started_at < $2::timestamptz and ($3::text is null or i.actor=$3) and ($4::text is null or i.traffic_class=$4)`;
+    const invocations=await pool.query(`select i.actor,i.tool,i.purpose,i.traffic_class,i.outcome,i.availability,count(*)::int as invocations,count(i.finished_at)::int as terminal_outcomes,avg(i.duration_ms) as mean_duration_ms from cont_usage_invocations i where ${where} group by 1,2,3,4,5,6 order by 1,2,3,4,5,6`,params);
+    const operations=await pool.query(`select i.actor,o.backend,o.operation_class,o.purpose,o.success,o.attempt,count(*)::int as operations,count(*) filter(where o.returned_rows=0)::int as zero_row_operations,sum(o.returned_rows)::bigint as returned_rows,count(*) filter(where o.evidence_returned=true)::int as known_evidence_returns from cont_usage_storage_ops o join cont_usage_invocations i using(invocation_id) where ${where} group by 1,2,3,4,5,6 order by 1,2,3,4,5,6`,params);
+    const references=await pool.query(`select i.actor as caller_author,r->>'author' as source_author,count(*)::int as record_appearances,count(distinct r->>'id')::int as distinct_records from cont_usage_invocations i cross join lateral jsonb_array_elements(i.records) r where ${where} and i.tool='ledger_show_contribution' and i.outcome='success' group by 1,2 order by 1,2`,params);
+    const orphaned=await pool.query(`select count(*)::int as operations_without_invocation from cont_usage_storage_ops o where o.started_at >= $1::timestamptz and o.started_at < $2::timestamptz and not exists(select 1 from cont_usage_invocations i where i.invocation_id=o.invocation_id)`,params.slice(0,2));
+    return {window:{from:opts.from,to:opts.to,bounds:"[from,to)"},invocations:invocations.rows,storage_operations:operations.rows,agent_reported_references:references.rows,operations_without_invocation:orphaned.rows[0].operations_without_invocation,local_spool:await usageSpoolHealth(),limitations:["Unknown traffic remains unknown; no historical backfill is inferred.","Reference appearances are agent-reported use, not completed handoffs.","Local spool health covers this machine; remote machine completeness requires its health evidence."]};
   });
 }

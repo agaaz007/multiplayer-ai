@@ -4,6 +4,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import type pg from "pg";
 import { ledgerHome, type Config } from "../store.js";
+import { flushUsage } from "../continuity/usage.js";
 import { getPool } from "../continuity/db.js";
 import { streamTranscript, detectHarness, type NormEvent } from "../continuity/events.js";
 import { repoRoot, repoIdentity, currentBranch, headCommit } from "../continuity/shadow.js";
@@ -106,6 +107,7 @@ export interface HelperLoopOpts extends HelperOpts {
 /** Detached classifications by session id; a pass never blocks on them, and a session never runs two. */
 const classifyInFlight = new Map<string, Promise<void>>();
 const snapshotPublications = new Set<Promise<void>>();
+let usageFlush: Promise<unknown> | null = null;
 const snapshotCompleted = new Map<string, Partial<SessState>>();
 
 /** Embeddings per pass (optional feature): at most this many newly uploaded events, and no new provider batch after this long. */
@@ -308,7 +310,7 @@ export function retainOffloadedOutputs(events: NormEvent[]): void {
 
 export async function materializeArtifacts(pool: pg.Pool, sessionId: string, events: NormEvent[], storeArtifact: typeof putArtifact = putArtifact): Promise<void> {
   for (const e of events) {
-    if (e.kind === "tool.requested") {
+    if (e.kind === "tool.requested" || typeof e.payload._full_input === "string") {
       const p = e.payload as Record<string, any>;
       if (typeof p._full_input === "string") {
         const bytes = Buffer.from(p._full_input, "utf8"), sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
@@ -319,7 +321,7 @@ export async function materializeArtifacts(pool: pg.Pool, sessionId: string, eve
         p.input_availability = "stored";
         delete p._full_input;
       }
-      continue;
+      if (e.kind === "tool.requested") continue;
     }
     if (e.kind !== "tool.finished") continue;
     const p = e.payload as Record<string, any>;
@@ -652,6 +654,10 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
       log(`embeddings step failed: ${String(e?.message ?? e).slice(0, 200)}`);
     }
   }
+
+  // Independent, bounded telemetry drain. Never await it on the capture path;
+  // the uploader is single-flight and DB queries have server/client deadlines.
+  if (!usageFlush) usageFlush = flushUsage(pool, 100).then(r => { if (r.error) log(`usage telemetry: ${r.error}; pending=${r.pending}`); }).catch(() => { log("usage telemetry upload failed; local queue retained"); }).finally(() => { usageFlush = null; });
 
   // ---- notifications ----
   try {
