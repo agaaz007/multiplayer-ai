@@ -29,6 +29,7 @@ import { queryEvents, getArtifact } from "./continuity/evidence.js";
 import { checkoutResumeSnapshot } from "./continuity/checkout.js";
 import { repoRoot, repoIdentity } from "./continuity/shadow.js";
 import { openThreadsText } from "./continuity/brief.js";
+import { renderTimelineResult, timelineResult } from "./continuity/timeline.js";
 import { bindInvestigation, declareInvestigation, listInvestigations, sessionBinding } from "./continuity/investigations.js";
 import { buildRecordPack, listRecordSummaries, recordLine, unassignedLine } from "./continuity/recordpack.js";
 import { addStateUpdate, confirmStateUpdate, createRecord, getRecord, linkSpan, rejectStateUpdate, unassignedSpans, type RecordKind, type RecordStatus, type UpdateKind } from "./continuity/records.js";
@@ -111,6 +112,14 @@ const USAGE = `ledger — shared definitions, findings, changes, decisions for y
                                          which investigation a session is bound to
   ledger unassigned [--hours N] [--session id] [--author a] [--limit N]
                                          spans no record claims: preview, seq range, author, harness, time
+  ledger timeline [--days N] [--record ID] [--investigation ID] [--limit N] [--json]
+                                         swimlane per person in time order: which sessions ran, on which
+                                         harness, against which repo or question, when one bound to a shared
+                                         investigation or record, and where one person picked up another's
+                                         work. --record/--investigation shows every contributor to that
+                                         record and ignores --days. Known-unreliable fields are labelled,
+                                         never corrected; only bindings, explicit links and pinned ledger
+                                         refs are drawn as adjacency.
   ledger events --thread <id> | --session <id> [--kinds a,b] [--path p] [--q text] [--after N] [--before N] [--limit N] [--chars N]
                                          evidence: one line per captured event (seq · HH:MM · kind · preview); --chars widens the preview
   ledger usage health|flush|report --from <ISO> --to <ISO>
@@ -131,7 +140,7 @@ function flag(args: string[], name: string): string | undefined {
 }
 
 const BOOL_FLAGS = new Set(["--all", "--plain", "--box", "--no-push", "--dry-run", "--show",
-  "--current-only", "--conflicts", "--unpinned", "--names", "--legend"]);
+  "--current-only", "--conflicts", "--unpinned", "--names", "--legend", "--json"]);
 /** Non-flag arguments, with `--name value` pairs and boolean flags removed. */
 function positionals(args: string[]): string[] {
   const out: string[] = [];
@@ -718,6 +727,22 @@ async function main() {
         await closePools();
         return;
       }
+      case "timeline": {
+        // Runtime observation, never a generated file: the ledger repo's derived views stay a pure
+        // function of the git objects (views.ts), and continuity rows are not knowledge.
+        const cfg = loadConfig();
+        const n = (s: string | undefined) => (s == null ? undefined : Number(s));
+        const result = await timelineResult(cfg, {
+          days: n(flag(args, "--days")),
+          recordId: flag(args, "--record"),
+          investigationId: flag(args, "--investigation"),
+          limit: n(flag(args, "--limit")),
+        });
+        console.log(renderTimelineResult(result, args.includes("--json")));
+        // Not configured is a clean answer, not a failure: exit 0 like the rest of the brief surface.
+        await closePools();
+        return;
+      }
       case "unassigned": {
         const cfg = loadConfig();
         const rows = await unassignedSpans(getPool(cfg), { sinceHours: Number(flag(args, "--hours") ?? 48), session_id: flag(args, "--session"), author: flag(args, "--author"), limit: Number(flag(args, "--limit") ?? 10) });
@@ -848,7 +873,7 @@ function loadAuthorFallback(): string {
 
 async function runCli() {
   const [cmd,...args] = process.argv.slice(2);
-  const observable = new Set(["brief","search","get","investigate","impact","graph","record","drafts","discard","stats","threads","resume","thread","records","investigation","unassigned","events","artifact","handoff"]);
+  const observable = new Set(["brief","search","get","investigate","impact","graph","record","drafts","discard","stats","threads","resume","thread","records","investigation","unassigned","timeline","events","artifact","handoff"]);
   if (!observable.has(cmd)) return main();
   let cfg: ReturnType<typeof loadConfig>;
   try { cfg = loadConfig(); } catch { return main(); }
