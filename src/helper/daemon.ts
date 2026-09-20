@@ -585,6 +585,7 @@ async function helperOnceImpl(cfg: Config, opts: HelperOpts): Promise<PassSummar
               // Session verification cannot be advanced by a waking predecessor.
               if (cp.advanced && sh.verified) await pool.query(`update cont_sessions set wip_commit=$2, last_verified_snapshot_at=$3 where id=$1 and claim_generation=$4 and thread_id=$5`, [sid, sh.commit, sh.verified_at, source.generation, source.thread_id]);
             }
+            if (!source.thread_id && sh.verified) await pool.query(`update cont_sessions set wip_commit=$2, last_verified_snapshot_at=$3 where id=$1 and thread_id is null and claim_generation is null`, [sid, sh.commit, sh.verified_at]);
             Object.assign(s, patch); snapshotCompleted.set(sid, patch);
             if (cpSignal) classifyAfterTurn(cfg, pool, sid, s, now, sum, log);
           }).catch((e: any) => { log(`snapshot publication ${sid.slice(0, 8)} failed: ${String(e?.message ?? e).slice(0, 200)}`); })
