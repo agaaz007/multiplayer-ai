@@ -57,7 +57,7 @@ After an accepted correction, call `ledger_impact(correction_id)`. It returns di
 
 ## Visible Ledger feedback
 
-After `ledger_search`, `ledger_get`, `ledger_show_contribution`, or any `ledger_record_*` call, show the returned `structuredContent.receipt.display.markdown` **verbatim** as a short **user-visible chat update immediately after the call**. It is a fenced text box with a bulb, border, and wrapped content. In a plain-text host use `receipt.display.text` without Markdown fences. Do not leave the receipt only inside a collapsed tool result or private thinking. This is the standard feedback across Claude, Codex, their CLIs, and compatible chat hosts. Combine receipts for batched calls without losing their statuses; avoid repeating them in the final answer unless material. Follow the host's higher-priority communication rules when choosing the available chat channel.
+After `ledger_search`, `ledger_get`, `ledger_show_contribution`, `ledger_memory`, or any `ledger_record_*` call, show the returned `structuredContent.receipt.display.markdown` **verbatim** as a short **user-visible chat update immediately after the call**. It is a fenced text box with a bulb, border, and wrapped content. In a plain-text host use `receipt.display.text` without Markdown fences. Do not leave the receipt only inside a collapsed tool result or private thinking. This is the standard feedback across Claude, Codex, their CLIs, and compatible chat hosts. Combine receipts for batched calls without losing their statuses; avoid repeating them in the final answer unless material. Follow the host's higher-priority communication rules when choosing the available chat channel.
 
 The box uses portable text, not HTML, CSS, or a host-specific popup. Keep its line breaks and spacing; do not remove the code fence in Markdown chat, since it preserves border alignment and supplies the host's code-block background. Exact colors belong to the host. For older servers, put `structuredContent.receipt.message` (or the first `💡 Ledger` line) in a fenced text block with a simple border; preserve the actual content. A plain-text-only host can show the same border without fences.
 
@@ -222,6 +222,7 @@ To reproduce a finding, record your own with `reproduction_of: {id, version, out
 | `ledger_skip_record` | dismiss exact `capture_coverage` IDs with a reason; unmatched evidence remains owed |
 | `ledger_discard_draft` | a draft in the review queue is not durable knowledge; give the reason. To promote instead, record a stable object with `supersedes` |
 | `ledger_stats` | pilot health: who records, what the checkpoint caught, findings missing definitions or assumptions, duplicates across authors |
+| `ledger_memory` | what the memory is doing: disagreements caught and left unranked, corrections and the results they put back under review, work pinned across people, and the lineage gaps behind those numbers. Reuse counts pinned versions only; a record named in prose is a gap |
 
 Every record commits and pushes. Every read pulls. Teammates see each other's objects within a minute.
 

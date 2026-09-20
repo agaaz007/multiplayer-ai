@@ -15,6 +15,7 @@ import { validateCaptureCoverage, acknowledgeCapture, loadJournal, type CaptureA
 import { verifyAcceptanceEvidence } from './acceptance-evidence.js';
 import { validateRecordCoverage, acknowledgeLocalCapture, reconcileSharedCapture } from './capture-boundary.js';
 import { EVIDENCE_URI, ReferenceSchema, evidenceResult, contributionResult } from "./evidence.js";
+import { MEMORY_URI, memoryResult } from "./memory-card.js";
 import { RECEIPT_GUIDANCE, savedReceipt, receiptText } from "./receipts.js";
 import { continuityConfigured, getPool } from "./continuity/db.js";
 import { listThreads, createThread, getThread, claimThread, releaseClaim, upsertSession, appendEvents, getSession } from "./continuity/store.js";
@@ -81,6 +82,7 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
   const server = new McpServer({ name: "ledger", version: "0.1.0" });
   instrumentMcpTools(server, cfg);
   const evidenceUi = { ui: { resourceUri: EVIDENCE_URI } };
+  const memoryUi = { ui: { resourceUri: MEMORY_URI } };
   const readOnly = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
   // An explicit session_id, else a harness env id with a local transcript. Never a synthetic id: the helper
   // looks bindings up by the transcript's id, so a claim written for `mcp:<author>:<pid>` split the successor's
@@ -118,6 +120,15 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
       uri: EVIDENCE_URI,
       mimeType: RESOURCE_MIME_TYPE,
       text: await readFile(new URL("./ui/evidence.html", import.meta.url), "utf8"),
+      _meta: { ui: { csp: { connectDomains: [], resourceDomains: [] }, prefersBorder: false } },
+    }],
+  }));
+
+  registerAppResource(server, "Ledger memory card", MEMORY_URI, { mimeType: RESOURCE_MIME_TYPE }, async () => ({
+    contents: [{
+      uri: MEMORY_URI,
+      mimeType: RESOURCE_MIME_TYPE,
+      text: await readFile(new URL("./ui/memory.html", import.meta.url), "utf8"),
       _meta: { ui: { csp: { connectDomains: [], resourceDomains: [] }, prefersBorder: false } },
     }],
   }));
@@ -236,6 +247,15 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
     _meta: evidenceUi,
     annotations: readOnly,
   }, async ({ references }) => contributionResult(cfg, references));
+
+  registerAppTool(server, "ledger_memory", {
+    title: "What this memory is doing",
+    description:
+      "Show what the shared memory is doing, as opposed to what it holds: disagreements the ledger caught and refused to rank, corrections and the recorded results they put back under review, work one person pinned from another's by exact version, and the lineage gaps behind those numbers. Reuse counts only pinned dependencies; a record named in prose is reported as a gap, never as reuse. Competing accepted claims are shown as peers and are never ordered by recency. Anchored to the newest record rather than the clock, so it matches the committed memory.md. Summary only: open any id with ledger_get." + RECEIPT_GUIDANCE,
+    inputSchema: { days: z.number().int().min(1).max(365).default(7).describe("Length of the activity window, counted back from the newest record, not from today") },
+    _meta: memoryUi,
+    annotations: readOnly,
+  }, async ({ days }) => memoryResult(loadAll(cfg, TYPES), { days }));
 
   const recordTool = (
     name: string,

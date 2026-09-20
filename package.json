@@ -32,6 +32,7 @@
     "test:claims": "npm run build && node dist/selftest-claims.js",
     "test:graph": "npm run build && node dist/selftest-graph.js",
     "test:interpret": "npm run build && node dist/selftest-interpret.js",
+    "test:memory-tool": "npm run build && node dist/selftest-memory-tool.js",
     "test:findings": "npm run build && LEDGER_SELFTEST=1 node dist/selftest-findings.js",
     "test:analytical": "npm run build && node dist/eval/analytical-selftest.js",
     "test:sequences": "npm run build && node dist/eval/sequence-selftest.js",
