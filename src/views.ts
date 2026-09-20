@@ -145,7 +145,7 @@ function writeReadme(cfg: Config, all: LedgerObject[]): string {
     NOTE,
     `# Ledger`,
     ``,
-    `${last} ${defs.length} definitions, ${decs.length} decisions in force, ${chgs.length} changes and ${fnds.length} findings in the last 14 days. [How this works](LEDGER.md) · [Log](log.md)`,
+    `${last} ${defs.length} definitions, ${decs.length} decisions in force, ${chgs.length} changes and ${fnds.length} findings in the last 14 days. [How this works](LEDGER.md) · [What the memory is doing](memory.md) · [Log](log.md)`,
     ``,
     `## Definitions`,
     ``,
