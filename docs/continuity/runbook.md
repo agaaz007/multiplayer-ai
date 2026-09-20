@@ -203,7 +203,7 @@ The implementation and acceptance criteria are in [the production-readiness plan
 
 ### Run tests without touching the team database
 
-Install a local PostgreSQL distribution providing `initdb`, `pg_ctl`, `pg_dump`, and `pg_restore`; set `LEDGER_TEST_PG_BIN` if its binaries are not on PATH. Run:
+Install a local PostgreSQL distribution providing `initdb`, `pg_ctl`, `pg_dump`, and `pg_restore`; set `LEDGER_TEST_PG_BIN` if its binaries are not on PATH. The complete suite also needs pgvector installed in that PostgreSQL distribution; an unavailable optional extension is not an application failure, but the embeddings suite cannot be marked passed without it. Run:
 
 ```sh
 npm run test:all
@@ -249,6 +249,8 @@ ledger handoff report --from 2026-09-21T00:00:00Z --to 2026-09-28T00:00:00Z
 | Corrupt spool or cursor concern | Set `LEDGER_CAPTURE_PAUSE_UPLOAD=1` for the helper, restart it, and preserve all spool segments/manifests and transcripts for repair. No remote event acknowledgment should advance while upload is paused. |
 | Git push hangs or snapshot unsafe | Set `LEDGER_SNAPSHOTS=0` for the helper and restart. Capture continues; code continuity remains explicitly unverified. Fix Git access/permissions, then re-enable snapshots and require remote verification. |
 | Telemetry overhead/outage | `LEDGER_USAGE=0` pauses new emission without deleting queued observations. Inspect `usage health`; do not call a disabled period zero use. |
+
+`LEDGER_SPOOL_MAX_BYTES` bounds total local spool file content (default 512 MiB, plus a free-space reserve). When capacity is exhausted, admission fails visibly and retains the source cursor; it does not drop pending events. Use `ledger helper prune-spool --session <id>` to remove only old acknowledged v2 segments after the retention period. Pending segments and original v1 inputs are preserved, and the minimum rollback window cannot be bypassed.
 
 Spool v2 is a compatibility boundary. Retain original v1 inputs during rollout and use only a rollback runtime that understands v2. Do not run an old v1 writer against migrated state. Never reset `helper-state.json`, delete unacknowledged files, or rerun pending mutating tool calls as a generic recovery step.
 

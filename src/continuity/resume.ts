@@ -235,7 +235,10 @@ export async function buildResumePack(cfg: Config, pool: pg.Pool, threadId: stri
   const secs = (a: Date | null, b: Date | null) => (a && b ? Math.max(0, Math.round((a.getTime() - b.getTime()) / 1000)) : null);
   const loss = {
     last_seen_at: lastSeen, verified_snapshot_at: vSnap, verified_events_at: vEv,
-    unsaved_code_seconds: secs(lastSeen, vSnap), unacked_event_seconds: secs(lastSeen, vEv),
+    // A remote verification timestamp does not identify when the tree was captured or bound later edits.
+    unsaved_code_seconds: null, since_snapshot_verification_seconds: secs(lastSeen,vSnap),
+    verified_snapshot_commit: snapshot?.commit ?? null, verified_snapshot_checkpoint_id: snapshot?.checkpoint_id ?? null,
+    unacked_event_seconds: secs(lastSeen, vEv),
     session_ended: Boolean(srcSession?.ended_at),
     in_flight_operations: pend.length,
   };
@@ -325,8 +328,8 @@ export async function buildResumePack(cfg: Config, pool: pg.Pool, threadId: stri
     L.push(``);
     L.push(`## Honesty`);
     L.push(`Snapshot ${snapshot?.commit.slice(0,12) ?? "unavailable"} verified at ${fmt(vSnap)}${snapshot ? ` (checkpoint ${snapshot.checkpoint_id})` : ""}. Events acknowledged through ${fmt(vEv)}. Source session last seen ${fmt(lastSeen)}${srcSession?.ended_at ? ", ended" : ", not marked ended"}.`);
-    if (loss.unsaved_code_seconds != null) L.push(`Up to ${loss.unsaved_code_seconds}s of edits and ${pend.length} in-flight tool call(s) may be missing.`);
-    else L.push(`No verified snapshot timestamp: treat the code state as unverified.`);
+    if (snapshot) L.push(`Verification applies only to commit ${snapshot.commit}; its timestamp does not bound later uncaptured edits. ${pend.length} in-flight tool call(s) have unknown outcomes.`);
+    else L.push(`No exact verified snapshot: treat the code state as unverified.`);
     L.push(`The claim is advisory. It protects the shared record, not the other machine. Any narrative below is generated and unreviewed; machine fields are the evidence.`);
     L.push(sourcesLine(sources));
     if (lagLine) L.push(lagLine);
@@ -454,8 +457,9 @@ export function threadLine(s: ThreadSummary, now = new Date()): string {
   const claim = s.claim ? `claimed by ${s.claim.holder_author}` : "unclaimed";
   // The head checkpoint can be a later `turn` checkpoint with no snapshot verification of its own; the
   // session row keeps the last remotely verified snapshot, so fall back to it before saying "none".
-  const verifiedAt = s.head?.verified_snapshot_at ?? ls?.last_verified_snapshot_at ?? null;
-  const snap = verifiedAt ? `snapshot ${ago(verifiedAt)}` : "no verified snapshot";
+  const verifiedAt = s.head?.wip_commit ? s.head.verified_snapshot_at : null;
+  const snap = verifiedAt ? `snapshot ${ago(verifiedAt)}` : ls?.last_verified_snapshot_at
+    ? `historical verification ${ago(ls.last_verified_snapshot_at)}; open to resolve exact snapshot` : "no verified snapshot";
   const first = (s.first_instruction ?? s.goal ?? "").replace(/\s+/g, " ").slice(0, 90);
   const last = (s.last_message ?? "").replace(/\s+/g, " ").slice(0, 90);
   return `- ${s.created_by} · ${ls?.harness ?? "?"} · ${path.basename(s.repo)}${s.branch ? ` · ${s.branch}` : ""} · last seen ${ago(ls?.last_seen_at)} (${ended}) · ${snap} · ${claim}\n  "${first}"${last ? ` → "${last}"` : ""}\n  ${s.id}`;

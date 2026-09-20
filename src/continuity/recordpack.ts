@@ -1,5 +1,5 @@
 import path from "node:path";
-import { latestVerifiedSnapshot, snapshotBootstrap, type VerifiedSnapshot } from "./snapshot-evidence.js";
+import { verifiedSnapshots, snapshotBootstrap, type VerifiedSnapshot } from "./snapshot-evidence.js";
 import type pg from "pg";
 import { loadAll, type Config } from "../store.js";
 import { TYPES } from "../schema.js";
@@ -259,8 +259,8 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
     const s = await getSession(pool, cs.session_id);
     sessions.push({
       session_id: cs.session_id, author: cs.author, harness: cs.harness, last_seen_at: cs.last_seen_at, ended: Boolean(s?.ended_at), spans: cs.spans,
-      repo: s?.repo ?? null, thread_id: s?.thread_id ?? null, verified_snapshot_at: s?.last_verified_snapshot_at ?? null,
-      wip_ref: s?.wip_ref ?? null, wip_commit: s?.wip_commit ?? null, base_commit: s?.base_commit ?? null,
+      repo: s?.repo ?? null, thread_id: s?.thread_id ?? null, verified_snapshot_at: null,
+      wip_ref: null, wip_commit: null, base_commit: null,
     });
   }
   const latest = sessions[0] ?? null;
@@ -294,7 +294,12 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
   }
 
   // ----- honesty: verified snapshot, sources -----
-  const snapshot = hasCode ? await latestVerifiedSnapshot(pool,{sessionIds:sessions.map(s=>s.session_id),repos:code,asOf}) : null;
+  const snapshots = hasCode ? await verifiedSnapshots(pool,{sessionIds:sessions.map(s=>s.session_id),repos:code,asOf}) : [];
+  const snapshot = snapshots[0] ?? null;
+  for (const session of sessions) {
+    const verified = snapshots.find(s=>s.session_id===session.session_id);
+    if (verified) Object.assign(session,{verified_snapshot_at:verified.verified_at,wip_ref:verified.ref,wip_commit:verified.commit,base_commit:verified.base_commit});
+  }
   const vSnap = snapshot ? {at:snapshot.verified_at,from:`session ${short(snapshot.session_id)}; checkpoint ${short(snapshot.checkpoint_id)}; commit ${snapshot.commit.slice(0,12)}`} : null;
   const counts = await recordSourceCounts(pool, rec.id);
   const sources: RecordSources = { ...counts, proposed_updates: state.proposed_count, confirmed_updates: state.confirmed_count };

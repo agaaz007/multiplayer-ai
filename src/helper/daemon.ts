@@ -287,7 +287,7 @@ function classifyAfterTurn(cfg: Config, pool: pg.Pool, sid: string, s: SessState
 /** Wait up to `ms` for detached classifications (tests; a daemon pass passes 0 and moves on). */
 async function awaitClassifications(ms: number): Promise<void> {
   if (ms <= 0 || !classifyInFlight.size) return;
-  await Promise.race([Promise.allSettled([...classifyInFlight.values()]), new Promise((r) => setTimeout(r, ms))]);
+  await withDeadline(Promise.allSettled([...classifyInFlight.values()]), ms);
 }
 
 /**

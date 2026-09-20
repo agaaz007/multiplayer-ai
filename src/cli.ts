@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { withUsageInvocation, drainUsageWrites, usageHealth, usageSpoolHealth, type TrafficClass } from "./usage.js";
+import { spoolPruneAcknowledged } from "./helper/spool.js";
 import { flushUsage } from "./continuity/usage.js";
 import { handoffSummary, updateHandoff, startHandoff } from "./continuity/handoffs.js";
 import { resolveHarnessIdentity } from "./continuity/safety.js";
@@ -272,7 +273,7 @@ async function main() {
             // continuity: teammates' open threads + any notices the helper fetched. Fails open in 4 s.
             try {
               const identity = resolveHarnessIdentity(input?.session_id);
-              const threads = await withUsageInvocation(cfg,{tool:"hook:SessionStart",session_id:identity.ok ? identity.id : undefined,identity:identity.ok ? identity.identity : undefined,purpose:"automatic_brief",traffic_class:process.env.LEDGER_SELFTEST === "1" ? "evaluation" : "ordinary"},() => openThreadsText(cfg!, { cwd: input?.cwd ? String(input.cwd) : process.cwd(), timeoutMs: 8000 })); // SessionStart hook allows 30 s; Neon connects have taken 7-8 s
+              const threads = await withUsageInvocation(cfg,{tool:"hook:SessionStart",session_id:identity.ok ? identity.id : undefined,identity:identity.ok ? identity.identity : undefined,purpose:"automatic_brief",traffic_class:process.env.LEDGER_SELFTEST === "1" ? "evaluation" : (["ordinary","evaluation","audit","maintenance"].includes(process.env.LEDGER_TRAFFIC_CLASS ?? "") ? process.env.LEDGER_TRAFFIC_CLASS as TrafficClass : "unknown")},() => openThreadsText(cfg!, { cwd: input?.cwd ? String(input.cwd) : process.cwd(), timeoutMs: 8000 })); // SessionStart hook allows 30 s; Neon connects have taken 7-8 s
               if (threads) parts.push(threads);
             } catch { /* never block a session start */ }
           }
@@ -571,6 +572,14 @@ async function main() {
         }
         if (sub === "start") { await helperLoop(cfg, { intervalMs: parseDuration(flag(args, "--interval"), 10_000), push: !args.includes("--no-push") }); await closePools(); return; }
         if (sub === "install") { console.log(installHelper().join("\n")); return; }
+        if (sub === "prune-spool") {
+          const session = flag(args,"--session");
+          if (!session || !/^[A-Za-z0-9_-]{8,200}$/.test(session)) throw new Error("usage: ledger helper prune-spool --session <id> [--before <ISO>]");
+          const before = flag(args,"--before");
+          const removed = spoolPruneAcknowledged(session,before ? new Date(before) : undefined);
+          console.log(`Removed ${removed} old acknowledged segments; pending and rollback-window evidence retained.`);
+          return;
+        }
         if (sub === "status") {
           console.log(helperStatus().join("\n"));
           const st = loadState();
@@ -579,7 +588,7 @@ async function main() {
           for (const [sid, s] of live.slice(0, 10)) console.log(`  ${sid.slice(0, 8)} ${s.harness} ${s.repo ? path.basename(s.repo) : "(no repo)"}${s.branch ? `@${s.branch}` : ""} thread ${s.threadId?.slice(0, 8) ?? `unbound${s.unbound_reason ? ` (${s.unbound_reason})` : ""}`} offset ${s.offset}${s.lastCommit ? ` wip ${s.lastCommit.slice(0, 8)}` : ""}`);
           return;
         }
-        throw new Error("usage: ledger helper once|start|status|install [--no-push] [--interval 10s]");
+        throw new Error("usage: ledger helper once|start|status|install|prune-spool [--no-push] [--interval 10s]");
       }
       case "threads": {
         const cfg = loadConfig();
@@ -600,7 +609,7 @@ async function main() {
         const track = async (pack:any,source_kind:"record"|"thread",source_id:string) => {
           if (!sid || mode === "inspect" || ((source_kind === "thread" || pack.claim.thread_id) && !pack.claim.acquired)) return;
           const code = source_kind === "thread" || pack.record?.kind === "implementation";
-          const verified = source_kind === "thread" ? Boolean(pack.loss_window?.verified_snapshot_at) : Boolean(pack.bootstrap?.length && pack.contributing_sessions?.some((s:any)=>s.verified_snapshot_at && s.wip_commit && pack.bootstrap.join("\n").includes(s.wip_commit)));
+          const verified = pack.snapshot?.status === "verified" && Boolean(pack.snapshot.commit && pack.snapshot.verified_at);
           try {
             const id = await startHandoff(getPool(cfg),{source_kind,source_id,destination_session:sid,author:cfg.author,mode:mode as "continue"|"fork",work_kind:code ? "code" : "analysis",source_snapshot_verified:verified,pending_operations:pack.pending_operations?.length ?? 0});
             console.log(`\nHandoff attempt ${id}: pack delivered, not completed. Report exact captured verification, validation, and delivered-result events with ledger handoff update.`);
