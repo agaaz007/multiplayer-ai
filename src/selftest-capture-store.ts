@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { assertSafeSelftestDatabase, assertSelftestDatabaseMarker } from "./selftest-db-guard.js";
 import { getPool, migrate, closePools } from "./continuity/db.js";
-import { appendEvents, upsertSession, sessionEvents, putArtifact } from "./continuity/store.js";
+import { appendEvents, upsertSession, sessionEvents, putArtifact, createThread, claimThread, updateSession, publishCheckpoint, headCheckpoint } from "./continuity/store.js";
 import type { NormEvent } from "./continuity/events.js";
 const url = process.env.LEDGER_CONTINUITY_DB ?? ""; assertSafeSelftestDatabase(url);
 const pool = getPool({ author: "fixture", continuity: { database_url: url } } as any);
@@ -24,4 +24,14 @@ try {
   const artifacts = await Promise.all(Array.from({ length: 8 }, () => putArtifact(pool, { sha256, kind: "tool_output", bytes, session_id: id })));
   assert.equal(new Set(artifacts.map(a => a.id)).size, 1); assert.equal((await pool.query("select inline from cont_artifacts where sha256=$1", [sha256])).rows[0].inline.toString(), bytes.toString());
   console.log("ok 3. concurrent content-addressed artifact inserts converge on one exact retained body");
+  const thread = await createThread(pool, { repo: "fixture://capture", title: "snapshot order", created_by: "fixture" });
+  await updateSession(pool, id, { thread_id: thread.id });
+  const claim = await claimThread(pool, thread.id, id, "fixture"); assert.equal(claim.ok, true); if (!claim.ok) throw new Error("fixture claim failed");
+  const make = (seq: number, order: number) => publishCheckpoint(pool, { thread_id: thread.id, session_id: id, generation: claim.generation, kind: "snapshot", through_event_seq: seq, structured_state: { snapshot_dispatch_order: order } });
+  const newer = await make(43, 200); assert.equal(newer.advanced, true);
+  const older = await make(42, 100); assert.equal(older.advanced, false);
+  const sameWatermarkOldJob = await make(43, 199); assert.equal(sameWatermarkOldJob.advanced, false);
+  assert.equal((await headCheckpoint(pool, thread.id))!.id, newer.id);
+  assert.equal((await make(43, 201)).advanced, true);
+  console.log("ok 4. delayed same-generation publication cannot regress event watermark or newer snapshot dispatch");
 } finally { await closePools(); }
