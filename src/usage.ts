@@ -166,7 +166,7 @@ export function instrumentMcpTools(server: {registerTool: (...args:any[]) => any
     const allowed=new Set<TrafficClass>(["ordinary","evaluation","audit","maintenance","unknown"]);
     const configured=process.env.LEDGER_TRAFFIC_CLASS as TrafficClass;
     const traffic_class=process.env.LEDGER_SELFTEST === "1" ? "evaluation" : allowed.has(configured) ? configured : "unknown";
-    const readTools=new Set(["ledger_brief","ledger_search","ledger_get","ledger_stats","ledger_investigation","ledger_investigations","ledger_threads","ledger_thread_get","ledger_records","ledger_record_get","ledger_unassigned","ledger_events","ledger_evidence_search","ledger_artifact_get","ledger_impact","ledger_show_contribution"]);
+    const readTools=new Set(["ledger_resume","ledger_brief","ledger_search","ledger_get","ledger_stats","ledger_investigation","ledger_investigations","ledger_threads","ledger_thread_get","ledger_records","ledger_record_get","ledger_unassigned","ledger_events","ledger_evidence_search","ledger_artifact_get","ledger_impact","ledger_show_contribution"]);
     const purpose:UsagePurpose=readTools.has(name) || config?.annotations?.readOnlyHint ? "interactive_read" : "maintenance";
     try {
       return await withUsageInvocation(cfg,{tool:name,session_id:resolved.ok ? resolved.id : undefined,identity:resolved.ok ? resolved.identity : undefined,traffic_class,purpose,logical_operation_key:typeof args[0]?.request_id === "string" ? createHash("sha256").update(JSON.stringify([cfg.author,resolved.ok ? resolved.id : null,name,args[0].request_id])).digest("hex") : undefined,version:process.env.LEDGER_BUILD_COMMIT ?? "0.1.0"},async () => {
