@@ -21,6 +21,14 @@ import { objectAuthority, type ObjectAuthorityLabel, type ObjectAuthorityTier } 
  *
  * Edges point from an object to what it rests on: a successor to the predecessor it supersedes,
  * a finding to the definition it used, a decision to its evidence.
+ *
+ * Inside those rules the node reads as something a person recognises: the question a finding
+ * answered (the decision taken, the metric fixed, what shipped) is the label, the id is the
+ * address under it, and the author is the ink the words are set in plus a written-out `by <name>`.
+ * Author gets ink and not border because border, fill and weight are already spoken for by rule 1,
+ * and a second claim on that channel would let a person's colour read as an authority level. The
+ * name is written out because a channel that exists only as a hue is unreadable to a reader who
+ * cannot separate the hues.
  */
 
 export type EdgeKind =
@@ -43,10 +51,18 @@ export type EdgeKind =
  */
 export type EdgeStrength = "pinned" | "stale" | "named";
 
+/**
+ * What leads the node: the object's own words, or its address. Both are always drawn; this picks
+ * which one is first and therefore which one a reader scanning the picture actually reads.
+ */
+export type LabelMode = "question" | "id";
+
 export interface GraphNode {
   id: string;
   type: LedgerType;
   title: string;
+  /** The object in its author's words: question, decision, metric, or what shipped. */
+  headline: string;
   author: string;
   created: string;
   tier: ObjectAuthorityTier;
@@ -100,6 +116,7 @@ export interface Graph {
   edges: GraphEdge[];
   summary: GraphSummary;
   scope: string;
+  labels: LabelMode;
 }
 
 export interface GraphOpts {
@@ -121,6 +138,8 @@ export interface GraphOpts {
   impact?: string;
   /** Draw dashed `definitions_used` name edges. Off by default: a name is not lineage. */
   names?: boolean;
+  /** Lead each node with its question or with its id. Defaults to the question. */
+  labels?: LabelMode;
 }
 
 // ---------- build ----------
@@ -234,6 +253,21 @@ function unpinnedDefinitions(o: LedgerObject, byMetric: Set<string>, byId: Map<s
   return names.filter((n) => !pinned.has(n) && byMetric.has(n));
 }
 
+/**
+ * The object in the words whoever recorded it used: the question a finding answered, the decision
+ * taken, the metric a definition fixes, what a change shipped. A reader recognises their own
+ * question in a picture; nobody recognises `fnd-20260904-...-gyt8`. Title is the fallback, and on a
+ * legacy record written before the field existed it is all there is.
+ */
+function headline(o: LedgerObject): string {
+  const own =
+    o.type === "finding" ? o.fields.question :
+    o.type === "decision" ? o.fields.decision :
+    o.type === "definition" ? o.fields.metric :
+    o.fields.what;
+  return (typeof own === "string" && own.trim()) || o.title;
+}
+
 export function buildGraph(cfg: Config, opts: GraphOpts = {}): Graph {
   const objects = loadAll(cfg, TYPES);
   const byId = new Map(objects.map((o) => [o.id, o]));
@@ -256,7 +290,7 @@ export function buildGraph(cfg: Config, opts: GraphOpts = {}): Graph {
     const authority = resolveAccepted(objects, o.id);
     const { tier, label } = objectAuthority(o, authority);
     return {
-      id: o.id, type: o.type, title: o.title, author: o.author, created: o.created, tier, label,
+      id: o.id, type: o.type, title: o.title, headline: headline(o), author: o.author, created: o.created, tier, label,
       verification: o.type === "finding" ? verification(objects, o).status : undefined,
       conflict: conflictOf.has(o.id),
       correction: o.supersedes ? (o.fields.correction as Correction | undefined)?.effect : undefined,
@@ -351,7 +385,7 @@ export function buildGraph(cfg: Config, opts: GraphOpts = {}): Graph {
     clipped_edges: clipped,
     dangling: [...dangling].filter((id) => !byId.has(id)),
   };
-  return { nodes, edges, summary, scope: scopeLine(opts, summary) };
+  return { nodes, edges, summary, scope: scopeLine(opts, summary), labels: opts.labels ?? "question" };
 }
 
 /** One line naming what the picture covers and what it cuts, so a reader never guesses the scope. */
@@ -364,6 +398,7 @@ export function scopeLine(opts: GraphOpts, s: GraphSummary): string {
     opts.id ? `ego ${opts.id} depth ${opts.depth ?? 2}` : opts.impact ? `blast radius of ${opts.impact}` : "whole ledger",
     opts.currentOnly ? "current only" : "including superseded and drafts",
     opts.names ? "name edges drawn" : "name edges omitted",
+    opts.labels === "id" ? "labelled by id" : "labelled by question, id underneath",
   ];
   const notes = [
     `${s.nodes} nodes (${s.current} current · ${s.draft} draft · ${s.retired} retired)`,
@@ -380,6 +415,9 @@ export function scopeLine(opts: GraphOpts, s: GraphSummary): string {
 // ---------- render ----------
 
 export type GraphFormat = "dot" | "mermaid" | "json";
+
+/** Room for a real question without turning the node into a paragraph. */
+const HEADLINE_CHARS = 72;
 
 function clip(s: string, n = 46): string {
   const flat = s.replace(/\s+/g, " ").trim();
@@ -404,29 +442,80 @@ function isAlarm(n: GraphNode): boolean {
   return n.conflict || n.verification === "contested" || Boolean(n.needs_review) || Boolean(n.lineage_unresolved);
 }
 
+/**
+ * The node as it is read: what it is about, where to find it, who recorded it, then the markers
+ * that change what to do with it. `--labels id` leads with the address for a reader chasing an id;
+ * neither mode drops a line, they only swap which one is first.
+ */
+function nodeLines(n: GraphNode, mode: LabelMode): string[] {
+  const lead = mode === "id"
+    ? [n.id, clip(n.title, HEADLINE_CHARS)]
+    : [clip(n.headline, HEADLINE_CHARS), n.id];
+  return [...lead, `by ${n.author}`, ...badges(n)];
+}
+
+/**
+ * Ink, not border: tier owns border, fill and weight (rule 1), so author takes the colour of the
+ * words. The hues sit away from the tier palette (#1a7f37 green, #9a6700 amber, #8c959f grey,
+ * #cf222e red) so that a person's colour is never read as an authority level.
+ */
+const AUTHOR_INK = ["#8250df", "#0550ae", "#0f7b6c", "#bf3989", "#953800", "#3d3d8a"];
+
+export interface AuthorInk {
+  color: string;
+  /** Mermaid classDef name, and the dot legend node id. */
+  cls: string;
+}
+
+/**
+ * One ink per person, assigned in sorted order of the authors present in this picture rather than
+ * in first-seen order: the data repo re-renders GRAPH.md on every push, and ink that moved with node
+ * order would churn the diff while nothing had changed. The mapping is per render and is always
+ * drawn next to it, so a narrower selection may ink the same person differently; with more people
+ * than inks the palette repeats outright. Either way every node also carries `by <name>` as text:
+ * the hue is a shortcut, the name is the fact.
+ */
+export function authorInk(nodes: GraphNode[]): Map<string, AuthorInk> {
+  const out = new Map<string, AuthorInk>();
+  const taken = new Set<string>();
+  [...new Set(nodes.map((n) => n.author))].sort().forEach((author, i) => {
+    const slug = author.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+    const base = slug ? `by_${slug}` : "by_unattributed";
+    let cls = base;
+    for (let k = 2; taken.has(cls); k++) cls = `${base}_${k}`;
+    taken.add(cls);
+    out.set(author, { color: AUTHOR_INK[i % AUTHOR_INK.length], cls });
+  });
+  return out;
+}
+
 const DOT_SHAPE: Record<LedgerType, string> = {
   definition: "box", finding: "ellipse", change: "parallelogram", decision: "hexagon",
 };
 
+/** A backslash inside a question would otherwise escape the quote that ends the dot label. */
+const dotText = (s: string) => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+
 /**
  * Tier drives style, fill and pen weight; markers only raise the pen and the border colour on top.
+ * fontcolor belongs to the author (see authorInk) and to nothing else.
  * No `rank`, no date clustering: position comes from lineage edges and nothing else.
  */
-function dotNode(n: GraphNode): string {
+function dotNode(n: GraphNode, mode: LabelMode, ink: Map<string, AuthorInk>): string {
   const tier = n.tier === 3
-    ? { color: "#1a7f37", fill: "#f2fbf4", font: "#24292f", style: "filled,solid", pen: 1.4 }
+    ? { color: "#1a7f37", fill: "#f2fbf4", style: "filled,solid", pen: 1.4 }
     : n.tier === 2
-      ? { color: "#9a6700", fill: "#fff8e5", font: "#24292f", style: "filled,dashed", pen: 1.4 }
-      : { color: "#8c959f", fill: "#f6f8fa", font: "#6e7781", style: "filled,dotted", pen: 1.0 };
+      ? { color: "#9a6700", fill: "#fff8e5", style: "filled,dashed", pen: 1.4 }
+      : { color: "#8c959f", fill: "#f6f8fa", style: "filled,dotted", pen: 1.0 };
   const alarm = isAlarm(n);
-  const label = [clip(n.title), `(${n.id})`, ...badges(n)].join("\\n");
+  const label = nodeLines(n, mode).map(dotText).join("\\n");
   const attrs = [
-    `label="${label.replace(/"/g, '\\"')}"`,
+    `label="${label}"`,
     `shape=${DOT_SHAPE[n.type]}`,
     `style="${tier.style}"`,
     `fillcolor="${alarm ? "#fff0ef" : tier.fill}"`,
     `color="${alarm ? "#cf222e" : tier.color}"`,
-    `fontcolor="${tier.font}"`,
+    `fontcolor="${ink.get(n.author)?.color ?? "#24292f"}"`,
     `penwidth=${alarm ? 2.6 : tier.pen}`,
     n.verification === "reproduced" ? "peripheries=2" : null,
   ].filter(truthy);
@@ -439,15 +528,15 @@ function dotEdge(e: GraphEdge): string {
     return `  "${e.from}" -> "${e.to}" [dir=none, style=dashed, color="#cf222e", penwidth=2.2, fontcolor="#cf222e", label="unresolved"];`;
   const style = e.strength === "pinned" ? "solid" : "dashed";
   const color = e.strength === "stale" ? "#cf222e" : e.strength === "named" ? "#8c959f" : e.kind === "supersedes" ? "#0969da" : "#57606a";
-  return `  "${e.from}" -> "${e.to}" [style=${style}, color="${color}", fontcolor="${color}", fontsize=9, label="${clip(label, 34).replace(/"/g, '\\"')}"];`;
+  return `  "${e.from}" -> "${e.to}" [style=${style}, color="${color}", fontcolor="${color}", fontsize=9, label="${dotText(clip(label, 34))}"];`;
 }
 
-const DOT_LEGEND = `  subgraph cluster_legend {
+const DOT_TIER_LEGEND = `  subgraph cluster_legend {
     label="authority tier is the border, not a tooltip";
     fontsize=10; color="#d0d7de"; style=dashed;
     "legend_current" [label="current (accepted head)", shape=box, style="filled,solid", fillcolor="#f2fbf4", color="#1a7f37", penwidth=1.4];
     "legend_draft" [label="draft (never in force)", shape=box, style="filled,dashed", fillcolor="#fff8e5", color="#9a6700", penwidth=1.4];
-    "legend_retired" [label="superseded / deprecated", shape=box, style="filled,dotted", fillcolor="#f6f8fa", color="#8c959f", fontcolor="#6e7781"];
+    "legend_retired" [label="superseded / deprecated", shape=box, style="filled,dotted", fillcolor="#f6f8fa", color="#8c959f"];
     "legend_alarm" [label="unresolved conflict · contested · needs review", shape=box, style="filled,solid", fillcolor="#fff0ef", color="#cf222e", penwidth=2.6];
     "legend_pinned" [label="pinned content_version", shape=plaintext];
     "legend_named" [label="name or bare id: unresolved lineage", shape=plaintext];
@@ -457,7 +546,26 @@ const DOT_LEGEND = `  subgraph cluster_legend {
     "legend_retired" -> "legend_alarm" [style=invis];
   }`;
 
+/** The ink map, spelled out. Without it the colour of the words is decoration rather than a channel. */
+function dotAuthorLegend(ink: Map<string, AuthorInk>): string | null {
+  const people = [...ink.entries()];
+  if (!people.length) return null;
+  const rows = people.map(([author, v]) =>
+    `    "legend_${v.cls}" [label="by ${dotText(author)}", shape=plaintext, fontcolor="${v.color}"];`);
+  const stack = people.slice(1).map(([, v], i) =>
+    `    "legend_${people[i][1].cls}" -> "legend_${v.cls}" [style=invis];`);
+  return [
+    "  subgraph cluster_authors {",
+    `    label="who recorded it: the colour of the words";`,
+    `    fontsize=10; color="#d0d7de"; style=dashed;`,
+    ...rows,
+    ...stack,
+    "  }",
+  ].join("\n");
+}
+
 export function toDot(g: Graph, legend = false): string {
+  const ink = authorInk(g.nodes);
   return [
     "digraph ledger {",
     `  // ${g.scope.split("\n").join("\n  // ")}`,
@@ -466,9 +574,9 @@ export function toDot(g: Graph, legend = false): string {
     `  graph [rankdir=TB, splines=spline, nodesep=0.45, ranksep=0.7, fontname="Helvetica", bgcolor="white"];`,
     `  node [fontname="Helvetica", fontsize=10, margin=0.12];`,
     `  edge [fontname="Helvetica"];`,
-    ...g.nodes.map(dotNode),
+    ...g.nodes.map((n) => dotNode(n, g.labels, ink)),
     ...g.edges.map(dotEdge),
-    ...(legend ? [DOT_LEGEND] : []),
+    ...(legend ? [DOT_TIER_LEGEND, dotAuthorLegend(ink)].filter(truthy) : []),
     "}",
   ].join("\n");
 }
@@ -480,35 +588,65 @@ const MERMAID_SHAPE: Record<LedgerType, (id: string, label: string) => string> =
   decision: (id, l) => `${id}{{"${l}"}}`,
 };
 
+/**
+ * A real question carries the characters mermaid reads as syntax. Each becomes a numeric entity,
+ * which mermaid decodes back into the original character when it draws the label, so the reader
+ * sees what the author wrote. `#` is replaced first: every other replacement emits one.
+ *
+ * Angle brackets are the exception. GitHub renders the block with htmlLabels on, where a decoded
+ * `<` is markup rather than text, so they become single-angle quotes instead: readable, not a tag.
+ */
+const MERMAID_ESCAPES: [RegExp, string][] = [
+  [/#/g, "#35;"],
+  [/"/g, "#quot;"],
+  [/\|/g, "#124;"],
+  [/\(/g, "#40;"],
+  [/\)/g, "#41;"],
+  [/\[/g, "#91;"],
+  [/\]/g, "#93;"],
+  [/\{/g, "#123;"],
+  [/\}/g, "#125;"],
+  [/`/g, "#96;"],
+  [/</g, "‹"],
+  [/>/g, "›"],
+];
+const mermaidText = (s: string) => MERMAID_ESCAPES.reduce((acc, [from, to]) => acc.replace(from, to), s);
+
 export function toMermaid(g: Graph, legend = false): string {
   // Ledger ids contain characters mermaid treats as syntax, so nodes get positional ids and carry
   // the real id in their label. The label is the address a reader types into `ledger get`.
   const alias = new Map(g.nodes.map((n, i) => [n.id, `n${i}`]));
-  const text = (s: string) => s.replace(/"/g, "#quot;").replace(/[<>]/g, "");
+  const ink = authorInk(g.nodes);
   const lines = [
     "%%{init: {'flowchart': {'curve': 'basis'}}}%%",
     "flowchart TD",
     ...g.scope.split("\n").map((l) => `%% ${l}`),
     "%% Lineage layout only; never ordered by date.",
-    "  classDef current stroke:#1a7f37,fill:#f2fbf4,color:#24292f,stroke-width:2px",
-    "  classDef draft stroke:#9a6700,fill:#fff8e5,color:#24292f,stroke-width:2px,stroke-dasharray:5 4",
-    "  classDef retired stroke:#8c959f,fill:#f6f8fa,color:#6e7781,stroke-width:1px,stroke-dasharray:2 4",
-    "  classDef currentAlarm stroke:#cf222e,fill:#fff0ef,color:#24292f,stroke-width:4px",
-    "  classDef draftAlarm stroke:#cf222e,fill:#fff8e5,color:#24292f,stroke-width:4px,stroke-dasharray:5 4",
-    "  classDef retiredAlarm stroke:#cf222e,fill:#f6f8fa,color:#6e7781,stroke-width:4px,stroke-dasharray:2 4",
+    // Tier owns stroke, fill, dash and weight, and deliberately sets no `color`: that is the author
+    // channel, and two classDefs writing one property would settle a node's ink by stylesheet order
+    // rather than by what it means.
+    "  classDef current stroke:#1a7f37,fill:#f2fbf4,stroke-width:2px",
+    "  classDef draft stroke:#9a6700,fill:#fff8e5,stroke-width:2px,stroke-dasharray:5 4",
+    "  classDef retired stroke:#8c959f,fill:#f6f8fa,stroke-width:1px,stroke-dasharray:2 4",
+    "  classDef currentAlarm stroke:#cf222e,fill:#fff0ef,stroke-width:4px",
+    "  classDef draftAlarm stroke:#cf222e,fill:#fff8e5,stroke-width:4px,stroke-dasharray:5 4",
+    "  classDef retiredAlarm stroke:#cf222e,fill:#f6f8fa,stroke-width:4px,stroke-dasharray:2 4",
+    ...[...ink.values()].map((v) => `  classDef ${v.cls} color:${v.color}`),
   ];
   for (const n of g.nodes) {
-    const label = [clip(n.title), `${n.id}`, ...badges(n)].map(text).join("<br/>");
+    const label = nodeLines(n, g.labels).map(mermaidText).join("<br/>");
     lines.push(`  ${MERMAID_SHAPE[n.type](alias.get(n.id)!, label)}`);
-    // Exactly one class token per node. `class <node> a,b` would be read as a node list plus the
-    // single class name "b", silently dropping the styling a conflict head depends on.
+    // Exactly one class token per statement. `class <node> a,b` would be read as a node list plus the
+    // single class name "b", silently dropping the styling a conflict head depends on. Two classes on
+    // one node are therefore two statements: tier, then author.
     const tier = n.tier === 3 ? "current" : n.tier === 2 ? "draft" : "retired";
     lines.push(`  class ${alias.get(n.id)} ${isAlarm(n) ? `${tier}Alarm` : tier}`);
+    lines.push(`  class ${alias.get(n.id)} ${ink.get(n.author)!.cls}`);
   }
   for (const e of g.edges) {
     const a = alias.get(e.from)!;
     const b = alias.get(e.to)!;
-    const label = text(clip([e.kind, e.detail].filter(truthy).join(": "), 34));
+    const label = mermaidText(clip([e.kind, e.detail].filter(truthy).join(": "), 34));
     // `---` is an undirected link: an unresolved conflict must not render an arrow, because an arrow
     // is a claim about which head won and no such claim exists.
     if (e.kind === "unresolved") lines.push(`  ${a} ---|"unresolved"| ${b}`);
@@ -526,6 +664,12 @@ export function toMermaid(g: Graph, legend = false): string {
       "    L5[\"solid = pinned content_version\"] -.->|\"dashed = name or bare id, unresolved lineage\"| L6[\" \"]",
       "  end"
     );
+    const people = [...ink.entries()];
+    if (people.length) {
+      lines.push("  subgraph authors[\"who recorded it: the colour of the words\"]", "    direction LR");
+      people.forEach(([author, v], i) => lines.push(`    A${i}["by ${mermaidText(author)}"]`, `    class A${i} ${v.cls}`));
+      lines.push("  end");
+    }
   }
   return lines.join("\n");
 }

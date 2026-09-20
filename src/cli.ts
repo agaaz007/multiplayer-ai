@@ -18,8 +18,12 @@ import { verifyAcceptanceEvidence } from './acceptance-evidence.js';
 import { validateRecordCoverage, acknowledgeLocalCapture, reconcileSharedCapture } from './capture-boundary.js';
 import { investigation } from './investigation.js';
 import { correctionImpact, objectVersion, resolveAccepted } from './authority.js';
+<<<<<<< HEAD
 import { buildGraph, renderGraph, type GraphFormat } from './graph.js';
 import { memoryReport, renderMemoryReport } from './interpret.js';
+=======
+import { buildGraph, renderGraph, type GraphFormat, type LabelMode } from './graph.js';
+>>>>>>> worktree-agent-aaed50ebfa5a4b2c8
 import { AnalysisScopeSchema, AnalyticalDateSchema } from './schema.js';
 import { DEFAULT_QUIET_MS, pendingDrafts, reconcile } from "./extract.js";
 import { continuityConfigured, getPool, migrate, tableList, closePools } from "./continuity/db.js";
@@ -55,12 +59,16 @@ const USAGE = `ledger — shared definitions, findings, changes, decisions for y
   ledger impact <correction-id>           direct/transitive review paths and unresolved lineage
   ledger graph [--format mermaid|dot|json] [--id ID --depth N] [--impact ID]
                                          render the lineage already in the ledger: supersedes, pinned
-                                         dependencies, reproductions, evidence. Selection:
+                                         dependencies, reproductions, evidence. Every node leads with
+                                         the question it answered (the decision, the metric, what
+                                         shipped), carries its id underneath and is inked by author;
+                                         --labels id leads with the id instead. Selection:
                                          --conflicts (unresolved accepted heads) · --unpinned (findings
                                          on a definition name with no pinned version) · --impact <id>
                                          (blast radius of a correction). Filters: --type --tag --author
                                          --days N --current-only. --names draws dashed definitions_used
-                                         edges; --depth widens a selection; --legend adds a key.
+                                         edges; --depth widens a selection; --legend adds a key to the
+                                         tiers and the author inks.
                                          Scope line and unresolved conflicts go to stderr.
   ledger memory [--days N] [--json]      what the memory is doing: disagreements caught, corrections
                                          and their blast radius, work reused across people, and the
@@ -360,6 +368,8 @@ async function main() {
         const days = flag(args, "--days");
         const t = flag(args, "--type") as LedgerType | undefined;
         if (t && !TYPES.includes(t)) throw new Error(`unknown --type ${t}; use ${TYPES.join(", ")}`);
+        const labels = (flag(args, "--labels") ?? "question") as LabelMode;
+        if (!["question", "id"].includes(labels)) throw new Error(`unknown --labels ${labels}; use question or id`);
         const g = buildGraph(loadConfig(), {
           types: t ? [t] : undefined,
           tags: flag(args, "--tag")?.split(","),
@@ -372,6 +382,7 @@ async function main() {
           unpinnedOnly: args.includes("--unpinned"),
           impact: flag(args, "--impact"),
           names: args.includes("--names"),
+          labels,
         });
         // The scope line goes to stderr so stdout stays a clean pipe into graphviz or a mermaid paste,
         // while a reader still sees what the picture cut. Silence here would let a filtered graph
