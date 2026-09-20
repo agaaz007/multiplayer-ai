@@ -176,6 +176,7 @@ function isHarnessInjected(raw: string): boolean {
 function toolRequested(id: string, tool: string, input: unknown, at: string | undefined, dataTools: string[]): NormEvent {
   const calls = dataToolCalls(tool, input, id, dataTools);
   const ledgerCalls = normalizeToolCalls(tool, input, id).filter(c => /(?:^|_)ledger_/.test(c.tool));
+  const capturedCalls = calls.length ? calls : ledgerCalls;
   const summary = summarize(calls.length === 1 && calls[0].wrapper && calls[0].input_complete ? calls[0].input : input, INPUT_MAX);
   const full = inputText(input), sourceBytes = Buffer.byteLength(full, "utf8");
   // Do not run expensive full-text redaction on material we cannot store anyway.
@@ -192,11 +193,11 @@ function toolRequested(id: string, tool: string, input: unknown, at: string | un
     payload.input_format = typeof input === "string" ? "text" : "json";
     payload.input_byte_size = bytes;
     payload.input_redactions = redacted.hits;
-    payload.input_complete = redacted.hits === 0 && calls.every(call => call.input_complete) && bytes <= ARTIFACT_MAX;
+    payload.input_complete = redacted.hits === 0 && capturedCalls.every(call => call.input_complete) && bytes <= ARTIFACT_MAX;
     payload.input_availability = bytes > ARTIFACT_MAX ? "oversized" : "pending_artifact";
     if (bytes <= ARTIFACT_MAX) payload._full_input = redacted.text;
     else payload.input_gap = { kind: "input_oversized", byte_size: bytes, note: "Full query input exceeds ARTIFACT_MAX; only a labelled preview is available." };
-    if (calls.some(call => !call.input_complete)) payload.input_gap = { kind: "wrapper_arguments_unresolved", note: "Wrapper source retained, but runtime query arguments are unknown; never execute it as a reconstructed query." };
+    if (capturedCalls.some(call => !call.input_complete)) payload.input_gap = { kind: "wrapper_arguments_unresolved", note: "Wrapper source retained, but runtime query arguments are unknown; never execute it as a reconstructed query." };
   }
   return {
     producer_event_id: `${id}:requested`,

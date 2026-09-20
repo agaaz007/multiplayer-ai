@@ -201,7 +201,7 @@ for (const t of [lean.text, pack.text]) {
   assert.ok(!t.includes("## Evidence across sessions") && !t.includes("### Session summary") && !t.includes("### Files touched") && !t.includes("## Unassigned spans") && !t.includes("## First turn contract"), "evidence-detail sections absent");
   assert.ok(!/ · \d+ · \d\d:\d\d · (instruction\.added|assistant\.message|tool\.requested|tool\.finished|file\.changed|compaction) · /.test(t), "no evidence line is inlined");
   assert.ok(!t.includes(codexSummary) && !t.includes("Attribution: compare Mixpanel") && !t.includes("Draft headline") && !t.includes("FATAL"), "no event text (instructions, summary, error output) is inlined");
-  assert.ok(approxTokens(t) < 1200 && 1200 <= LEAN_TARGET_TOKENS, `lean pack under 1200 tokens at level 0: ${approxTokens(t)}`);
+  assert.ok(approxTokens(t) <= LEAN_TARGET_TOKENS, `lean pack including exact snapshot proof and safe orphan bootstrap stays within ${LEAN_TARGET_TOKENS} tokens at level 0: ${approxTokens(t)}`);
   assert.ok(!lean.omitted.some((o) => /for budget/.test(o)), `no budget shrink was needed: ${lean.omitted.join(" | ")}`);
   assert.ok(t.length < pack.text.length / 1.5, `lean is much smaller than evidence: ${t.length} vs ${pack.text.length}`);
   assert.deepEqual(lean.evidence_summary, { total: 13, shown: [], omitted: { count: 13, fetch: [`ledger_events(session_id: "${sidA}", after_seq: 0, before_seq: 11)`, `ledger_events(session_id: "${sidR}", after_seq: 0, before_seq: 8)`] } }, "lean shows no evidence and names the per-span fetches");

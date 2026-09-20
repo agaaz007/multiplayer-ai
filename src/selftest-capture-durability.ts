@@ -78,6 +78,9 @@ try {
   fs.writeFileSync(runtimeFile, JSON.stringify({ type: "event_msg", payload: { type: "mcp_tool_call_end", call_id: "inner-1", invocation: { server: "ledger", tool: "ledger_search", arguments: { query: "runtime query" } }, result: { Ok: { isError: true, content: [{ type: "text", text: JSON.stringify({ structuredContent: { usage: { source: "ledger_server", invocation_id: invocationId } } }) }] } } } }) + "\n");
   const runtime = streamTranscript(runtimeFile, 0, "codex").events.find(e => e.kind === "tool.result_meta")!;
   assert.equal(runtime.payload.server_invocation_id, invocationId); assert.equal(runtime.payload.success, false); assert.equal(runtime.payload.enclosing_call_id, undefined); assert.equal(runtime.payload.invocation_correlation, "server_identity"); assert.ok(String(runtime.payload._full_input).includes("runtime query"));
+  fs.writeFileSync(runtimeFile, JSON.stringify({ type: "response_item", payload: { type: "custom_tool_call", name: "exec", call_id: "wrapped", input: "if(false) await tools.mcp__ledger__ledger_search(dynamicArguments)" } }) + "\n");
+  const candidate = streamTranscript(runtimeFile, 0, "codex").events.find(e => e.kind === "tool.requested")!;
+  assert.equal(candidate.payload.input_complete, false); assert.equal(candidate.payload.is_data_tool, false); assert.equal(candidate.payload.server_invocation_id, undefined);
   ok("runtime MCP identity/error/input are retained without executing wrapper source or guessing parent");
   // A cwd transition always starts a separate permission-adjudicated chunk.
   const denied = path.join(temp, "denied"); fs.mkdirSync(denied); execFileSync("git", ["init", "-q", denied]);
