@@ -234,6 +234,8 @@ export async function declareInvestigation(pool: pg.Pool, cfg: Config, opts: Bin
   return mutation(pool,cfg,opts,"declare",{question,goal:opts.goal?.trim() ?? null,repo:opts.repo ?? null},async c => {
     await c.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [`question:${normalizeTitle(question)}`]);
     const title = clip(question,TITLE_MAX);
+    const exact=await c.query(`select id,title,created_by from cont_records where kind='investigation' and status='open' and investigation_question_key=$1`,[normalizeTitle(question)]);
+    if(exact.rows[0]) throw new Error(`An open investigation with a near-identical question already exists: "${exact.rows[0].title}" (${exact.rows[0].id}). Bind to it with ledger_investigation_bind instead of declaring a new one.`);
     const open = await openInvestigationRows(c,{cap:500});
     const dup = open.map(r => ({r,s:titleSimilarity(title,r.title)})).filter(x => x.s >= NEAR_IDENTICAL_TITLE).sort((a,b) => b.s-a.s)[0];
     if (dup) throw new Error(`An open investigation with a near-identical question already exists: "${dup.r.title}" (${dup.r.record_id}, by ${dup.r.created_by}, match ${dup.s.toFixed(2)}). Bind to it with ledger_investigation_bind(record_id: "${dup.r.record_id}") instead of declaring a new one; if the question is genuinely different, reword it so the difference is in the title.`);

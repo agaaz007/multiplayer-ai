@@ -9,8 +9,8 @@ import { assertSafeSelftestDatabase, assertSelftestDatabaseMarker } from "./self
 import { getPool,migrate,closePools } from "./continuity/db.js";
 import { bindInvestigation,declareInvestigation,sessionBinding } from "./continuity/investigations.js";
 import { resolveHarnessIdentity,resolveHarnessSession } from "./continuity/safety.js";
-import { withUsageInvocation,drainUsageWrites,usageDirectory,sqlOperationClass } from "./usage.js";
-import { flushUsage } from "./continuity/usage.js";
+import { withUsageInvocation,drainUsageWrites,usageDirectory,sqlOperationClass,instrumentMcpTools,usageSpoolHealth } from "./usage.js";
+import { flushUsage,usageSummary } from "./continuity/usage.js";
 const url=process.env.LEDGER_CONTINUITY_DB!;
 assertSafeSelftestDatabase(url);
 const tmp=await fs.mkdtemp(path.join(os.tmpdir(),"ledger-bind-usage-"));
@@ -84,4 +84,21 @@ assert.equal(sqlOperationClass("with rows as (delete from t returning *) select 
 assert.equal(sqlOperationClass("select 1"),"read");
 assert.ok(!(await fs.readdir(usageDirectory())).some(f=>f.endsWith(".json")),"acknowledged frames removed");
 console.log("ok usage: direct/client SQL counts, zero rows, separate automatic purpose, no recursion, outage/replay and final outcome ordering");
+
+const handlers=new Map<string, (...args:any[])=>Promise<any>>();
+const server={registerTool:(name:string,_config:any,handler:(...args:any[])=>Promise<any>)=>{handlers.set(name,handler);}};
+instrumentMcpTools(server,{...cfg,continuity:undefined});
+server.registerTool("ledger_records",{},async()=>({content:[],structuredContent:{sources:[]}}));
+server.registerTool("ledger_brief",{},async()=>({content:[]}));
+const wrapped=await Promise.all([handlers.get("ledger_records")!({}),handlers.get("ledger_brief")!({})]);
+assert.ok(wrapped.every(r=>r.structuredContent.usage.source === "ledger_server"));
+assert.notEqual(wrapped[0].structuredContent.usage.invocation_id,wrapped[1].structuredContent.usage.invocation_id);
+await drainUsageWrites();
+assert.ok((await usageSpoolHealth()).pending_files >= 4,"disk backlog visible after memory writes drain");
+await flushUsage(pool);
+const report=await usageSummary(pool,{from:"2020-01-01T00:00:00Z",to:"2100-01-01T00:00:00Z",actor:cfg.author,traffic_class:"evaluation"});
+assert.ok(report.invocations.some(r=>r.tool === "ledger_brief" && r.purpose === "interactive_read"),"explicit MCP brief is intentional use");
+assert.ok(report.invocations.some(r=>r.tool === "ledger_brief" && r.purpose === "automatic_brief"),"automatic brief is separate");
+assert.equal(report.local_spool.pending_files,0);
+console.log("ok usage integration: concurrent MCP server IDs, read-tool classification, persistent disk backlog, grouped summary");
 await closePools();
