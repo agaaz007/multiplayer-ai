@@ -82,6 +82,13 @@ const unscopedDiscovery = analyticalContext(loadAll(cfg),{question:'Funnel hando
 assert.ok(!unscopedDiscovery.current.some(o=>o.id===legacy.id),'a missing task scope cannot promote a legacy candidate');
 assert.equal(analyticalContext(loadAll(cfg),{question:'Funnel handoff',scope,candidate_limit:1}).legacy_candidates.length,1);
 assert.ok(!analyticalContext(loadAll(cfg),{question:'Funnel handoff',definition_ids:[legacy.id]}).current.some(o=>o.id===legacy.id),'explicit legacy id does not bypass unknown scope');
+assert.throws(()=>analyticalContext(loadAll(cfg),{question:'Funnel',scope,candidate_limit:51}),/limits/);
+const lifecycleFixture = getById(cfg,legacy.id)!;
+const discardedCandidate = {...lifecycleFixture,id:'discarded-legacy-fixture',status:'deprecated' as const,fields:{...lifecycleFixture.fields,stance:'discarded'}};
+const supersededCandidate = {...lifecycleFixture,id:'superseded-legacy-fixture',status:'deprecated' as const,superseded_by:'replacement-fixture'};
+const labels = analyticalContext([discardedCandidate,supersededCandidate],{question:'Funnel handoff',scope,candidate_limit:50}).legacy_candidates;
+assert.equal(labels.find(c=>c.id===discardedCandidate.id)?.authority_label,'discarded cut');
+assert.equal(labels.find(c=>c.id===supersededCandidate.id)?.authority_label,'superseded by replacement-fixture');
 // Missing scope never edits or enriches the original record during a read.
 assert.equal(objectVersion(getById(cfg,legacy.id)!),legacy.content_version);
 

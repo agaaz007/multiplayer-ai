@@ -1,3 +1,4 @@
+import { startHandoff, updateHandoff } from "./continuity/handoffs.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { registerAppTool, registerAppResource, RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/server";
@@ -86,6 +87,18 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
     const r = resolveHarnessSession(given, process.env, (id) => localTranscriptExists(id));
     if (!r.ok) throw new Error(r.error);
     return r.id;
+  };
+  const handoffResult = async (pack: any, source_kind: "record" | "thread", source_id: string, sid: string | undefined, mode: "continue" | "fork" | "inspect") => {
+    if (!sid || mode === "inspect") return text(pack.text);
+    if (source_kind === "thread" && !pack.claim.acquired) return { ...text(pack.text), isError: true as const };
+    const code = source_kind === "thread" || Boolean(pack.record?.repo) || Boolean(pack.contributing_sessions?.some((s: any) => s.repo));
+    const verified = source_kind === "thread" ? Boolean(pack.loss_window?.verified_snapshot_at) : Boolean(pack.bootstrap?.length && pack.contributing_sessions?.some((s: any) => s.verified_snapshot_at));
+    try {
+      const id = await startHandoff(getPool(cfg), {source_kind,source_id,destination_session:sid,author:cfg.author,mode,work_kind:code ? "code" : "analysis",source_snapshot_verified:verified,pending_operations:pack.pending_operations?.length ?? 0});
+      return {...text(`${pack.text}\n\nHandoff attempt: ${id} (pack delivered, not completed). After verifying the evidence or bootstrap and delivering the continuation, report exact captured events with ledger_handoff_update. Pending mutations must be reconciled before retrying.`), structuredContent:{handoff:{id,status:"pack_delivered",source_kind,source_id,source_snapshot_verified:verified,attribution:"agent-reported"}}};
+    } catch {
+      return {...text(`${pack.text}\n\nHandoff tracking unavailable; this read does not establish a completed handoff. Do not repeat a claim just to retry telemetry.`), structuredContent:{handoff:{status:"unavailable"}}};
+    }
   };
   const poolIfAny = (): AnyPool | null => (continuityConfigured(cfg) ? getPool(cfg) : null);
   /** Additive: append a Ledger object to the investigation record's ledger_refs so the pack's decisions/refs machinery sees it. */
@@ -519,6 +532,22 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
       async ({ thread_id }) => text((await buildResumePack(cfg, pool(), thread_id, { mode: "inspect", author: cfg.author, budgetTokens: 12000 })).text)
     );
 
+    server.registerTool("ledger_handoff_update", {
+      title: "Report evidenced handoff progress",
+      description: "Update the handoff attempt returned by ledger_resume. Verification and completion require exact captured destination-session events. Completion requires verification, validation, and a delivered assistant result; source pending operations must be reconciled. Agent-reported evidence is not independent or human verification. Failed and abandoned attempts remain visible.",
+      inputSchema: {
+        id: z.string().uuid(), session_id: z.string().optional(),
+        status: z.enum(["verified", "completed", "failed", "abandoned"]),
+        evidence: z.array(z.object({session_id:z.string(),seq:z.number().int().positive(),role:z.enum(["verification","validation","delivered_result","pending_operation_resolution"])})).max(50).default([]),
+        note: z.string().max(2000).optional(),
+      },
+    }, async ({id,session_id,status,evidence,note}) => {
+      try {
+        const result = await updateHandoff(pool(), {id,session_id:sessionOf(session_id),author:cfg.author,status,evidence,note});
+        return {...text(`Handoff ${id}: ${result.status}. Agent-reported, supported by retained events; not independent verification.`),structuredContent:{handoff:result}};
+      } catch (e:any) {return refused(`ledger_handoff_update refused: ${e.message}`);}
+    });
+
     server.registerTool(
       "ledger_resume",
       {
@@ -544,21 +573,21 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
         // inspect never claims, so it needs no session; continue and fork refuse rather than claim under a made-up id
         let sid: string | undefined;
         if (mode !== "inspect") {
-          try { sid = sessionOf(session_id); } catch (e: any) { return text(`ledger_resume refused: ${e.message}`); }
+          try { sid = sessionOf(session_id); } catch (e: any) { return refused(`ledger_resume refused: ${e.message}`); }
         }
         if (record_id && mode !== "fork") {
           try {
             const pack = await buildRecordPack(cfg, pool(), record_id, { mode, author: cfg.author, sessionId: sid, repoPath: cwd, budgetTokens: budget_tokens, ...packOpts });
             if (sid && mode === "continue" && pack.claim.acquired && pack.claim.thread_id) writeBinding(sid, { thread_id: pack.claim.thread_id });
-            return text(pack.text);
+            return handoffResult(pack, "record", record_id, sid, mode);
           } catch (e: any) {
-            return text(`ledger_resume failed: ${e.message}`);
+            return refused(`ledger_resume failed: ${e.message}`);
           }
         }
         if (!thread_id) return text("thread_id or record_id is required.");
         const pack = await buildResumePack(cfg, pool(), thread_id, { mode, author: cfg.author, sessionId: sid, repoPath: cwd, budgetTokens: budget_tokens, ...packOpts });
         if (sid && mode !== "inspect" && pack.claim.acquired) writeBinding(sid, { thread_id: pack.fork?.id ?? thread_id });
-        return text(pack.text);
+        return handoffResult(pack, "thread", thread_id, sid, mode);
       }
     );
 

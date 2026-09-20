@@ -238,7 +238,7 @@ try {
   assert.equal(discarded.structuredContent.review.stance, "discarded");
   assert.equal(discarded.structuredContent.capture_ack.status, "dismissed");
   assert.equal(get(p5.id).fields.stance, "discarded");
-  assert.equal(search(cfg, "web users dau", { includeSuperseded: true }).find((h) => h.id === p5.id)?.authority_label, "discarded cut");
+  assert.equal(search(cfg, "web users dau", { includeSuperseded: true, limit: 100 }).find((h) => h.id === p5.id)?.authority_label, "discarded cut");
 
   await client.close();
   console.log("findings: propose (mapped fields, PROPOSED, query_ref, investigation, pending_review ack), accept (new stable by the person, supersedes + acceptance, draft superseded), refusals, discard (reason required, discarded cut kept and labelled), drafts listing and MCP round trip passed");
