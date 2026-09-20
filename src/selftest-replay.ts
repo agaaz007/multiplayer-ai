@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import assert from "node:assert/strict";
 import { initLedger, loadConfig, loadAll } from "./store.js";
-import { brief, briefReport, budgetPayload, BRIEF_BUDGET_BYTES, SESSION_START_BUDGET_BYTES, type BriefSectionKey } from "./query.js";
+import { brief, briefReport, budgetPayload, collapseWarnings, BRIEF_BUDGET_BYTES, SESSION_START_BUDGET_BYTES, type BriefSectionKey } from "./query.js";
 import { drainUsageWrites, reportInjectedContext, usageDirectory, withUsageInvocation, type UsageEnvelope } from "./usage.js";
 import { renderReplay, replayHtml, replayKind, replayTrail, type ReplayTrail } from "./replay.js";
 
@@ -368,6 +368,30 @@ if (databaseUrl) {
   console.log("  ok database: payload_bytes/payload_dropped persist and replay reads them back");
 } else {
   console.log("  skipped database half: no LEDGER_TEST_DATABASE_URL (run through scripts/test-isolated.mjs)");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Collapsing a repeated warning is a budget fix, so the risk is that it loses a fact to save bytes.
+// The count must stay exact, an unrepeated warning must survive untouched, and an id-prefixed
+// warning must keep its id.
+// ---------------------------------------------------------------------------------------------
+{
+  const sentence = "legacy acceptance provenance is unknown; previous_status and capture metadata are absent";
+  const many = Array.from({ length: 36 }, (_, i) => `fnd-2026090${i % 10}-example-${i}: ${sentence}`);
+  const collapsed = collapseWarnings([...many, "analytical scope unknown (legacy record)", `def-solo: ${sentence} but different`]);
+
+  assert.equal(collapsed.length, 3, "one line per distinct sentence, not per record");
+  const family = collapsed.find((w) => w.startsWith(sentence) && w.includes("Affects"))!;
+  assert.match(family, /Affects 36 records:/, "the count is the true total, not the sample size");
+  assert.equal((family.match(/fnd-2026090/g) ?? []).length, 6, "a bounded sample of ids is named");
+  assert.match(family, /and 30 more/, "the remainder is stated, never silently dropped");
+  assert.ok(collapsed.includes("analytical scope unknown (legacy record)"), "an unprefixed warning is untouched");
+  assert.ok(collapsed.some((w) => w.startsWith("def-solo: ")), "a sentence seen once keeps its id prefix");
+  assert.ok(
+    Buffer.byteLength(family) < Buffer.byteLength(many.join("\n")) / 3,
+    "collapsing is worth doing: the family costs a fraction of the repeated form"
+  );
+  console.log("  ok warnings: a repeated sentence collapses without losing the count");
 }
 
 fs.rmSync(tmp, { recursive: true, force: true });

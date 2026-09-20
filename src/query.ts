@@ -342,6 +342,34 @@ export function renderFull(o: LedgerObject): string {
   return lines.join("\n");
 }
 
+/** Ids named inline when one warning covers many records; the count beside them is always exact. */
+const WARNING_IDS_SHOWN = 6;
+
+/**
+ * One sentence repeated with a different id in front is one fact, not many. On the Tranzmit ledger
+ * 36 of 38 authority warnings are the same legacy-provenance sentence, together 9.4 KB — more than
+ * the whole brief budget, which meant every definition was crowded out by a fact stated 36 times.
+ * Collapsing keeps the sentence once and the exact count; the first ids are named so a reader can
+ * start somewhere, and the remainder is stated rather than silently dropped.
+ */
+export function collapseWarnings(warnings: string[]): string[] {
+  const families = new Map<string, string[]>();
+  for (const warning of warnings) {
+    const prefixed = /^([A-Za-z][\w.-]*):\s([\s\S]+)$/.exec(warning);
+    const [sentence, id] = prefixed ? [prefixed[2], prefixed[1]] : [warning, ""];
+    const ids = families.get(sentence) ?? [];
+    if (id) ids.push(id);
+    families.set(sentence, ids);
+  }
+  return [...families].map(([sentence, ids]) => {
+    if (ids.length === 0) return sentence;
+    if (ids.length === 1) return `${ids[0]}: ${sentence}`;
+    const shown = ids.slice(0, WARNING_IDS_SHOWN);
+    const rest = ids.length - shown.length;
+    return `${sentence} Affects ${ids.length} records: ${shown.join(", ")}${rest ? `, and ${rest} more (\`ledger_get(id)\` on any of them)` : ""}`;
+  });
+}
+
 export interface BriefOpts {
   days?: number;
   tags?: string[];
@@ -524,7 +552,7 @@ export function briefReport(cfg: Config, opts: BriefOpts = {}): BriefReport {
       id: conflict.current[0]?.id,
       text: `UNRESOLVED ACCEPTED CONFLICT: ${conflict.current.map(c => `${c.id} (${c.title})`).join("; ")}. No single source is authoritative; inspect the evidence and explicitly resolve. The recent-list limit does not resolve this conflict.`,
     })),
-    warnings: [...authorityWarnings].map((warning) => ({ text: `WARNING: ${warning}` })),
+    warnings: collapseWarnings([...authorityWarnings]).map((warning) => ({ text: `WARNING: ${warning}` })),
     definitions: defs.map((o) => ({ id: o.id, name: String(o.fields.metric ?? o.title), text: short(o)! })),
     decisions: decisions.map((o) => ({ id: o.id, text: short(o)! })),
     findings: findings.map((o) => ({ id: o.id, text: short(o)! })),
