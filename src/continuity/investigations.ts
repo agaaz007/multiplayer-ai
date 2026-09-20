@@ -1,12 +1,13 @@
 import type pg from "pg";
 import path from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import type { HarnessIdentity } from "./safety.js";
 import type { Config } from "../store.js";
 // Title matching lives in query.ts with the rest of the text similarity, so the classifier can reach it
 // without importing this module: investigations -> recordpack -> classify is already a cycle.
 import { matchScore, normalizeTitle, titleSimilarity } from "../query.js";
 export { matchScore, normalizeTitle, titleSimilarity };
 import { createRecord, getRecord, linkSpan, touchRepo } from "./records.js";
-import { upsertSession } from "./store.js";
 import { ago } from "./recordpack.js";
 
 /**
@@ -63,8 +64,73 @@ function clip(s: string, n: number): string {
   return t.length > n ? t.slice(0, n - 1) + "…" : t;
 }
 
-function harnessGuess(): string {
-  return process.env.CODEX_THREAD_ID ? "codex" : "claude";
+export interface BindingContext {
+  request_id?: string;
+  identity?: HarnessIdentity;
+}
+
+export class BindingOutcomeUnknown extends Error {
+  readonly code = "outcome_unknown";
+  constructor(readonly request_id: string) {
+    super(`Binding outcome unknown. Retry with the SAME request_id (${request_id}); do not declare a second investigation.`);
+  }
+}
+
+/** One client and one lock order: session -> exact question -> record. A committed operation
+ * contains its answer; replay never executes a second mutation. A failed commit is reconciled
+ * by operation key, not by blindly retrying a write. */
+async function mutation<T>(pool: pg.Pool, cfg: Config, opts: BindingContext & { session_id: string }, kind: string, input: unknown, run: (c: pg.PoolClient) => Promise<T>): Promise<T & { request_id: string }> {
+  const session = String(opts.session_id ?? "").trim();
+  if (!session) throw new Error("session_id is required to bind an investigation");
+  if (!/^[A-Za-z0-9_-]{8,200}$/.test(session)) throw new Error("Invalid harness session_id; use the exact ID printed by SessionStart.");
+  const request = opts.request_id ?? randomUUID();
+  if (!/^[A-Za-z0-9_.:-]{1,200}$/.test(request)) throw new Error("Invalid request_id (1–200 safe identifier characters required)");
+  const digest = createHash("sha256").update(JSON.stringify({ kind, input })).digest("hex");
+  const key = [cfg.author, session, request];
+  const c = await pool.connect();
+  let committing = false;
+  try {
+    await c.query("begin");
+    await c.query("set local lock_timeout = '2s'");
+    await c.query("set local statement_timeout = '8s'");
+    await c.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [`binding:${session}`]);
+    const prior = await c.query(`select input_hash, result from cont_binding_operations where actor=$1 and session_id=$2 and request_id=$3`, key);
+    if (prior.rows[0]) {
+      if (prior.rows[0].input_hash !== digest) throw new Error("request_id was already used with different binding arguments");
+      await c.query("commit");
+      return prior.rows[0].result;
+    }
+    const result = { ...await run(c), request_id: request };
+    await c.query(`insert into cont_binding_operations(actor,session_id,request_id,kind,input_hash,result) values($1,$2,$3,$4,$5,$6::jsonb)`, [...key, kind, digest, JSON.stringify(result)]);
+    committing = true;
+    await c.query("commit");
+    return result;
+  } catch (error) {
+    if (!committing) { await c.query("rollback").catch(() => {}); throw error; }
+    // COMMIT may have reached Postgres even if its acknowledgement never arrived.
+    // Destroy this client before reconciling, avoiding a pool-size-one deadlock.
+    c.release(true);
+    try {
+      const saved = await pool.query(`select result from cont_binding_operations where actor=$1 and session_id=$2 and request_id=$3`, key);
+      if (saved.rows[0]) return saved.rows[0].result;
+    } catch { /* uncertainty remains explicit */ }
+    throw new BindingOutcomeUnknown(request);
+  } finally {
+    if (!committing) c.release();
+    else { try { c.release(); } catch { /* already destroyed during reconciliation */ } }
+  }
+}
+
+async function ensureBindingSession(c: pg.PoolClient, cfg: Config, session: string, identity?: HarnessIdentity): Promise<void> {
+  const verified = identity?.verified === true && (identity.harness === "codex" || identity.harness === "claude");
+  const harness = verified ? identity!.harness : "unknown";
+  const provenance = { source: identity?.source ?? "explicit_unverified", verified, harness };
+  await c.query(`insert into cont_sessions(id,author,harness,machine,identity_provenance) values($1,$2,$3,$4,$5::jsonb) on conflict(id) do nothing`, [session,cfg.author,harness,cfg.continuity?.machine ?? null,JSON.stringify(provenance)]);
+  const r = await c.query(`select author,harness,identity_provenance from cont_sessions where id=$1 for update`, [session]);
+  if (r.rows[0].author !== cfg.author) throw new Error("Session belongs to a different configured author; nothing was bound.");
+  if (verified && (r.rows[0].harness !== harness || !r.rows[0].identity_provenance?.verified)) {
+    await c.query(`update cont_sessions set harness=$2, identity_provenance=$3::jsonb, identity_history=identity_history || $4::jsonb where id=$1`, [session,harness,JSON.stringify(provenance),JSON.stringify([{previous_harness:r.rows[0].harness,previous_provenance:r.rows[0].identity_provenance,corrected_at:new Date().toISOString(),source:identity!.source}])]);
+  }
 }
 
 const BIND_INSTRUCTION = `Bind this session to one with ledger_investigation_bind(record_id) or declare a new question with ledger_investigation_new(question); non-repo work is fine. Do not proceed as just a thread on this repo.`;
@@ -126,43 +192,34 @@ async function maxSeq(q: Q, session_id: string): Promise<number> {
  * earlier explicit span (those events did belong to the earlier investigation) and starts a new one at the current
  * seq; only the newest bound span is extended by the helper from then on.
  */
-export async function bindInvestigation(pool: pg.Pool, cfg: Config, opts: { record_id: string; session_id: string; question?: string }): Promise<{ text: string; record_id: string; title: string; already_bound: boolean }> {
-  const session_id = String(opts.session_id ?? "").trim();
-  if (!session_id) throw new Error("session_id is required to bind an investigation");
+export async function bindInvestigation(pool: pg.Pool, cfg: Config, opts: BindingContext & { record_id: string; session_id: string; question?: string }): Promise<{ text: string; record_id: string; title: string; already_bound: boolean; request_id: string }> {
+  return mutation(pool, cfg, opts, "bind", { record_id: opts.record_id, question: opts.question?.trim() ?? null }, async c => bindOnClient(c, cfg, opts));
+}
+
+async function bindOnClient(c: pg.PoolClient, cfg: Config, opts: BindingContext & { record_id: string; session_id: string; question?: string }): Promise<{ text: string; record_id: string; title: string; already_bound: boolean }> {
+  const session_id = opts.session_id.trim();
   if (!UUID_RE.test(String(opts.record_id ?? ""))) throw new Error(`record not found: ${String(opts.record_id)} (expected a record id from ledger_investigations)`);
-  const rec = await getRecord(pool, opts.record_id);
+  await ensureBindingSession(c, cfg, session_id, opts.identity);
+  const locked = await c.query(`select * from cont_records where id=$1 for update`, [opts.record_id]);
+  const rec = locked.rows[0];
   if (!rec) throw new Error(`record not found: ${opts.record_id}`);
   if (rec.kind !== "investigation") throw new Error(`record ${rec.id} is a ${rec.kind} record, not an investigation; declare one with ledger_investigation_new or pick one from ledger_investigations`);
   if (rec.status !== "open") throw new Error(`investigation ${rec.id} is ${rec.status}, not open; pick an open one from ledger_investigations or declare a new question`);
-
-  // The helper may not have uploaded this session yet; the link needs the session row to exist.
-  await upsertSession(pool, { id: session_id, author: cfg.author, harness: harnessGuess(), machine: cfg.continuity?.machine ?? null });
-  const existing = await sessionBinding(pool, session_id);
+  const existing = await sessionBinding(c, session_id);
   const already_bound = existing?.record_id === rec.id;
-  const question = opts.question?.trim() || null;
-  if (already_bound) {
-    if (question && question !== existing!.question) await pool.query(`update cont_session_bindings set question = $2 where session_id = $1`, [session_id, question]);
-    return { text: `Session ${session_id.slice(0, 8)} is already bound to investigation "${rec.title}" (${rec.id}). Continue; data queries accumulate on it.`, record_id: rec.id, title: rec.title, already_bound: true };
-  }
-  await pool.query(
-    `insert into cont_session_bindings (session_id, record_id, question, bound_by) values ($1, $2, $3, $4)
-     on conflict (session_id) do update set record_id = excluded.record_id, question = coalesce(excluded.question, cont_session_bindings.question), bound_by = excluded.bound_by, bound_at = now()`,
-    [session_id, rec.id, question, cfg.author]
-  );
-  const m = await maxSeq(pool, session_id);
-  // explicit beats suggested: an agent's or person's binding outranks whatever the classifier proposes on the same events
-  const from = existing ? Math.max(1, m) : 1;
-  const to = Math.max(from, m);
-  await linkSpan(pool, { record_id: rec.id, session_id, from_seq: from, to_seq: to, source: "explicit", note: `${BOUND_NOTE_PREFIX}${cfg.author}`, created_by: cfg.author });
-  // the repo this session runs in (if the helper has seen one) becomes a capability of the investigation, not its identity
-  await touchBoundRepo(pool, session_id);
-  const rebound = existing ? ` (rebound from ${existing.record_id})` : "";
-  return {
-    text: `Bound session ${session_id.slice(0, 8)} to investigation "${rec.title}" (${rec.id})${rebound}. Data queries in this session now accumulate on this record; propose findings at query grain with ledger_propose_finding (the bound investigation is attached automatically).`,
-    record_id: rec.id,
-    title: rec.title,
-    already_bound: false,
-  };
+  await c.query(`insert into cont_session_bindings(session_id,record_id,question,bound_by) values($1,$2,$3,$4)
+    on conflict(session_id) do update set record_id=excluded.record_id,question=coalesce(excluded.question,cont_session_bindings.question),bound_by=excluded.bound_by,
+    bound_at=case when cont_session_bindings.record_id=excluded.record_id then cont_session_bindings.bound_at else now() end`,
+    [session_id,rec.id,opts.question?.trim() || null,cfg.author]);
+  const m = await maxSeq(c, session_id);
+  const spans = await c.query(`select id from cont_record_links where session_id=$1 and record_id=$2 and source='explicit' and note like $3 order by created_at desc,id desc limit 1`, [session_id,rec.id,`${BOUND_NOTE_PREFIX}%`]);
+  // Repair old partial binds too. Rebinding always starts a new historical span.
+  if (!already_bound || !spans.rows.length) {
+    const from = existing && !already_bound ? Math.max(1,m) : 1;
+    await linkSpan(c, { record_id:rec.id,session_id,from_seq:from,to_seq:Math.max(from,m),source:"explicit",note:`${BOUND_NOTE_PREFIX}${cfg.author}`,created_by:cfg.author });
+  } else await extendBoundLink(c, session_id);
+  await touchBoundRepo(c, session_id);
+  return { text: `${already_bound ? "Session already bound" : "Bound session"} ${session_id.slice(0,8)} to investigation "${rec.title}" (${rec.id}). Data queries accumulate on this record; propose findings at query grain with ledger_propose_finding.`, record_id:rec.id,title:rec.title,already_bound };
 }
 
 /**
@@ -171,26 +228,25 @@ export async function bindInvestigation(pool: pg.Pool, cfg: Config, opts: { reco
  * `repo`, when given, is recorded as a touched repo (a capability); the record's identity is the question and its
  * `repo` column stays null.
  */
-export async function declareInvestigation(pool: pg.Pool, cfg: Config, opts: { question: string; goal?: string; session_id: string; repo?: string | null }): Promise<{ text: string; record_id: string }> {
+export async function declareInvestigation(pool: pg.Pool, cfg: Config, opts: BindingContext & { question: string; goal?: string; session_id: string; repo?: string | null }): Promise<{ text: string; record_id: string; request_id: string }> {
   const question = String(opts.question ?? "").replace(/\s+/g, " ").trim();
   if (!question) throw new Error("question is required to declare an investigation");
-  const title = question.length > TITLE_MAX ? question.slice(0, TITLE_MAX - 1) + "…" : question;
-  const open = await openInvestigationRows(pool, { cap: 500 });
-  const dup = open.map((r) => ({ r, s: titleSimilarity(title, r.title) })).filter((x) => x.s >= NEAR_IDENTICAL_TITLE).sort((a, b) => b.s - a.s)[0];
-  if (dup) {
-    throw new Error(`An open investigation with a near-identical question already exists: "${dup.r.title}" (${dup.r.record_id}, by ${dup.r.created_by}, match ${dup.s.toFixed(2)}). Bind to it with ledger_investigation_bind(record_id: "${dup.r.record_id}") instead of declaring a new one; if the question is genuinely different, reword it so the difference is in the title.`);
-  }
-  const rec = await createRecord(pool, { kind: "investigation", title, goal: opts.goal?.trim() || null, touched_repos: opts.repo ? [opts.repo] : [], created_by: cfg.author });
-  const bound = await bindInvestigation(pool, cfg, { record_id: rec.id, session_id: opts.session_id, question });
-  const touched = (await getRecord(pool, rec.id))?.touched_repos ?? rec.touched_repos;
-  const where = touched.length ? ` (keyed by its question; repos it may read: ${touched.map((r) => path.basename(r)).join(", ")})` : " as non-repo work (keyed by its question; no repo touched yet)";
-  return {
-    text: `Declared investigation "${rec.title}" (${rec.id})${where}${rec.goal ? `; goal: ${clip(rec.goal, 120)}` : ""}. ${bound.text}`,
-    record_id: rec.id,
-  };
+  return mutation(pool,cfg,opts,"declare",{question,goal:opts.goal?.trim() ?? null,repo:opts.repo ?? null},async c => {
+    await c.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [`question:${normalizeTitle(question)}`]);
+    const title = clip(question,TITLE_MAX);
+    const open = await openInvestigationRows(c,{cap:500});
+    const dup = open.map(r => ({r,s:titleSimilarity(title,r.title)})).filter(x => x.s >= NEAR_IDENTICAL_TITLE).sort((a,b) => b.s-a.s)[0];
+    if (dup) throw new Error(`An open investigation with a near-identical question already exists: "${dup.r.title}" (${dup.r.record_id}, by ${dup.r.created_by}, match ${dup.s.toFixed(2)}). Bind to it with ledger_investigation_bind(record_id: "${dup.r.record_id}") instead of declaring a new one; if the question is genuinely different, reword it so the difference is in the title.`);
+    // Identity, record creation, explicit link and binding share the commit boundary.
+    await ensureBindingSession(c,cfg,opts.session_id.trim(),opts.identity);
+    const rec = await createRecord(c,{kind:"investigation",title,goal:opts.goal?.trim() || null,touched_repos:opts.repo ? [opts.repo] : [],created_by:cfg.author});
+    await c.query(`update cont_records set investigation_question_key=$2 where id=$1`,[rec.id,normalizeTitle(question)]);
+    const bound = await bindOnClient(c,cfg,{...opts,record_id:rec.id,question});
+    return { text:`Declared investigation "${rec.title}" (${rec.id}), keyed by its question. ${bound.text}`,record_id:rec.id };
+  });
 }
 
-export async function sessionBinding(pool: pg.Pool, session_id: string): Promise<{ record_id: string; question: string | null; bound_by: string; bound_at: string } | null> {
+export async function sessionBinding(pool: Q, session_id: string): Promise<{ record_id: string; question: string | null; bound_by: string; bound_at: string } | null> {
   const sid = String(session_id ?? "").trim();
   if (!sid) return null;
   const r = await pool.query<{ record_id: string; question: string | null; bound_by: string; bound_at: Date }>(

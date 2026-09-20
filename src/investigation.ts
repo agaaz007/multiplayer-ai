@@ -18,7 +18,7 @@ export function analyticalContext(objects: LedgerObject[], opts: InvestigationOp
   for (const value of [opts.limit, opts.candidate_limit]) if (value !== undefined && (!Number.isInteger(value) || value < 1 || value > 50)) throw new Error('investigation limits must be integers between 1 and 50');
   const byId = new Map(objects.map(o => [o.id, o]));
   const requested = new Set(opts.definition_ids ?? []);
-  const relevant = objects.filter(o => matchesDiscoveryScope(o, opts.scope) && (!opts.scope || !legacyScopeGaps(o, opts.scope)));
+  const relevant = objects.filter(o => matchesDiscoveryScope(o, opts.scope) && !legacyScopeGaps(o, opts.scope));
   const hits = relevant.map(o => ({o, score: requested.has(o.id) ? Number.MAX_SAFE_INTEGER : score(opts.question, o)}))
     .filter(h => h.score > 0).sort((a,b) => b.score-a.score || a.o.id.localeCompare(b.o.id));
   const warnings: string[] = [];

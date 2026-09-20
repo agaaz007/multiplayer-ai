@@ -1,3 +1,4 @@
+import { assertSafeSelftestDatabase, assertSelftestDatabaseMarker } from "./selftest-db-guard.js";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -23,6 +24,7 @@ import {validateRecordCoverage} from './capture-boundary.js';
  */
 
 const DB = process.env.LEDGER_CONTINUITY_DB || "postgresql://localhost:5432/ledger_selftest";
+assertSafeSelftestDatabase(DB);
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ledger-cont-"));
 process.env.LEDGER_CONFIG_DIR = path.join(tmp, ".ledger"); // spool, state, bindings, signals live here
 process.env.LEDGER_GIT_SYNC = "0";
@@ -51,6 +53,7 @@ const base: Omit<Config, "author"> = { ledger_dir: ledgerDir, git_sync: false, c
 const cfgR: Config = { ...base, author: "rachit", continuity: { ...base.continuity!, machine: "rachit-mac" } };
 const cfgA: Config = { ...base, author: "agaaz", continuity: { ...base.continuity!, machine: "agaaz-mac" } };
 const pool = getPool(cfgR);
+await assertSelftestDatabaseMarker(pool);
 await pool.query(`drop table if exists cont_session_bindings, cont_state_updates, cont_record_links, cont_records, cont_notifications, cont_artifacts, cont_claims, cont_checkpoints, cont_events, cont_sessions, cont_threads cascade`);
 await migrate(pool);
 ok(`schema reset on ${DB.replace(/\/\/[^@]*@/, "//…@")}`);

@@ -1,3 +1,4 @@
+import { assertSafeSelftestDatabase, assertSelftestDatabaseMarker } from "./selftest-db-guard.js";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -85,7 +86,9 @@ setCanned([]);
 const ledgerDir = path.join(tmp, "ledger");
 initLedger(ledgerDir, "test");
 const cfg: Config = { ledger_dir: ledgerDir, author: "rachit", git_sync: false, continuity: { database_url: DB, machine: "rachit-mac" } };
+assertSafeSelftestDatabase(DB);
 const pool = getPool(cfg);
+await assertSelftestDatabaseMarker(pool);
 await pool.query(`drop table if exists cont_state_updates, cont_record_links, cont_records, cont_notifications, cont_artifacts, cont_claims, cont_checkpoints, cont_events, cont_sessions, cont_threads cascade`);
 await migrate(pool);
 ok(`schema reset on ${DB.replace(/\/\/[^@]*@/, "//…@")}; fake extractor at ${path.basename(fake)}`);

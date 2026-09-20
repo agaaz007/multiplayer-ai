@@ -4,9 +4,9 @@ import os from "node:os";
 import { execFileSync } from "node:child_process";
 import matter from "gray-matter";
 import type { z } from "zod";
-import { DIRS, SCHEMAS, TYPES, type Acceptance, type EvidenceReference, type LedgerObject, type LedgerType } from "./schema.js";
+import { DIRS, SCHEMAS, TYPES, AnalysisScopeSchema, type AnalysisScope, type Dependency, type Acceptance, type EvidenceReference, type LedgerObject, type LedgerType } from "./schema.js";
 import { isGeneratedView, regenerateViews } from "./views.js";
-import { objectVersion, validateClaim, validateDependencies, validateEvidenceReferences, validateSupersession } from "./authority.js";
+import { objectVersion, resolveAccepted, validateClaim, validateDependencies, validateEvidenceReferences, validateSupersession } from "./authority.js";
 
 // ---------- config ----------
 
@@ -620,6 +620,10 @@ function persistLocked(
 
 /** Record a stable object. The full schema applies; an incomplete argument is rejected. */
 export function record(cfg: Config, input: RecordInput): RecordResult {
+  if (input.fields.analysis_scope && (input.fields.status ?? 'stable') === 'stable') {
+    const scope = AnalysisScopeSchema.safeParse(input.fields.analysis_scope);
+    if (!scope.success) throw new Error(`stable scoped ${input.type} requires complete analysis_scope: ${issuesOf(scope as any)}. Save status: "draft" until applicability is known.`);
+  }
   const parsed = SCHEMAS[input.type].safeParse(prepare(cfg, input));
   if (!parsed.success) throw new Error(`Invalid ${input.type}: ${issuesOf(parsed as any)}`);
   return persist(cfg, input.type, parsed.data as Record<string, any>);
@@ -709,6 +713,10 @@ export interface ProposeFindingInput {
   caveats?: string[];
   /** System the call ran against (the data tool's name is fine). Defaults to "unrecorded". */
   source?: string;
+  /** Explicit applicability; partial scope is retained on drafts, never guessed. */
+  analysis_scope?: Partial<AnalysisScope>;
+  /** Exact definitions consulted. Resolution may follow accepted corrections, never choose conflicting heads. */
+  definition_ids?: string[];
 }
 
 export interface ProposeFindingResult extends RecordResult {
@@ -753,9 +761,36 @@ export function proposeFinding(cfg: Config, input: ProposeFindingInput, capture:
   const win = windowText(input.window);
   const parsed = parseWindow(input.window);
   const title = (input.title?.trim() || `${input.metric} · ${input.population} · ${win}: ${input.result}`).replace(/\s+/g, " ").slice(0, 140);
-  // definitions_used only when the metric names a definition that exists; a name alone is not lineage
-  const metricKey = input.metric.trim().toLowerCase();
-  const definition = loadAll(cfg, ["definition"]).find((d) => String(d.fields.metric ?? "").toLowerCase() === metricKey || d.title.toLowerCase() === metricKey);
+  const scope = input.analysis_scope === undefined ? undefined : AnalysisScopeSchema.partial().parse(input.analysis_scope);
+  if (scope?.metric && scope.metric !== input.metric) throw new Error('analysis_scope.metric must match the proposal metric');
+  if (scope?.population && scope.population !== input.population) throw new Error('analysis_scope.population must match the proposal population');
+  if (scope?.window && parsed && (scope.window.from !== parsed.from || scope.window.to !== parsed.to)) throw new Error('analysis_scope.window must match the proposal window');
+  const scopeComplete = AnalysisScopeSchema.safeParse(scope).success;
+  const all = loadAll(cfg);
+  const warnings: string[] = [];
+  const dependencies: Dependency[] = [];
+  if (!scopeComplete) warnings.push('Analytical scope is missing or incomplete; no definition is inferred by metric name. Keep as a proposal until applicability is validated.');
+  else if (!parsed) warnings.push('The reporting window is unresolved; no definition is pinned until its applicability over the full window can be checked.');
+  else {
+    const requested = input.definition_ids?.length ? input.definition_ids : all.filter(d=>d.type==='definition' && d.fields.metric===input.metric).map(d=>d.id);
+    const candidates = new Map<string, LedgerObject>();
+    let ambiguous = false;
+    for (const id of requested) {
+      const target = all.find(o=>o.id===id);
+      if (!target || target.type!=='definition') {
+        if (input.definition_ids?.length) throw new Error(`definition not found: ${id}`);
+        continue;
+      }
+      const resolution = resolveAccepted(all,id,{scope:{...scope,window:parsed}});
+      if (resolution.status === 'conflict') ambiguous = true;
+      if (resolution.status === 'current' && resolution.current.length === 1) candidates.set(resolution.current[0].id,resolution.current[0]);
+      else if (input.definition_ids?.length) warnings.push(`Definition ${id} has no sole applicable accepted version: ${resolution.warnings.join('; ') || resolution.status}`);
+    }
+    if (!ambiguous && candidates.size === 1) {
+      const target = [...candidates.values()][0];
+      dependencies.push({relation:'uses-definition',id:target.id,version:objectVersion(target)});
+    } else warnings.push(ambiguous || candidates.size > 1 ? 'Multiple applicable definition claims remain unresolved; no definition was selected by name or recency.' : 'No applicable accepted definition found for this scope and window; record or validate one before acceptance.');
+  }
   const fields: Record<string, unknown> = {
     title,
     question: `What was ${input.metric} for ${input.population} over ${win}?`,
@@ -770,8 +805,10 @@ export function proposeFinding(cfg: Config, input: ProposeFindingInput, capture:
     claim_type: "measurement",
     reproduce: { query_or_artifact: input.query_ref, instructions: `Retained query input for capture evidence ${input.query_ref}: ledger_events(session_id, q: "${input.query_ref}") then ledger_artifact_get.` },
     assumptions: [{ statement: `The data-tool call ${input.query_ref} returned complete and correct data for ${input.population} over ${win}`, kind: "implicit", evidence: "not independently verified", if_wrong: "changes_conclusion" }],
-    definitions_used: definition ? [String(definition.fields.metric)] : [],
-    caveats: input.caveats ?? [],
+    ...(scope ? {analysis_scope:scope} : {}),
+    definitions_used: dependencies.length ? [input.metric] : [],
+    dependencies,
+    caveats: [...(input.caveats ?? []), ...warnings],
     stance: "PROPOSED",
     query_ref: input.query_ref,
     ...(input.investigation_record_id ? { investigation_record_id: input.investigation_record_id } : {}),

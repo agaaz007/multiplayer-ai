@@ -154,6 +154,20 @@ create table if not exists cont_notifications (
   delivered_at timestamptz
 );
 
+-- Additive readiness schema; old clients ignore these fields/tables.
+alter table cont_sessions add column if not exists identity_provenance jsonb not null default '{}'::jsonb;
+alter table cont_sessions add column if not exists identity_history jsonb not null default '[]'::jsonb;
+create table if not exists cont_binding_operations (
+  actor text not null,
+  session_id text not null,
+  request_id text not null,
+  kind text not null,
+  input_hash text not null,
+  result jsonb not null,
+  committed_at timestamptz not null default now(),
+  primary key(actor,session_id,request_id)
+);
+
 create index if not exists cont_events_thread_idx on cont_events(thread_id, id);
 create index if not exists cont_sessions_thread_idx on cont_sessions(thread_id);
 create index if not exists cont_sessions_seen_idx on cont_sessions(last_seen_at desc);
@@ -233,6 +247,10 @@ alter table cont_records add column if not exists touched_repos text[] not null 
 update cont_records set touched_repos = array_append(touched_repos, repo), repo = null
  where kind = 'investigation' and repo is not null and not (repo = any(touched_repos));
 update cont_records set repo = null where kind = 'investigation' and repo is not null;
+
+alter table cont_records add column if not exists investigation_question_key text;
+create unique index if not exists cont_records_open_question_idx on cont_records(investigation_question_key)
+ where kind='investigation' and status='open' and investigation_question_key is not null;
 
 create index if not exists cont_records_repo_idx on cont_records(repo, status, updated_at desc);
 create index if not exists cont_records_updated_idx on cont_records(updated_at desc);

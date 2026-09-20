@@ -103,16 +103,21 @@ export async function appendEvents(pool: pg.Pool, sessionId: string, events: Nor
     await c.query(`select id from cont_sessions where id = $1 for update`, [sessionId]);
     const existing = await c.query<{ producer_event_id: string }>(`select producer_event_id from cont_events where session_id = $1 and producer_event_id = any($2)`, [sessionId, events.map((e) => e.producer_event_id)]);
     const have = new Set(existing.rows.map((x) => x.producer_event_id));
-    const fresh = events.filter((e) => !have.has(e.producer_event_id));
+    const fresh = events.filter((e) => { if (have.has(e.producer_event_id)) return false; have.add(e.producer_event_id); return true; });
     const m = await c.query<{ m: number }>(`select coalesce(max(seq),0)::int as m from cont_events where session_id = $1`, [sessionId]);
     let seq = m.rows[0].m;
-    for (const e of fresh) {
-      seq++;
-      await c.query(
-        `insert into cont_events (session_id, seq, producer_event_id, call_id, thread_id, kind, occurred_at, generation, payload)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9) on conflict (session_id, producer_event_id) do nothing`,
-        [sessionId, seq, e.producer_event_id, e.call_id ?? null, threadId, e.kind, e.occurred_at ?? null, generation, jsonbSafe(JSON.stringify(e.payload))]
-      );
+    // One statement per bounded chunk, preserving input order after in-batch and
+    // persisted deduplication under the session lock. Sequence allocation and
+    // event rows commit together, so retries cannot strand a neighboring event.
+    for (let start = 0; start < fresh.length; start += 200) {
+      const part = fresh.slice(start, start + 200).map(e => ({
+        seq: ++seq, producer_event_id: e.producer_event_id, call_id: e.call_id ?? null,
+        kind: e.kind, occurred_at: e.occurred_at ?? null, payload: e.payload,
+      }));
+      await c.query(`insert into cont_events (session_id, seq, producer_event_id, call_id, thread_id, kind, occurred_at, generation, payload)
+        select $1, e.seq, e.producer_event_id, e.call_id, $2, e.kind, e.occurred_at, $3, e.payload
+        from jsonb_to_recordset($4::jsonb) as e(seq int, producer_event_id text, call_id text, kind text, occurred_at timestamptz, payload jsonb)
+        order by e.seq`, [sessionId, threadId, generation, jsonbSafe(JSON.stringify(part))]);
     }
     await c.query(`update cont_sessions set last_acked_event_at = now() where id = $1`, [sessionId]);
     await c.query("commit");
