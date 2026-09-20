@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { withUsageInvocation, drainUsageWrites, usageHealth, usageSpoolHealth, type TrafficClass } from "./usage.js";
+import { withUsageInvocation, drainUsageWrites, usageHealth, usageSpoolHealth, reportInjectedContext, type TrafficClass } from "./usage.js";
 import { spoolPruneAcknowledged } from "./helper/spool.js";
 import { flushUsage } from "./continuity/usage.js";
 import { handoffSummary, updateHandoff, startHandoff } from "./continuity/handoffs.js";
@@ -8,7 +8,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { initLedger, loadConfig, loadAll, record, getById, pull, discardDraft, ledgerHome, saveConfig } from "./store.js";
-import { brief, search, renderFull, stats } from "./query.js";
+import { briefReport, budgetPayload, search, renderFull, stats, BRIEF_BUDGET_BYTES, SESSION_START_BUDGET_BYTES, type BriefReport, type PayloadPart } from "./query.js";
 import { TYPES, type LedgerType, type LedgerObject } from "./schema.js";
 import { readReceipt, savedReceipt, renderReceiptBox, type LedgerReceipt } from "./receipts.js";
 import { installClaude, installCodex, installGuides, agentRulesText } from "./install.js";
@@ -20,6 +20,7 @@ import { investigation } from './investigation.js';
 import { correctionImpact, objectVersion, resolveAccepted } from './authority.js';
 import { buildGraph, renderGraph, type GraphFormat } from './graph.js';
 import { memoryReport, renderMemoryReport } from './interpret.js';
+import { replayTrail, renderReplay, replayHtml } from './replay.js';
 import { AnalysisScopeSchema, AnalyticalDateSchema } from './schema.js';
 import { DEFAULT_QUIET_MS, pendingDrafts, reconcile } from "./extract.js";
 import { continuityConfigured, getPool, migrate, tableList, closePools } from "./continuity/db.js";
@@ -47,7 +48,15 @@ const USAGE = `ledger — shared definitions, findings, changes, decisions for y
   ledger deploy --status                 which cli.js every hook, MCP registration and launchd job runs right now
   ledger mcp                             run the MCP server (stdio)
   ledger mcp --http --scratch [--port N] serve MCP over HTTP from a scratch ledger at /mcp/$LEDGER_HTTP_SECRET (ChatGPT test endpoint; no login)
-  ledger brief [--days N] [--tags a,b]   what an agent sees at session start
+  ledger brief [--days N] [--tags a,b] [--full]
+                                         what an agent sees at session start, budgeted to fit the
+                                         harness's hook limit; --full prints the unbudgeted text
+  ledger replay [--session ID] [--json] [--all] [--html FILE]
+                                         one session's knowledge trail in order: what was injected
+                                         (bytes, records, what the budget dropped), which records
+                                         were found, which the agent said it referenced, and what it
+                                         saved. Reads the local usage spool and, when configured,
+                                         the continuity database; names both and says which failed.
   ledger search <query> [--type T]       free-text search
   ledger get <id>                        show one object
   ledger investigate <question> [--scope scope.json] [--definitions id,id] [--as-of DATE]
@@ -126,7 +135,7 @@ function flag(args: string[], name: string): string | undefined {
   return i === -1 ? undefined : args[i + 1];
 }
 
-const BOOL_FLAGS = new Set(["--all", "--plain", "--box", "--no-push", "--dry-run", "--show",
+const BOOL_FLAGS = new Set(["--all", "--plain", "--box", "--no-push", "--dry-run", "--show", "--full", "--json",
   "--current-only", "--conflicts", "--unpinned", "--names", "--legend"]);
 /** Non-flag arguments, with `--name value` pairs and boolean flags removed. */
 function positionals(args: string[]): string[] {
@@ -240,7 +249,10 @@ async function main() {
         const days = Number(flag(args, "--days") ?? 14);
         const tags = flag(args, "--tags")?.split(",").filter(Boolean);
         // --hook: legacy SessionStart entry; stdout becomes context.
-        console.log(brief(cfg, { days, tags }));
+        // --full: the unbudgeted text, for reading a whole ledger by hand. Never what a harness injects.
+        const report = briefReport(cfg, { days, tags, ...(args.includes("--full") ? { budgetBytes: Infinity } : {}) });
+        reportInjectedContext({ record_ids: report.record_ids, bytes: report.bytes, dropped: report.drops.reduce((n, d) => n + d.omitted, 0) });
+        console.log(report.text);
         return;
       }
       case "hook": {
@@ -268,23 +280,44 @@ async function main() {
         }
         const res = handleHook(event, input, { dataTools: cfg?.data_tools });
         if (event === "SessionStart") {
-          const parts: string[] = [];
-          if (cfg) {
-            try {
-              parts.push(brief(cfg));
-            } catch (e: any) {
-              parts.push(`# Ledger brief unavailable: ${e?.message ?? e}`);
+          const identity = resolveHarnessIdentity(input?.session_id);
+          const traffic: TrafficClass = process.env.LEDGER_SELFTEST === "1" ? "evaluation"
+            : (["ordinary","evaluation","audit","maintenance"].includes(process.env.LEDGER_TRAFFIC_CLASS ?? "") ? process.env.LEDGER_TRAFFIC_CLASS as TrafficClass : "unknown");
+          // "startup" is the first injection of a session; resume, compact and clear replace a copy
+          // the agent may still be holding, so the brief says which snapshot is current.
+          const reinjection = Boolean(input?.source) && String(input.source) !== "startup";
+          const emit = async () => {
+            const parts: PayloadPart[] = [];
+            let report: BriefReport | null = null;
+            if (cfg) {
+              try {
+                report = briefReport(cfg, { reinjection });
+                parts.push({ name: "the Ledger brief", text: report.text, cap: BRIEF_BUDGET_BYTES, more: "`ledger brief --full`" });
+              } catch (e: any) {
+                parts.push({ name: "the Ledger brief", text: `# Ledger brief unavailable: ${e?.message ?? e}` });
+              }
+              // continuity: teammates' open threads + any notices the helper fetched. Fails open in 4 s.
+              try {
+                // SessionStart hook allows 30 s; Neon connects have taken 7-8 s
+                const threads = await openThreadsText(cfg, { cwd: input?.cwd ? String(input.cwd) : process.cwd(), timeoutMs: 8000 });
+                if (threads) parts.push({ name: "open threads and notices", text: threads, cap: 1_200, more: "`ledger threads`, or ledger_threads / ledger_records" });
+              } catch { /* never block a session start */ }
             }
-            // continuity: teammates' open threads + any notices the helper fetched. Fails open in 4 s.
-            try {
-              const identity = resolveHarnessIdentity(input?.session_id);
-              const threads = await withUsageInvocation(cfg,{tool:"hook:SessionStart",session_id:identity.ok ? identity.id : undefined,identity:identity.ok ? identity.identity : undefined,purpose:"automatic_brief",traffic_class:process.env.LEDGER_SELFTEST === "1" ? "evaluation" : (["ordinary","evaluation","audit","maintenance"].includes(process.env.LEDGER_TRAFFIC_CLASS ?? "") ? process.env.LEDGER_TRAFFIC_CLASS as TrafficClass : "unknown")},() => openThreadsText(cfg!, { cwd: input?.cwd ? String(input.cwd) : process.cwd(), timeoutMs: 8000 })); // SessionStart hook allows 30 s; Neon connects have taken 7-8 s
-              if (threads) parts.push(threads);
-            } catch { /* never block a session start */ }
-          }
-          if (res.stdout) parts.push(res.stdout);
-          parts.push(...captureWarnings);
-          if (parts.length) process.stdout.write(parts.join("\n\n") + "\n");
+            if (res.stdout) parts.push({ name: "the session line and uncaptured work", text: res.stdout, cap: 1_500, more: "`ledger stats`" });
+            if (captureWarnings.length) parts.push({ name: "capture warnings", text: captureWarnings.join("\n"), cap: 400 });
+            const payload = budgetPayload(parts, SESSION_START_BUDGET_BYTES);
+            // The injection record states what this session actually received, truncation included.
+            reportInjectedContext({
+              record_ids: report?.record_ids ?? [],
+              bytes: payload.bytes,
+              dropped: (report?.drops.reduce((n, d) => n + d.omitted, 0) ?? 0) + payload.dropped.reduce((n, d) => n + d.omitted_lines, 0),
+            });
+            return payload;
+          };
+          const payload = cfg
+            ? await withUsageInvocation(cfg, {tool:"hook:SessionStart",session_id:identity.ok ? identity.id : undefined,identity:identity.ok ? identity.identity : undefined,purpose:"automatic_brief",traffic_class:traffic}, emit)
+            : await emit();
+          if (payload.text) process.stdout.write(payload.text + "\n");
           await closePools().catch(() => {});
           await drainUsageWrites();
           process.exit(0);
@@ -351,6 +384,15 @@ async function main() {
         const days = flag(args, "--days");
         const report = memoryReport(objects, { days: days ? Number(days) : undefined });
         console.log(args.includes("--json") ? JSON.stringify(report, null, 2) : renderMemoryReport(report, objects));
+        return;
+      }
+      case "replay": {
+        const cfg = loadConfig();
+        const trail = await replayTrail(cfg, { session: flag(args, "--session"), includeOther: args.includes("--all") });
+        const html = flag(args, "--html");
+        if (html) { fs.writeFileSync(html, replayHtml(trail)); console.log(`wrote ${html}`); }
+        else console.log(args.includes("--json") ? JSON.stringify(trail, null, 2) : renderReplay(trail));
+        await closePools().catch(() => {});
         return;
       }
       case "graph": {

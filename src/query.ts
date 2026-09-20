@@ -348,13 +348,146 @@ export interface BriefOpts {
   /** Optional packaged guide supplied by an embedding host; installed-guide default is unchanged. */
   guidePath?: string;
   scope?: ScopeQuery;
+  /** Hard ceiling on the rendered brief, in bytes. Infinity renders everything (`ledger brief --full`). */
+  budgetBytes?: number;
+  /** SessionStart after a resume or a compaction: the brief says it replaces the copy already in context. */
+  reinjection?: boolean;
 }
 
 /**
- * The thing injected at session start. Deliberately small:
- * all active definitions + last N days of findings/changes/decisions.
+ * Both harnesses truncate a SessionStart hook payload long before the model reads it, and neither
+ * says so. On this machine every brief since 2026-09-03 was over the limit — 25 KB then, 123,064
+ * bytes on 2026-09-21 — and the agent received a ~2 KB preview that stopped inside the authority
+ * warnings, so it never saw a single definition. Nothing detected it, because an agent cannot tell
+ * a short brief from a complete one.
+ *
+ * So the brief is budgeted here, where the omissions are still countable, rather than cut by the
+ * harness where they are not. A brief that arrives whole and names what it left out is strictly
+ * more useful than one that arrives cut at an arbitrary byte.
  */
-export function brief(cfg: Config, opts: BriefOpts = {}): string {
+export const BRIEF_BUDGET_BYTES = 7_000;
+/** The SessionStart hook emits the brief plus the session line, uncaptured work, open threads and capture warnings. */
+export const SESSION_START_BUDGET_BYTES = 10_000;
+export type BriefSectionKey = "conflicts" | "warnings" | "definitions" | "decisions" | "findings" | "changes" | "drafts";
+
+/**
+ * Spend order, highest first: a conflict the agent cannot discover by asking, then the definitions
+ * a metric must be computed with, then the decisions in force, then recent activity it would only
+ * reread. Everything below the line is one `ledger_search` away; a wrong number is not.
+ */
+export const BRIEF_PRIORITY: BriefSectionKey[] = ["conflicts", "warnings", "definitions", "decisions", "findings", "changes", "drafts"];
+
+/**
+ * Per-section ceilings in bytes, summing to roughly what {@link BRIEF_BUDGET_BYTES} leaves after the
+ * fixed prose. They are ceilings, not reservations: unspent bytes flow to the sections below, and a
+ * second pass hands the remainder back down the same order. Without them, priority alone lets one
+ * runaway list — 48 definitions at ~1,300 bytes each, 38 legacy-provenance warnings — spend the whole
+ * budget and leave every section under it empty, which is the failure this budget exists to prevent.
+ */
+export const BRIEF_SECTION_CAPS: Record<BriefSectionKey, number> = {
+  conflicts: 700, warnings: 500, definitions: 1_800, decisions: 700, findings: 600, changes: 400, drafts: 200,
+};
+
+const BRIEF_NOUNS: Record<BriefSectionKey, string> = {
+  conflicts: "unresolved accepted conflicts", warnings: "authority warnings", definitions: "definitions",
+  decisions: "decisions in force", findings: "findings", changes: "changes", drafts: "drafts",
+};
+
+/** What returns the records a section could not fit. Every omission names its own query. */
+const BRIEF_RETRIEVAL: Record<BriefSectionKey, string> = {
+  conflicts: '`ledger_search({ query, include_superseded: true })`',
+  warnings: '`ledger_get(id)`, then `ledger_investigation({ question, analysis_scope })` for the accepted resolution',
+  definitions: '`ledger_search({ query: "<metric>", types: ["definition"], limit: 50 })`',
+  decisions: '`ledger_search({ query, types: ["decision"], limit: 50 })`',
+  findings: '`ledger_search({ query, types: ["finding"], limit: 50 })`',
+  changes: '`ledger_search({ query, types: ["change"], limit: 50 })`',
+  drafts: '`ledger drafts`',
+};
+
+interface BriefEntry { id?: string; text: string; name?: string }
+interface SectionFill { key: BriefSectionKey; lines: string[]; ids: string[]; omitted: number; total: number; bytes: number }
+/** Renders what a section could not fit. Richest first; `fitSection` falls back when even this does not fit. */
+type OverflowRenderer = (omitted: BriefEntry[], total: number) => string;
+
+const countOverflow = (key: BriefSectionKey): OverflowRenderer => (omitted, total) =>
+  `_${omitted.length} of ${total} ${BRIEF_NOUNS[key]} omitted to fit the brief's byte budget. Retrieve them: ${BRIEF_RETRIEVAL[key]}._`;
+
+/**
+ * Definitions overflow to their metric names. Knowing that `trial_start_cvr` is defined somewhere is
+ * the difference between one `ledger_get` and a silently reinvented denominator, and a name costs
+ * ~20 bytes against ~1,300 for the definition it points at. `limit` bounds the name list so
+ * {@link fitSection} can offer a narrower version when the wide one does not fit.
+ */
+const namedOverflow = (limit: number): OverflowRenderer => (omitted, total) => {
+  const names: string[] = [];
+  let bytes = 0;
+  for (const e of omitted) {
+    const label = e.name ?? e.id ?? "";
+    if (!label || bytes + label.length + 3 > limit) break;
+    names.push(label); bytes += label.length + 3;
+  }
+  if (!names.length) return countOverflow("definitions")(omitted, total);
+  const rest = omitted.length - names.length;
+  return `_${omitted.length} of ${total} definitions omitted to fit the brief's byte budget. Also defined, not shown in full: ${names.join(" · ")}${rest ? ` (+${rest} more)` : ""}. Read one with \`ledger_get(id)\`; list them with ${BRIEF_RETRIEVAL.definitions}._`;
+};
+
+/**
+ * Whole entries only. Half a definition is a wrong definition and the agent cannot tell, so the
+ * loop drops entries until the kept ones plus the overflow notice fit the allowance.
+ */
+function fitSection(key: BriefSectionKey, entries: BriefEntry[], allowance: number, renderers: OverflowRenderer[]): SectionFill {
+  const size = (s: string) => Buffer.byteLength(s) + 1;
+  for (const render of renderers) {
+    for (let k = entries.length; k >= 0; k--) {
+      const lines = entries.slice(0, k).map((e) => e.text);
+      if (k < entries.length) lines.push(render(entries.slice(k), entries.length));
+      const bytes = lines.reduce((n, l) => n + size(l), 0);
+      if (bytes > allowance) continue;
+      return { key, lines, ids: entries.slice(0, k).flatMap((e) => (e.id ? [e.id] : [])), omitted: entries.length - k, total: entries.length, bytes };
+    }
+  }
+  // Nothing fits, not even the notice. The closing "Not in this brief" block still carries the count.
+  return { key, lines: [], ids: [], omitted: entries.length, total: entries.length, bytes: 0 };
+}
+
+export interface BriefDrop { section: BriefSectionKey; omitted: number; of: number }
+
+/**
+ * The closing block, and the one thing in the brief that is never dropped: it states the budget, the
+ * exact count of every omission, and how to retrieve them. Without it a budgeted brief would be
+ * indistinguishable from a complete one, which is the bug the budget exists to fix.
+ */
+function tailLines(budget: number | null, drops: BriefDrop[]): string[] {
+  return [
+    `## Not in this brief`,
+    budget === null
+      ? `Unbudgeted (\`ledger brief --full\`). The brief your harness injects is capped at ${BRIEF_BUDGET_BYTES} bytes.`
+      : `Capped at ${budget} bytes so the harness delivers it whole; over that, it is silently truncated before you see it.`,
+    drops.length
+      ? `Omitted here: ${drops.map((d) => `${d.omitted} ${BRIEF_NOUNS[d.section]}`).join(", ")}. Those counts are exact and each section above names the query that returns them.`
+      : `Nothing was omitted: every current record in scope is above.`,
+    `Everything else is still recorded: \`ledger_search({ query, types })\` finds records, \`ledger_get(id)\` reads one in full, and \`ledger_investigation({ question, analysis_scope })\` resolves accepted definitions and corrections across full history before you reuse a result.`,
+    `Retrieval is not use: found means it was returned to you, referenced means you cited it with ledger_show_contribution, saved means it is recorded.`,
+  ];
+}
+export interface BriefReport {
+  text: string;
+  bytes: number;
+  /** null when the brief was rendered unbudgeted (`ledger brief --full`). */
+  budget_bytes: number | null;
+  /** Ids the agent actually received, in render order. Ids only: an injection record never carries bodies. */
+  record_ids: string[];
+  drops: BriefDrop[];
+  truncated: boolean;
+}
+
+/**
+ * The thing injected at session start: all active definitions plus the last N days of
+ * findings/changes/decisions, rendered under {@link BRIEF_BUDGET_BYTES} and reporting exactly what
+ * the budget left out. {@link brief} returns the text alone; the report is what the injection log
+ * records, so what was logged is what the agent received.
+ */
+export function briefReport(cfg: Config, opts: BriefOpts = {}): BriefReport {
   const days = opts.days ?? 14;
   const since = new Date(Date.now() - days * 86_400_000).toISOString();
   const source = loadAll(cfg);
@@ -376,51 +509,167 @@ export function brief(cfg: Config, opts: BriefOpts = {}): string {
       for(const warning of resolution.warnings) authorityWarnings.add(warning);
   }
 
-  const out: string[] = [];
-  out.push(`# Ledger brief (${new Date().toISOString().slice(0, 10)}, last ${days} days)`);
-  out.push(``);
-  out.push(`This brief is an activity summary, not exhaustive task context. Use ledger_investigation with the question and analytical scope before reusing a result; it resolves accepted corrections across full history.`);
-  for (const conflict of conflicts.values()) out.push(`UNRESOLVED ACCEPTED CONFLICT: ${conflict.current.map(c => `${c.id} (${c.title})`).join("; ")}. No single source is authoritative; inspect the evidence and explicitly resolve. The recent-list limit does not resolve this conflict.`);
-  for(const warning of authorityWarnings) out.push(`WARNING: ${warning}`);
-  out.push(`Rules: use these definitions verbatim when computing metrics. Before running an analysis, call ledger_search with the question — if a matching finding exists, reuse or explicitly refresh it. Before attributing a change in a metric, check changes below. After any analysis, decision, or ship, record it: a finding needs inputs, method, and assumptions (explicit and implicit); a decision needs context and the options that lost. Full format in ${opts.guidePath ? `\`${opts.guidePath}\`` : "~/.claude/ledger.md"}.`);
-  out.push(``);
-  out.push(`## Definitions (${defs.length})`);
-  out.push(defs.length ? defs.map(short).join("\n") : authorityWarnings.size || conflicts.size ? "_no single applicable accepted definition; review the authority warnings before computing a metric_" : "_none yet — record one before computing any metric_");
-  out.push(``);
-  out.push(`## Decisions in force (${decisions.length})`);
-  out.push(decisions.length ? decisions.map(short).join("\n") : "_none_");
-  out.push(``);
-  out.push(`## Changes shipped, last ${days}d (${changes.length})`);
-  out.push(changes.length ? changes.map(short).join("\n") : "_none_");
-  out.push(``);
-  out.push(`## Findings, last ${days}d (${findings.length})`);
-  out.push(findings.length ? findings.map(short).join("\n") : "_none_");
-
   // Every draft is visible and labeled by origin. None is in force. Previously only transcript-fallback
   // drafts were listed, which hid hand-recorded `status: draft` objects from every brief.
   const drafts = source.filter((o) => o.status === "draft" && byTag(o) && matchesAnalysisScope(o, opts.scope));
-  if (drafts.length) {
-    const proposed = drafts.filter((o) => o.fields.stance === "PROPOSED");
-    const fallback = drafts.filter((o) => o.fields.stance !== "PROPOSED" && o.fields.capture_method === "transcript_fallback");
-    const manual = drafts.filter((o) => o.fields.stance !== "PROPOSED" && o.fields.capture_method !== "transcript_fallback");
-    out.push(``, `## Drafts, not in force (${drafts.length})`);
-    if (proposed.length) {
-      out.push(`Query-grain findings proposed by an agent after a data pull (stance PROPOSED). Not law: a person accepts with ledger_review_finding(id, "accept") or discards with a reason; the next agent may reuse the result only as a proposal.`);
-      for (const d of proposed.slice(0, 5)) out.push(`- [proposed] finding ${d.id}: **${d.title}** — investigation ${d.fields.investigation_record_id ?? "unbound"}, query ${d.fields.query_ref ?? "?"} (${d.author}, ${d.created.slice(0, 10)})`);
-      if (proposed.length > 5) out.push(`- …and ${proposed.length - 5} more proposed findings: \`ledger drafts\``);
-    }
-    if (fallback.length) {
-      out.push(`Extracted from transcripts after live capture failed. For each: ledger_get it, then record a stable object with supersedes set to the draft id, or ledger_discard_draft with a reason.`);
-      for (const d of fallback.slice(0, 5)) out.push(`- [fallback] ${d.type} ${d.id}: **${d.title}** — ${d.fields.capture_reason ?? ""} (${d.author}, ${d.created.slice(0, 10)})`);
-      if (fallback.length > 5) out.push(`- …and ${fallback.length - 5} more fallback drafts: \`ledger drafts\``);
-    }
-    if (manual.length) {
-      out.push(`Recorded by a person or their agent with status: draft. Work in progress, not a decision or finding in force; the owner promotes by recording a stable object with supersedes.`);
-      for (const d of manual.slice(0, 5)) out.push(`- [draft] ${d.type} ${d.id}: **${d.title}** (${d.author}, ${d.created.slice(0, 10)})`);
-      if (manual.length > 5) out.push(`- …and ${manual.length - 5} more drafts`);
+  const draftLabel = (d: LedgerObject) => d.fields.stance === "PROPOSED" ? "proposed" : d.fields.capture_method === "transcript_fallback" ? "fallback" : "draft";
+  const draftDetail = (d: LedgerObject) =>
+    d.fields.stance === "PROPOSED" ? ` — investigation ${d.fields.investigation_record_id ?? "unbound"}, query ${d.fields.query_ref ?? "?"}`
+      : d.fields.capture_method === "transcript_fallback" ? `${d.fields.capture_reason ? ` — ${d.fields.capture_reason}` : ""}` : "";
+  const draftRank = (d: LedgerObject) => ["proposed", "fallback", "draft"].indexOf(draftLabel(d));
+  const orderedDrafts = [...drafts].sort((a, b) => draftRank(a) - draftRank(b));
+
+  const entries: Record<BriefSectionKey, BriefEntry[]> = {
+    conflicts: [...conflicts.values()].map((conflict) => ({
+      id: conflict.current[0]?.id,
+      text: `UNRESOLVED ACCEPTED CONFLICT: ${conflict.current.map(c => `${c.id} (${c.title})`).join("; ")}. No single source is authoritative; inspect the evidence and explicitly resolve. The recent-list limit does not resolve this conflict.`,
+    })),
+    warnings: [...authorityWarnings].map((warning) => ({ text: `WARNING: ${warning}` })),
+    definitions: defs.map((o) => ({ id: o.id, name: String(o.fields.metric ?? o.title), text: short(o)! })),
+    decisions: decisions.map((o) => ({ id: o.id, text: short(o)! })),
+    findings: findings.map((o) => ({ id: o.id, text: short(o)! })),
+    changes: changes.map((o) => ({ id: o.id, text: short(o)! })),
+    drafts: orderedDrafts.map((d) => ({ id: d.id, text: `- [${draftLabel(d)}] ${d.type} ${d.id}: **${d.title}**${draftDetail(d)} (${d.author}, ${d.created.slice(0, 10)})` })),
+  };
+
+  const budget = opts.budgetBytes ?? BRIEF_BUDGET_BYTES;
+  const budgeted = Number.isFinite(budget) && budget > 0;
+  const head = [
+    `# Ledger brief (${new Date().toISOString().slice(0, 10)}, last ${days} days)`,
+    ...(opts.reinjection ? [`This snapshot replaces the earlier Ledger brief in this session; the copy above it is stale, read this one.`] : []),
+    ``,
+    `This brief is an activity summary, not exhaustive task context. Use ledger_investigation with the question and analytical scope before reusing a result; it resolves accepted corrections across full history.`,
+  ];
+  const rules = `Rules: use these definitions verbatim when computing metrics. Before running an analysis, call ledger_search with the question — if a matching finding exists, reuse or explicitly refresh it. Before attributing a change in a metric, check changes below. After any analysis, decision, or ship, record it: a finding needs inputs, method, and assumptions (explicit and implicit); a decision needs context and the options that lost. Full format in ${opts.guidePath ? `\`${opts.guidePath}\`` : "~/.claude/ledger.md"}.`;
+  const headings: Record<string, string> = {
+    definitions: "Definitions", decisions: "Decisions in force",
+    changes: `Changes shipped, last ${days}d`, findings: `Findings, last ${days}d`, drafts: "Drafts, not in force",
+  };
+  // The labels are deliberately unbracketed here: a bracketed label in the guidance reads as one more
+  // draft entry, to a person and to any test that looks for one.
+  const draftsFooter = `Not in force. A person accepts a proposed finding with ledger_review_finding(id, "accept"), promotes a fallback or manual draft by recording a stable object with supersedes, or discards it with a reason.`;
+  // Headings, the fixed prose and the closing block are always emitted, so they are spent before any
+  // record is. The closing block is reserved at its worst case — every section fully omitted — which
+  // is known from the entry counts alone, so the reserve is exact rather than a guessed constant.
+  const worstTail = tailLines(budgeted ? budget : null, BRIEF_PRIORITY.flatMap((key) =>
+    entries[key].length ? [{ section: key, omitted: entries[key].length, of: entries[key].length }] : []));
+  const fixed = [
+    ...head, rules,
+    ...Object.entries(headings).flatMap(([key, h]) => [``, `## ${h} (${entries[key as BriefSectionKey].length} of ${entries[key as BriefSectionKey].length})`]),
+    ...(drafts.length ? [draftsFooter] : []),
+    ``, ...worstTail,
+  ].reduce((n, l) => n + Buffer.byteLength(l) + 1, 0);
+
+  const fills = new Map<BriefSectionKey, SectionFill>();
+  const renderers = (key: BriefSectionKey) => key === "definitions"
+    ? [namedOverflow(1_400), namedOverflow(700), namedOverflow(300), countOverflow(key)]
+    : [countOverflow(key)];
+  if (!budgeted) {
+    for (const key of BRIEF_PRIORITY) fills.set(key, fitSection(key, entries[key], Infinity, renderers(key)));
+  } else {
+    // Three passes of one cap each, in priority order. A single pass leaves the caps' slack unspent;
+    // an unbounded second pass hands the whole remainder to whichever high-priority section is still
+    // truncated — on this ledger that was 38 legacy-provenance warnings, which then crowded out every
+    // definition, decision and finding. Offering one more cap at a time spreads the slack instead.
+    let remaining = Math.max(0, budget - fixed);
+    for (const pass of [1, 2, 3]) for (const key of BRIEF_PRIORITY) {
+      const previous = fills.get(key);
+      if (previous && !previous.omitted) continue;
+      const available = remaining + (previous?.bytes ?? 0);
+      const fill = fitSection(key, entries[key], Math.min(BRIEF_SECTION_CAPS[key] * pass, available), renderers(key));
+      remaining = available - fill.bytes;
+      fills.set(key, fill);
     }
   }
-  return out.join("\n");
+
+  const section = (key: BriefSectionKey, heading: string, empty: string) => {
+    const fill = fills.get(key)!;
+    const count = fill.omitted ? `${fill.total - fill.omitted} of ${fill.total}` : String(fill.total);
+    return [``, `## ${heading} (${count})`, fill.lines.length ? fill.lines.join("\n") : empty];
+  };
+
+  const out: string[] = [...head];
+  for (const key of ["conflicts", "warnings"] as const) out.push(...fills.get(key)!.lines);
+  out.push(rules);
+  out.push(...section("definitions", headings.definitions,
+    authorityWarnings.size || conflicts.size ? "_no single applicable accepted definition; review the authority warnings before computing a metric_" : "_none yet — record one before computing any metric_"));
+  out.push(...section("decisions", headings.decisions, "_none_"));
+  out.push(...section("changes", headings.changes, "_none_"));
+  out.push(...section("findings", headings.findings, "_none_"));
+  if (drafts.length) {
+    out.push(...section("drafts", headings.drafts, "_none shown; see `ledger drafts`_"));
+    out.push(draftsFooter);
+  }
+
+  const drops: BriefDrop[] = BRIEF_PRIORITY.flatMap((key) => {
+    const fill = fills.get(key)!;
+    return fill.omitted ? [{ section: key, omitted: fill.omitted, of: fill.total }] : [];
+  });
+  out.push(``, ...tailLines(budgeted ? budget : null, drops));
+
+  const text = out.join("\n");
+  return {
+    text,
+    bytes: Buffer.byteLength(text),
+    budget_bytes: budgeted ? budget : null,
+    record_ids: BRIEF_PRIORITY.flatMap((key) => fills.get(key)!.ids),
+    drops,
+    truncated: drops.length > 0,
+  };
+}
+
+export function brief(cfg: Config, opts: BriefOpts = {}): string {
+  return briefReport(cfg, opts).text;
+}
+
+export interface PayloadPart {
+  name: string;
+  text: string;
+  /** Ceiling in bytes; unspent bytes flow to the parts after it. */
+  cap?: number;
+  /** Printed when this part is trimmed, so a reader can retrieve the rest. */
+  more?: string;
+}
+export interface BudgetedPayload {
+  text: string;
+  bytes: number;
+  dropped: { name: string; omitted_lines: number; omitted_bytes: number }[];
+}
+
+/**
+ * Assemble a hook payload under a hard ceiling, in the order given. Whole lines only, and a trimmed
+ * part says how much it lost and where the rest is: the failure this replaces was a harness cut that
+ * announced nothing, so a silent trim here would reproduce the bug one layer down.
+ */
+export function budgetPayload(parts: PayloadPart[], totalBytes: number): BudgetedPayload {
+  const kept: string[] = [];
+  const dropped: BudgetedPayload["dropped"] = [];
+  let remaining = totalBytes;
+  for (const part of parts) {
+    const text = part.text?.trim();
+    if (!text) continue;
+    const separator = kept.length ? 2 : 0; // the blank line that joins parts
+    const allowance = Math.min(part.cap ?? Infinity, remaining) - separator;
+    const lines = text.split("\n");
+    const size = (s: string) => Buffer.byteLength(s) + 1;
+    const whole = lines.reduce((n, l) => n + size(l), 0);
+    if (whole <= allowance) { kept.push(text); remaining -= whole + separator; continue; }
+    const notice = (omitted: number, bytes: number) => `_${omitted} further line(s), ${bytes} bytes, omitted from ${part.name} to fit the session-start byte budget${part.more ? `: ${part.more}` : ""}._`;
+    const reserve = size(notice(lines.length, whole));
+    const out: string[] = [];
+    let used = 0;
+    for (const line of lines) {
+      if (used + size(line) + reserve > allowance) break;
+      out.push(line); used += size(line);
+    }
+    const omittedLines = lines.length - out.length;
+    const omittedBytes = whole - used;
+    if (used + reserve <= allowance) out.push(notice(omittedLines, omittedBytes));
+    dropped.push({ name: part.name, omitted_lines: omittedLines, omitted_bytes: omittedBytes });
+    if (out.length) { kept.push(out.join("\n")); remaining -= used + reserve + separator; }
+  }
+  const text = kept.join("\n\n");
+  return { text, bytes: Buffer.byteLength(text), dropped };
 }
 
 // ---------- stats: the thing you measure the pilot with ----------

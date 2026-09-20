@@ -272,6 +272,14 @@ Nowhere new. The data repo on GitHub:
 
 `ledger brief` and `ledger stats` give the same views in a terminal. A web UI can come later; it would read the same files.
 
+### The brief is budgeted, and the budget is logged
+
+Both harnesses truncate an over-long SessionStart hook payload before the model reads it, and neither says so. On the pilot machine every brief from 2026-09-03 onward was over that limit — 25 KB then, 123,064 bytes on 2026-09-21 — so the agent received a ~2 KB preview that stopped inside the authority warnings and never reached a definition. Nothing detected it, because an agent cannot tell a short brief from a complete one.
+
+`brief()` now renders under a hard byte ceiling (7 KB for the brief, 10 KB for the whole SessionStart payload), spending it in priority order: unresolved accepted conflicts, authority warnings, definitions in force, decisions, findings, changes, drafts. Records are kept whole — a half-rendered definition is a wrong definition — and every omission is stated with its exact count and the query that returns it, section by section and again in a closing `## Not in this brief` block. Definitions overflow to their metric names, because knowing `trial_start_cvr` is defined costs ~20 bytes and not knowing it costs a reinvented denominator. A brief re-injected after a resume or a compaction says it replaces the earlier copy. `ledger brief --full` prints the unbudgeted text.
+
+Each injection is recorded through the usage path (`src/usage.ts`), which writes to a bounded local spool first and uploads later, so it survives Postgres being down and is a silent no-op when continuity is not configured. The record carries record ids, byte size and the dropped count — never a record body. `ledger replay [--session ID] [--json] [--html FILE]` plays one session's knowledge trail back in order: what was injected, which records were returned, which the agent cited with `ledger_show_contribution`, what it saved. It names both sources and says which one it could not read, so a trail is never quietly half a trail. Found is retrieval, referenced is the agent's own claim, saved is a record.
+
 ## OKF
 
 The data repo is a conformant [OKF v0.2](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md) bundle, checked by the self-test:
