@@ -254,6 +254,10 @@ ledger handoff report --from 2026-09-21T00:00:00Z --to 2026-09-28T00:00:00Z
 
 Spool v2 is a compatibility boundary. Retain original v1 inputs during rollout and use only a rollback runtime that understands v2. Do not run an old v1 writer against migrated state. Never reset `helper-state.json`, delete unacknowledged files, or rerun pending mutating tool calls as a generic recovery step.
 
+If a source transcript shrinks or is rewritten, capture stops that source visibly instead of reusing line-based producer IDs for different content. Preserve the old source and spool for a source-generation repair; deleting the cursor is not a safe repair. Offloaded Claude tool outputs are read only from a realpath-contained tool-results directory for that exact session. Unverified Codex offload layouts remain explicitly unavailable; output text alone cannot authorize reading an arbitrary local file.
+
+Snapshots now use sanitized, isolated history so denied files cannot leak through a parent commit. Resume packs select one exact remotely verified checkpoint/commit pair; newer unverified checkpoints cannot borrow an older verification timestamp. Restore the snapshot into a fresh detached worktree, then port only reviewed intended paths against the recorded base. Do not rebase/merge snapshot history or apply a full-tree diff that deletes intentionally excluded files.
+
 ### Complete a handoff honestly
 
 `ledger_resume` and CLI `ledger resume` return a handoff attempt after a usable continuation pack is delivered and its destination session exists. Inspect-only reads do not count as continuations. Use the real destination session for continue/fork. Report progress through `ledger_handoff_update` or `ledger handoff update --session <id>` with JSON on stdin. Exact event references have `{session_id, seq, role}`, where role is `verification`, `validation`, `delivered_result`, or `pending_operation_resolution`.
