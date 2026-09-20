@@ -87,6 +87,16 @@ const ledgerDir = path.join(tmp, "ledger");
 initLedger(ledgerDir, "test");
 const cfg: Config = { ledger_dir: ledgerDir, author: "rachit", git_sync: false, continuity: { database_url: DB, machine: "rachit-mac" } };
 assertSafeSelftestDatabase(DB);
+// Fail closed if another fixture forgets to install the fake extractor command.
+{
+  const {runExtractor,runExtractorAsync}=await import("./extract.js");
+  const fakeCommand=process.env.LEDGER_EXTRACTOR_CMD;
+  delete process.env.LEDGER_EXTRACTOR_CMD;
+  try {
+    assert.throws(()=>runExtractor("fixture",cfg),/Selftest extraction refused/);
+    await assert.rejects(runExtractorAsync("fixture",cfg),/Selftest extraction refused/);
+  } finally { if(fakeCommand !== undefined) process.env.LEDGER_EXTRACTOR_CMD=fakeCommand; }
+}
 const pool = getPool(cfg);
 await assertSelftestDatabaseMarker(pool);
 await pool.query(`drop table if exists cont_state_updates, cont_record_links, cont_records, cont_notifications, cont_artifacts, cont_claims, cont_checkpoints, cont_events, cont_sessions, cont_threads cascade`);

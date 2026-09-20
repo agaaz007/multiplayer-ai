@@ -28,6 +28,7 @@ assertSafeSelftestDatabase(DB);
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ledger-cont-"));
 process.env.LEDGER_CONFIG_DIR = path.join(tmp, ".ledger"); // spool, state, bindings, signals live here
 process.env.LEDGER_GIT_SYNC = "0";
+process.env.LEDGER_CLASSIFY = "0"; // classifiers are exercised separately with injected fixture runners
 
 const { getPool, migrate, closePools } = await import("./continuity/db.js");
 const S = await import("./continuity/store.js");

@@ -152,6 +152,7 @@ export function runExtractor(prompt: string, cfg: Config): string {
   };
   const cmd = process.env.LEDGER_EXTRACTOR_CMD;
   if (cmd) return execSync(cmd, { input: prompt, env, timeout: 120_000, maxBuffer: 8 << 20 }).toString();
+  if (process.env.LEDGER_SELFTEST === "1") throw new Error("Selftest extraction refused: provide an explicit fake LEDGER_EXTRACTOR_CMD; real Claude/Codex providers are disabled in tests");
   const want = process.env.LEDGER_EXTRACTOR || cfg.extractor || "auto";
   const has = (bin: string) => {
     try {
@@ -199,6 +200,7 @@ export function runExtractorAsync(prompt: string, cfg: Config): Promise<string> 
       child.stdin?.end(prompt);
     });
   }
+  if (process.env.LEDGER_SELFTEST === "1") return Promise.reject(new Error("Selftest extraction refused: provide an explicit fake LEDGER_EXTRACTOR_CMD; real Claude/Codex providers are disabled in tests"));
   const want = process.env.LEDGER_EXTRACTOR || cfg.extractor || "auto";
   const has = (bin: string) => {
     try {

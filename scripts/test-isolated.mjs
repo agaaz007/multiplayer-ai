@@ -46,7 +46,7 @@ try {
   await client.query("create table ledger_selftest_identity(singleton boolean primary key default true check(singleton), marker text not null)");
   await client.query("insert into ledger_selftest_identity(marker) values($1)", [marker]);
   await client.end();
-  const env = { ...process.env, LEDGER_SELFTEST: "1", LEDGER_SELFTEST_DB_MARKER: marker, LEDGER_SELFTEST_DB_PORT: String(port), LEDGER_CONFIG_DIR: path.join(temp, "config"), LEDGER_CONTINUITY_DB: connectionString, LEDGER_TEST_DATABASE_URL: connectionString, LEDGER_GIT_SYNC: "0", LEDGER_TRAFFIC_CLASS: "evaluation" };
+  const env = { ...process.env, LEDGER_SELFTEST: "1", LEDGER_CLASSIFY: "0", LEDGER_SELFTEST_DB_MARKER: marker, LEDGER_SELFTEST_DB_PORT: String(port), LEDGER_CONFIG_DIR: path.join(temp, "config"), LEDGER_CONTINUITY_DB: connectionString, LEDGER_TEST_DATABASE_URL: connectionString, LEDGER_GIT_SYNC: "0", LEDGER_TRAFFIC_CLASS: "evaluation" };
   delete env.LEDGER_DIR; delete env.LEDGER_AUTHOR;
   fs.mkdirSync(env.LEDGER_CONFIG_DIR);
   const manifest = path.join(temp, "environment.json");
