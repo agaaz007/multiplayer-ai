@@ -235,7 +235,22 @@ export function memoryReport(objects: LedgerObject[], opts: ReportOpts = {}): Me
     }
   }
   edges.sort((a, b) => (a.from === b.from ? (a.to < b.to ? -1 : 1) : a.from < b.from ? -1 : 1));
-  const findings = live.filter((o) => o.type === "finding");
+
+  // The same relationship, named but not pinned. It is not lineage and is never counted as reuse,
+  // but it is where cross-person reuse is actually happening, so it is reported as a fixable gap.
+  const unpinnedCross: { from: string; from_author: string; to: string; to_author: string }[] = [];
+  for (const o of live) {
+    for (const name of unresolvedNames(o)) {
+      const target = byId.get(name);
+      if (!target || target.author === o.author) continue;
+      unpinnedCross.push({ from: o.id, from_author: o.author, to: target.id, to_author: target.author });
+    }
+  }
+  unpinnedCross.sort((a, b) => (a.from === b.from ? (a.to < b.to ? -1 : 1) : a.from < b.from ? -1 : 1));
+
+  // Denominators are the objects in force. A deprecated predecessor would otherwise inflate every
+  // "out of N findings" claim on the page.
+  const findings = all.filter((o) => o.type === "finding" && o.status === "stable");
 
   // --- the honest gaps --------------------------------------------------------------------------
   const drafts = all
@@ -283,19 +298,18 @@ export function memoryReport(objects: LedgerObject[], opts: ReportOpts = {}): Me
       edges,
       cross_author: edges.filter((e) => e.from_author !== e.to_author),
       stale: edges.filter((e) => !e.live),
+      unpinned_cross_author: unpinnedCross,
       findings_total: findings.length,
       findings_pinned: findings.filter((o) => deps(o).length > 0).length,
     },
     gaps: {
-      findings_without_pins: findings
-        .filter((o) => deps(o).length === 0)
-        .map((o) => ({ id: o.id, title: o.title, author: o.author }))
-        .slice(0, 20),
-      unresolved_names: live
-        .map((o) => ({ id: o.id, title: o.title, names: unresolvedNames(o) }))
-        .filter((x) => x.names.length > 0)
-        .slice(0, 20),
-      drafts,
+      findings_without_pins: capped(
+        findings.filter((o) => deps(o).length === 0).map((o) => ({ id: o.id, title: o.title, author: o.author }))
+      ),
+      unresolved_names: capped(
+        live.map((o) => ({ id: o.id, title: o.title, names: unresolvedNames(o) })).filter((x) => x.names.length > 0)
+      ),
+      drafts: capped(drafts),
       unreproduced: findings.filter((o) => verification(all, o).status === "unreproduced").length,
     },
   };
@@ -327,7 +341,7 @@ export function headline(r: MemoryReport): string[] {
     `**${needReview}** recorded result${needReview === 1 ? "" : "s"} put back under review by a correction`,
     `**${reuse}** time${reuse === 1 ? "" : "s"} one person's work was pinned by another person's`,
     `**${r.reuse.findings_pinned}/${r.reuse.findings_total}** findings rest on a pinned version (${pct(r.reuse.findings_pinned, r.reuse.findings_total)})`,
-    `**${r.gaps.drafts.length}** draft${r.gaps.drafts.length === 1 ? "" : "s"} awaiting review`,
+    `**${r.gaps.drafts.count}** draft${r.gaps.drafts.count === 1 ? "" : "s"} awaiting review`,
   ];
 }
 
@@ -414,6 +428,14 @@ export function renderMemoryReport(r: MemoryReport, objects: LedgerObject[]): st
       `_No cross-person reuse yet. This counts only pinned lineage: one person's record citing another's by exact version, not by name._`,
       ``
     );
+    if (r.reuse.unpinned_cross_author.length) {
+      md.push(
+        `It is happening without lineage, though: **${r.reuse.unpinned_cross_author.length}** cross-person reference${r.reuse.unpinned_cross_author.length === 1 ? "" : "s"} name another person's record without pinning its version, so nothing can tell whether the record has changed since. ` +
+          `${r.reuse.unpinned_cross_author.slice(0, 5).map((e) => `${esc(e.from_author)} → ${esc(e.to_author)} (${link(e.from, byId)} → ${link(e.to, byId)})`).join("; ")}. ` +
+          `Pin \`dependencies: [{relation, id, version}]\` with the target's content_version to turn these into lineage.`,
+        ``
+      );
+    }
   } else {
     md.push(`Each row is one person's recorded work resting on another's, pinned to an exact version.`, ``);
     md.push(`| built on | by | was used by | by | relation | |`, `|---|---|---|---|---|---|`);
