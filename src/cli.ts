@@ -19,6 +19,7 @@ import { validateRecordCoverage, acknowledgeLocalCapture, reconcileSharedCapture
 import { investigation } from './investigation.js';
 import { correctionImpact, objectVersion, resolveAccepted } from './authority.js';
 import { buildGraph, renderGraph, type GraphFormat } from './graph.js';
+import { memoryReport, renderMemoryReport } from './interpret.js';
 import { AnalysisScopeSchema, AnalyticalDateSchema } from './schema.js';
 import { DEFAULT_QUIET_MS, pendingDrafts, reconcile } from "./extract.js";
 import { continuityConfigured, getPool, migrate, tableList, closePools } from "./continuity/db.js";
@@ -61,6 +62,9 @@ const USAGE = `ledger — shared definitions, findings, changes, decisions for y
                                          --days N --current-only. --names draws dashed definitions_used
                                          edges; --depth widens a selection; --legend adds a key.
                                          Scope line and unresolved conflicts go to stderr.
+  ledger memory [--days N] [--json]      what the memory is doing: disagreements caught, corrections
+                                         and their blast radius, work reused across people, and the
+                                         lineage gaps. Same view as the data repo's memory.md.
   ledger record <type> < fields.json     record from JSON on stdin
   ledger drafts                          drafts awaiting review (from the transcript fallback)
   ledger discard <id> --reason "..."     reject a draft
@@ -340,6 +344,13 @@ async function main() {
       case 'impact': {
         if (!args[0]) throw new Error('usage: ledger impact <correction-id>');
         console.log(JSON.stringify(correctionImpact(loadAll(loadConfig()),args[0]),null,2));
+        return;
+      }
+      case "memory": {
+        const objects = loadAll(loadConfig());
+        const days = flag(args, "--days");
+        const report = memoryReport(objects, { days: days ? Number(days) : undefined });
+        console.log(args.includes("--json") ? JSON.stringify(report, null, 2) : renderMemoryReport(report, objects));
         return;
       }
       case "graph": {
