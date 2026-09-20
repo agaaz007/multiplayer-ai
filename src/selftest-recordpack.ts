@@ -221,7 +221,7 @@ for (const t of [lean.text, pack.text]) {
   assert.ok(t.includes(`## Changed since your last visit\nNo viewer given, so no delta. Totals since creation: 13 content events in 2 sessions, 5 state updates (4 proposed, 1 confirmed), 1 pending operation, 2 files touched.\n- files: src/ingest/mixpanel.ts, queries/attribution.sql`), t.slice(t.indexOf("## Changed since"), t.indexOf("## Bootstrap")));
   assert.equal(lean.changed_since?.viewer, null);
   // bootstrap: the existing block
-  assert.ok(t.includes(`## Bootstrap\nsnapshot from session ${R8} (rachit, Codex)\n\`\`\`\ngit fetch origin ${WIP_REF}:${WIP_REF}\n`));
+  assert.ok(t.includes(`## Bootstrap\nsnapshot from session ${R8}; checkpoint ${cp.id.slice(0,8)}\n\`\`\`\ngit fetch origin ${WIP_REF}:${WIP_REF}\n`));
   // drill down: one exact ledger_events call per span, the last error, the compaction summary, unassigned, search; nothing inline
   const drill = t.slice(t.indexOf("## Drill down"), t.indexOf("## Omitted"));
   assert.ok(drill.includes(`- ledger_events(session_id: "${sidA}", after_seq: 0, limit: 10)  · agaaz/Claude Code\n- ledger_events(session_id: "${sidR}", after_seq: 0, limit: 7)  · rachit/Codex\n`), drill);
@@ -413,7 +413,7 @@ for (const t of [lean.text, pack.text]) {
   assert.equal(viaHead.bootstrap[0], `git fetch origin ${WIP_REF}:${WIP_REF}`);
   assert.ok(viaHead.text.includes(`snapshot from session ${R8}; checkpoint ${cp.id.slice(0,8)}`), "exact checkpoint remains authoritative when the mutable session fields disappear");
   await S.updateSession(pool, sidR, { wip_ref: WIP_REF, wip_commit: WIP_COMMIT });
-  ok("bootstrap: the repo record prints fetch + worktree commands for rachit's wip ref (session first, thread head as fallback); the non-code record says 'non-code record; no worktree' and adapts the contract");
+  ok("bootstrap: the repo record restores the exact remotely verified checkpoint into an isolated worktree with safe porting guidance; the non-code record has no worktree");
 }
 
 // ---------- 8. mode continue acquires the thread claim; inspect does not ----------
