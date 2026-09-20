@@ -12,7 +12,7 @@ import { streamTranscript, detectHarness, type NormEvent } from "../continuity/e
 import { repoRoot, repoIdentity, currentBranch, headCommit } from "../continuity/shadow.js";
 import * as S from "../continuity/store.js";
 import { queueSnapshot, snapshotQueueSize } from "./snapshot-queue.js";
-import { spoolAppend, spoolPending, spoolAck, spoolCursor, spoolStatus } from "./spool.js";
+import { spoolAppend, spoolPending, spoolAck, spoolCursor, spoolStatus, spoolSessions, spoolSource } from "./spool.js";
 import { readBinding, takeSignal, readIndex, appendLocalNotifications } from "./signals.js";
 import { redactText } from "../continuity/redact.js";
 import { classifySession, classifyAllowed, unclassifiedCount } from "../continuity/classify.js";
@@ -374,6 +374,15 @@ async function helperOnceImpl(cfg: Config, opts: HelperOpts): Promise<PassSummar
   const roots = { ...transcriptRoots(), ...(opts.roots ?? {}) };
   const st = loadState();
   for (const [sid, patch] of snapshotCompleted) { if (st[sid]) Object.assign(st[sid], patch); snapshotCompleted.delete(sid); }
+  // The source transcript can be moved/deleted after durable admission. Recover
+  // enough trusted source metadata from the spool to drain independently.
+  for (const sid of spoolSessions()) {
+    if (st[sid]) continue;
+    try {
+      const source = spoolSource(sid);
+      if (source?.author === author && typeof source.file === "string" && (source.harness === "codex" || source.harness === "claude")) st[sid] = { ...(source as any), file: source.file, harness: source.harness, offset: spoolCursor(sid) ?? 0, lastSeenMtime: 0, seenCallIds: [], reconciled: [], unknown: {} };
+    } catch (e: any) { sum.errors.push(`spool recovery ${sid}: ${String(e?.message ?? e).slice(0, 120)}`); }
+  }
   let lastSave = Date.now();
   /** sessions that had events inserted this pass; only their new events are embedded (backfill is the CLI's job) */
   const uploadedSessions = new Set<string>();
@@ -460,7 +469,7 @@ async function helperOnceImpl(cfg: Config, opts: HelperOpts): Promise<PassSummar
       // Persist even an empty normalized chunk: source cursor and admission share
       // the same fsynced manifest. A crash before saveState replays, never skips.
       retainOffloadedOutputs(r.events, { transcriptFile: file, harness });
-      if (r.offset !== s.offset || r.events.length) spoolAppend(sid, { offset: r.offset, events: r.events, at: now.toISOString() });
+      if (r.offset !== s.offset || r.events.length) spoolAppend(sid, { offset: r.offset, events: r.events, at: now.toISOString(), source: { file, harness, author, cwd: s.cwd, root: s.root, repo: s.repo, branch: s.branch, baseCommit: s.baseCommit, wipRef: s.wipRef, startedAtMs: s.startedAtMs } });
       s.offset = r.offset;
       if (!s.sourceFingerprint && r.offset) {
         const fd = fs.openSync(file, "r"), bytes = Buffer.alloc(Math.min(256, r.offset));
@@ -472,6 +481,12 @@ async function helperOnceImpl(cfg: Config, opts: HelperOpts): Promise<PassSummar
       sum.sessions++;
       admitted.push({ file, mtime, sid, s, resumed });
     } catch (e: any) { sum.errors.push(`local capture ${path.basename(file)}: ${String(e?.message ?? e).slice(0, 200)}`); }
+  }
+  for (const [sid, s] of Object.entries(st)) {
+    if (admitted.some(a => a.sid === sid)) continue;
+    try {
+      if (spoolStatus(sid).pending_batches && (!s.repo || repoAllowed(cfg, s.repo, s.root ?? null))) admitted.push({ file: s.file, mtime: s.lastSeenMtime, sid, s, resumed: false });
+    } catch (e: any) { sum.errors.push(`pending spool ${sid}: ${String(e?.message ?? e).slice(0, 120)}`); }
   }
   // All local capture is committed before the first network operation. A failed
   // connection cannot prevent other sessions' transcript admission this pass.
@@ -649,7 +664,7 @@ async function helperOnceImpl(cfg: Config, opts: HelperOpts): Promise<PassSummar
       // ---- heartbeat / end ----
       // An unbound session that goes quiet leaves the active set too. It used to stay tracked forever and was re-processed
       // every pass; new transcript lines un-end it (see the tail step).
-      const drained = spoolStatus(sid).pending_batches === 0 && s.offset >= fs.statSync(file).size;
+      const drained = spoolStatus(sid).pending_batches === 0 && (!fs.existsSync(file) || s.offset >= fs.statSync(file).size);
       if (!s.threadId && !s.ended && (endSignal || quiet) && !holdForClassify && drained) {
         await S.updateSession(pool, sid, { ended_at: now });
         s.ended = true;
