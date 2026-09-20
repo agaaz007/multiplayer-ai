@@ -399,8 +399,6 @@ async function main() {
         console.log(args.includes("--json") ? JSON.stringify(report, null, 2) : renderMemoryReport(report, objects));
         return;
       }
-<<<<<<< HEAD
-=======
       case "replay": {
         const cfg = loadConfig();
         const trail = await replayTrail(cfg, { session: flag(args, "--session"), includeOther: args.includes("--all") });
@@ -410,7 +408,6 @@ async function main() {
         await closePools().catch(() => {});
         return;
       }
->>>>>>> worktree-agent-a3c4666dafa204997
       case "graph": {
         const format = (flag(args, "--format") ?? "mermaid") as GraphFormat;
         if (!["mermaid", "dot", "json"].includes(format)) throw new Error(`unknown --format ${format}; use mermaid, dot or json`);
