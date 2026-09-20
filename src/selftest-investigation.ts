@@ -58,6 +58,12 @@ assert.match(intervalPack.text,/split the analysis window/);
 
 // Legacy discoveries cannot become authority, even beside applicable results or with no scope supplied.
 const legacy = record(cfg,{type:'definition',fields:{title:'Funnel handoff prior evidence',metric:'funnel_rate',formula:'known retained funnel formula',source:'fixture',owner:'agaaz',valid_from:'2026-08-01'}});
+// Sanitized regression for the audit's actual failed question. Content is synthetic; no production numbers or transcript bytes.
+const funnelQuestion = 'What are the largest drop-off points in the HiAstro user journey before the first paywall impression?';
+const funnelPrior = record(cfg,{type:'definition',fields:{title:'HiAstro pre-paywall funnel: first impression drop-off points',metric:'funnel_fixture',formula:'Synthetic fixture describing user journey stages; inspect retained evidence before reuse',source:'fixture',owner:'agaaz',valid_from:'2026-08-01'}});
+const funnelLookup = analyticalContext(loadAll(cfg),{question:funnelQuestion,scope:{...scope,product:'HiAstro',metric:'funnel_fixture'}});
+assert.ok(funnelLookup.legacy_candidates.slice(0,5).some(c=>c.id===funnelPrior.id));
+assert.ok(!funnelLookup.current.some(o=>o.id===funnelPrior.id));
 const partialLegacy = record(cfg,{type:'definition',fields:{title:'Funnel handoff partial draft',metric:'funnel_rate',formula:'partial candidate',source:'fixture',owner:'agaaz',valid_from:'2026-08-01',status:'draft',analysis_scope:{product:scope.product}}});
 const incompatible = record(cfg,{type:'definition',fields:{title:'Funnel handoff other product',metric:'funnel_rate',formula:'wrong product',source:'fixture',owner:'agaaz',valid_from:'2026-08-01',status:'draft',analysis_scope:{product:'wrong-product'}}});
 const discovery = analyticalContext(loadAll(cfg),{question:'Funnel handoff',scope});

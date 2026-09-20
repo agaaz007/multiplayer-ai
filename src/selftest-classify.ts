@@ -26,7 +26,7 @@ import { execFileSync } from "node:child_process";
 const DB = process.env.LEDGER_TEST_DATABASE_URL;
 if (!DB) throw new Error('set LEDGER_TEST_DATABASE_URL to an explicitly owned disposable localhost test database');
 const dbUrl = new URL(DB);
-if (!['localhost','127.0.0.1','[::1]'].includes(dbUrl.hostname) || !/selftest|_test(?:_|$)/.test(dbUrl.pathname) || dbUrl.search) throw new Error('classifier selftest requires a disposable localhost test database');
+if (!['localhost','127.0.0.1','[::1]'].includes(dbUrl.hostname) || !/selftest|_test(?:_|$)/.test(dbUrl.pathname)) throw new Error('classifier selftest requires a disposable localhost test database');
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ledger-cls-"));
 process.env.LEDGER_CONFIG_DIR = path.join(tmp, ".ledger");
 process.env.LEDGER_GIT_SYNC = "0";

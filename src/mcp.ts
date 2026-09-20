@@ -19,7 +19,7 @@ import { listThreads, createThread, getThread, claimThread, releaseClaim, upsert
 import { buildResumePack, threadLine } from "./continuity/resume.js";
 import { queryEvents, getArtifact, eventLine, resolveSessionId, resolveSearchScope, scopeLine, EVENTS_DEFAULT_LIMIT, EVENTS_MAX_LIMIT, PREVIEW_CHARS, PREVIEW_MAX_CHARS, ARTIFACT_DEFAULT_CHARS, ARTIFACT_MAX_CHARS } from "./continuity/evidence.js";
 import { repoRoot, repoIdentity, currentBranch } from "./continuity/shadow.js";
-import { forbiddenSnapshotRoot, localTranscriptExists, resolveHarnessSession } from "./continuity/safety.js";
+import { forbiddenSnapshotRoot, localTranscriptExists, resolveHarnessSession, resolveHarnessIdentity, type HarnessIdentity } from "./continuity/safety.js";
 import { openThreadsText } from "./continuity/brief.js";
 import { writeBinding, writeSignal } from "./helper/signals.js";
 import { buildRecordPack, listRecordSummaries, recordLine, unassignedLine } from "./continuity/recordpack.js";
@@ -36,8 +36,8 @@ const refused = (s: string) => ({ ...text(s), isError: true as const });
 type AnyPool = ReturnType<typeof getPool>;
 interface InvestigationsModule {
   listInvestigations(pool: AnyPool, cfg: Config, o: { q?: string; author?: string; hours?: number; limit?: number }): Promise<{ text: string; items: unknown[] }>;
-  bindInvestigation(pool: AnyPool, cfg: Config, o: { record_id: string; session_id: string; question?: string }): Promise<{ text: string; record_id: string; title: string; already_bound: boolean }>;
-  declareInvestigation(pool: AnyPool, cfg: Config, o: { question: string; goal?: string; session_id: string; repo?: string }): Promise<{ text: string; record_id: string }>;
+  bindInvestigation(pool: AnyPool, cfg: Config, o: { record_id: string; session_id: string; question?: string; request_id?: string; identity?: HarnessIdentity }): Promise<{ text: string; record_id: string; title: string; already_bound: boolean }>;
+  declareInvestigation(pool: AnyPool, cfg: Config, o: { question: string; goal?: string; session_id: string; repo?: string; request_id?: string; identity?: HarnessIdentity }): Promise<{ text: string; record_id: string }>;
   sessionBinding(pool: AnyPool, session_id: string): Promise<unknown>;
 }
 const INVESTIGATIONS_MODULE: string = "./continuity/investigations.js";
@@ -194,11 +194,11 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
   registerAppTool(server, 'ledger_investigation', {
     title: 'Continue an analytical investigation',
     description: 'Retrieve accepted definitions, correction history, exact dependencies and affected results across full history before continuing analytical work. Proposed claims cannot displace accepted knowledge. Supply analytical scope; missing scope and lineage remain explicit.' + RECEIPT_GUIDANCE,
-    inputSchema: { question: z.string().min(2), analysis_scope: AnalysisScopeSchema.partial().optional(), definition_ids: z.array(z.string()).optional(), as_of: AnalyticalDateSchema.optional(), limit: z.number().int().min(1).max(50).default(10) },
+    inputSchema: { question: z.string().min(2), analysis_scope: AnalysisScopeSchema.partial().optional(), definition_ids: z.array(z.string()).optional(), as_of: AnalyticalDateSchema.optional(), limit: z.number().int().min(1).max(50).default(10), candidate_limit: z.number().int().min(1).max(50).default(5) },
     _meta: evidenceUi, annotations: readOnly,
-  }, async ({question, analysis_scope, definition_ids, as_of, limit}) => {
-    const pack = investigation(cfg, {question, scope:analysis_scope, definition_ids, as_of, limit});
-    const result = evidenceResult(pack.text, pack.objects, {query: question});
+  }, async ({question, analysis_scope, definition_ids, as_of, limit, candidate_limit}) => {
+    const pack = investigation(cfg, {question, scope:analysis_scope, definition_ids, as_of, limit, candidate_limit});
+    const result = evidenceResult(pack.text, pack.objects, {query: question, candidate_count: pack.legacy_candidates.length});
     return {...result, structuredContent: {...result.structuredContent, investigation: pack}};
   });
 
@@ -355,10 +355,12 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
         investigation_record_id: z.string().optional().describe("Work record (investigation) id; defaults to the one this session is bound to"),
         title: z.string().min(3).max(140).optional().describe("Defaults to '<metric> · <population> · <window>: <result>'"),
         caveats: z.array(z.string()).optional(),
+        analysis_scope: AnalysisScopeSchema.partial().optional().describe("Explicit analytical scope; incomplete scope remains visibly proposed"),
+        definition_ids: z.array(z.string()).optional().describe("Exact definition IDs to resolve in the supplied scope and reporting window"),
         session_id: z.string().optional().describe('Your harness session id (SessionStart prints it as "Ledger session: <id>"); read from CLAUDE_CODE_SESSION_ID / CODEX_THREAD_ID when a local transcript matches'),
       },
     },
-    async ({ population, metric, window, result, query_ref, investigation_record_id, title, caveats, session_id }) => {
+    async ({ population, metric, window, result, query_ref, investigation_record_id, title, caveats, session_id, analysis_scope, definition_ids }) => {
       let sid: string;
       try { sid = sessionOf(session_id); } catch (e: any) { return refused(`ledger_propose_finding refused: ${e.message} A proposal covers the query it was read from, so it needs the session that ran it.`); }
       const pool = poolIfAny();
@@ -374,7 +376,7 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
       let source: string | undefined;
       try { source = loadJournal(sid).entries.find((e) => e.kind === "query" && e.evidence_id === query_ref)?.tool; } catch { /* remote session: the source stays unrecorded */ }
       let res;
-      try { res = proposeFinding(cfg, { population, metric, window, result, query_ref, investigation_record_id: recordId, title, caveats, source }, { session: sid }); }
+      try { res = proposeFinding(cfg, { population, metric, window, result, query_ref, investigation_record_id: recordId, title, caveats, source, analysis_scope, definition_ids }, { session: sid }); }
       catch (e: any) { return refused(`ledger_propose_finding failed: ${e.message}`); }
       const ack: CaptureAck = { schema: "ledger-capture/v1", action: "record", status: "pending_review", coverage, record_id: res.id };
       let captureWarning = "";
@@ -699,14 +701,15 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
         inputSchema: {
           record_id: z.string().describe("Investigation (work record) id from ledger_investigations"),
           question: z.string().max(2000).optional().describe("The question this session pursues inside the investigation"),
+          request_id: z.string().min(8).max(200).optional().describe("Stable operation key reused after a timeout; do not change it when retrying"),
           session_id: z.string().optional().describe('Your harness session id (SessionStart prints it as "Ledger session: <id>")'),
         },
       },
-      async ({ record_id, question, session_id }) => {
+      async ({ record_id, question, session_id, request_id }) => {
         let sid: string;
         try { sid = sessionOf(session_id); } catch (e: any) { return refused(`ledger_investigation_bind refused: ${e.message}`); }
         try {
-          const r = await (await investigationsModule()).bindInvestigation(pool(), cfg, { record_id, session_id: sid, question });
+          const r = await (await investigationsModule()).bindInvestigation(pool(), cfg, { record_id, session_id: sid, question, request_id, identity: resolveHarnessIdentity(sid).identity });
           return { ...text(r.text), structuredContent: { record_id: r.record_id, title: r.title, already_bound: r.already_bound, session_id: sid } };
         } catch (e: any) { return { ...failed("ledger_investigation_bind", e), isError: true }; }
       }
@@ -721,15 +724,16 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
           question: z.string().min(3).max(2000).describe("The question this investigation answers, stated so it could later be false"),
           goal: z.string().max(2000).optional(),
           repo: z.string().optional().describe("Optional: a path inside a repo this investigation may read. Recorded as a touched repo (a capability), never as the record's identity; an investigation is keyed by its question and is complete with no repo at all"),
+          request_id: z.string().min(8).max(200).optional().describe("Stable operation key reused after a timeout; do not change it when retrying"),
           session_id: z.string().optional().describe('Your harness session id (SessionStart prints it as "Ledger session: <id>")'),
         },
       },
-      async ({ question, goal, repo, session_id }) => {
+      async ({ question, goal, repo, session_id, request_id }) => {
         let sid: string;
         try { sid = sessionOf(session_id); } catch (e: any) { return refused(`ledger_investigation_new refused: ${e.message}`); }
         try {
           const repoRootOf = repo ? repoRoot(repo) : null;
-          const r = await (await investigationsModule()).declareInvestigation(pool(), cfg, { question, goal, session_id: sid, repo: repoRootOf ? repoIdentity(repoRootOf) : repo });
+          const r = await (await investigationsModule()).declareInvestigation(pool(), cfg, { question, goal, session_id: sid, repo: repoRootOf ? repoIdentity(repoRootOf) : repo, request_id, identity: resolveHarnessIdentity(sid).identity });
           return { ...text(r.text), structuredContent: { record_id: r.record_id, session_id: sid } };
         } catch (e: any) { return { ...failed("ledger_investigation_new", e), isError: true }; }
       }

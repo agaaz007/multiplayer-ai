@@ -441,8 +441,9 @@ export function handleHook(event: string, input: any, opts: HookOpts = {}): Hook
  */
 export function continuityStartContext(sessionId: string, now = new Date()): string {
   const hb = readHeartbeat();
-  if (!hb) return "";
-  const lines = [`Ledger session: ${sessionId}. Pass session_id: "${sessionId}" to ledger_resume, ledger_thread_start, ledger_thread_bind, ledger_thread_note and ledger_release.`];
+  if (!sessionId || !/^[A-Za-z0-9_-]{8,}$/.test(sessionId)) return "";
+  const lines = [`Ledger session: ${sessionId}. Pass session_id: "${sessionId}" to ledger_investigation_bind, ledger_investigation_new, ledger_propose_finding, ledger_resume, ledger_thread_start, ledger_thread_bind, ledger_thread_note and ledger_release.`];
+  if (!hb) return [...lines, "Capture status unknown: no local helper heartbeat is available."].join("\n");
   const stale = captureStaleness(hb, now);
   if (stale) lines.push(`WARNING: ${stale}`);
   return lines.join("\n");

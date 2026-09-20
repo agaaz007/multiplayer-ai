@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { resolveHarnessIdentity } from "./continuity/safety.js";
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -616,13 +617,14 @@ async function main() {
         } else if (sub === "bind") {
           if (!pos[1]) throw new Error(usage);
           if (!sessionArg) throw new Error(`${usage}\nbind needs the session to bind: --session <id> (or LEDGER_SESSION_ID)`);
-          const r = await bindInvestigation(pool, cfg, { record_id: pos[1], session_id: sessionArg, question: flag(args, "--question") });
+          const r = await bindInvestigation(pool, cfg, { record_id: pos[1], session_id: sessionArg, question: flag(args, "--question"), request_id: flag(args, "--request-id"), identity: resolveHarnessIdentity(sessionArg).identity });
           console.log(r.text);
         } else if (sub === "new") {
           const question = pos.slice(1).join(" ");
           if (!question) throw new Error(usage);
-          // without a live session the CLI binds a synthetic one, as `ledger resume` does, so the record exists and the declaration is attributed
-          const r = await declareInvestigation(pool, cfg, { question, goal: flag(args, "--goal"), session_id: sessionArg ?? `cli:${cfg.author}:${Date.now()}`, repo: flag(args, "--repo") ?? null });
+          const resolved = resolveHarnessIdentity(sessionArg);
+          if (!resolved.ok) throw new Error(resolved.error);
+          const r = await declareInvestigation(pool, cfg, { question, goal: flag(args, "--goal"), session_id: resolved.id, repo: flag(args, "--repo") ?? null, request_id: flag(args, "--request-id"), identity: resolved.identity });
           console.log(r.text);
         } else if (sub === "show") {
           if (!sessionArg) throw new Error(usage);

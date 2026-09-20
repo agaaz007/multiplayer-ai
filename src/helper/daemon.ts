@@ -55,6 +55,7 @@ export interface SessState {
   lastCommit?: string | null;
   lastTree?: string;
   lastShadowAt?: number;
+  pendingSnapshotTurn?: boolean;
   lastHeartbeatAt?: number;
   lastSeenMtime: number;
   sidechain?: boolean;
@@ -512,7 +513,8 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
 
       // ---- signals & snapshot ----
       const endSignal = takeSignal(sid, "end");
-      const cpSignal = takeSignal(sid, "checkpoint") || endSignal;
+      const cpSignal = takeSignal(sid, "checkpoint") || endSignal || Boolean(s.pendingSnapshotTurn);
+      if (cpSignal) s.pendingSnapshotTurn = true;
       const due = !s.lastShadowAt || now.getTime() - s.lastShadowAt >= snapEvery;
       // subagent transcripts share the parent's worktree; the parent session snapshots it
       // A quiet session has no new agent edits to capture (its last live snapshot already has them), so it is only
@@ -527,6 +529,7 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
         const work = queueSnapshot(s.root, { ref: s.wipRef, parent: s.lastCommit ?? undefined, lastTree: s.lastTree, deny: cfg.continuity.deny, include: cfg.continuity.include, push: opts.push ?? true, now, message: `wip ${sid.slice(0, 8)} ${now.toISOString()}` });
         if (work) {
           s.lastShadowAt = now.getTime();
+          s.pendingSnapshotTurn = false;
           let publication: Promise<void>;
           publication = work.then(async sh => {
             if (sh.error) {
@@ -635,7 +638,7 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
     if (notes.length) { appendLocalNotifications(notes.map((n) => `${now.toISOString()} ${n}`)); for (const n of notes) log(`NOTICE ${n}`); }
   } catch (e: any) { sum.errors.push(`notifications: ${String(e?.message ?? e).slice(0, 120)}`); }
 
-  writeHeartbeat({ snapshot_queue_depth: snapshotQueueSize(), capture_sessions: Object.fromEntries(admitted.map(({ sid, s }) => [sid, { source_cursor: s.offset, ...spoolStatus(sid) }])) });
+  writeHeartbeat({ snapshot_queue_depth: snapshotQueueSize(), capture_sessions: Object.fromEntries(admitted.map(({ sid, s }) => [sid, spoolStatus(sid)])) });
 
   // prune ended sessions from state after a day
   for (const [sid, s] of Object.entries(st)) if (s.ended && now.getTime() - s.lastSeenMtime > 86_400_000) delete st[sid];
