@@ -272,4 +272,14 @@ Scope: retained the user's four weakness areas and added the durability/operatio
 
 Readiness: **NOT CLEARED for production**. The plan is actionable; all release evidence remains to be produced. Two critical current risks require explicit closure: spool/cursor crash recovery (F5) and artifact failure being acknowledged as missing output (F8). Other reliability gaps are captured in the task/test matrix. No proposed task is treated as an accepted product decision. No separate outside reviewer was run. Existing TODOs are referenced; no additional TODO-file scope was added.
 
+| Review | Status for this plan |
+|---|---|
+| Engineering, plan stage | Completed with open implementation/release gates; 10 findings, two critical durability risks. |
+| Architecture | F1–F4 and F10 mapped to explicit result, identity, transaction, and availability contracts. |
+| Code quality | F5, F8, F9 mapped to durable state transitions, honest failure types, and shared normalization. |
+| Performance | F6, F7 mapped to bounded bulk ingestion, fairness, and asynchronous snapshots. |
+| Test review | Execution diagram and 31 failure/acceptance scenarios; existing coverage distinguished from required additions. |
+| Implementation/adversarial diff review | Not run; there is no implementation diff in this change. |
+| CEO/design/outside review | Not run; not a prerequisite for this bounded reliability plan. |
+
 Review lanes: knowledge and continuity can start concurrently, with sequential integration of shared modules and a final release lane. No autonomous-agent speedup is asserted. A later implementation review must inspect the actual diff and test evidence; this planning review does not authorize a green shipping badge.
