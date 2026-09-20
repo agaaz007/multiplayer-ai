@@ -5,7 +5,7 @@ import crypto from "node:crypto";
 import type pg from "pg";
 import { ledgerHome, type Config } from "../store.js";
 import { acquireProcessLease } from "./process-lock.js";
-import { withUsageInvocation } from "../usage.js";
+import { withUsageInvocation, type TrafficClass } from "../usage.js";
 import { flushUsage } from "../continuity/usage.js";
 import { getPool } from "../continuity/db.js";
 import { streamTranscript, detectHarness, type NormEvent } from "../continuity/events.js";
@@ -357,7 +357,9 @@ export async function materializeArtifacts(pool: pg.Pool, sessionId: string, eve
 
 export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<PassSummary> {
   const release = acquireProcessLease(path.join(ledgerHome(), "helper-pass.lock"));
-  try { return await withUsageInvocation(cfg, { tool: "helper:pass", traffic_class: process.env.LEDGER_SELFTEST === "1" ? "evaluation" : "unknown", purpose: "capture_write", version: process.env.LEDGER_BUILD_COMMIT ?? "0.1.0" }, () => helperOnceImpl(cfg, opts)); }
+  const configuredTraffic = process.env.LEDGER_TRAFFIC_CLASS;
+  const traffic: TrafficClass = process.env.LEDGER_SELFTEST === "1" ? "evaluation" : configuredTraffic && ["ordinary", "evaluation", "audit", "maintenance", "unknown"].includes(configuredTraffic) ? configuredTraffic as TrafficClass : "unknown";
+  try { return await withUsageInvocation(cfg, { tool: "helper:pass", traffic_class: traffic, purpose: "capture_write", version: process.env.LEDGER_BUILD_COMMIT ?? "0.1.0" }, () => helperOnceImpl(cfg, opts)); }
   finally { release(); }
 }
 async function helperOnceImpl(cfg: Config, opts: HelperOpts): Promise<PassSummary> {
@@ -380,7 +382,7 @@ async function helperOnceImpl(cfg: Config, opts: HelperOpts): Promise<PassSummar
     if (st[sid]) continue;
     try {
       const source = spoolSource(sid);
-      if (source?.author === author && typeof source.file === "string" && (source.harness === "codex" || source.harness === "claude")) st[sid] = { ...(source as any), file: source.file, harness: source.harness, offset: spoolCursor(sid) ?? 0, lastSeenMtime: 0, seenCallIds: [], reconciled: [], unknown: {} };
+      if (source?.author === author && typeof source.file === "string" && (source.harness === "codex" || source.harness === "claude")) st[sid] = { ...(source as any), file: source.file, harness: source.harness, offset: spoolCursor(sid) ?? 0, lastSeenMtime: Number(source.lastSeenMtime) || 0, seenCallIds: [], reconciled: [], unknown: {} };
     } catch (e: any) { sum.errors.push(`spool recovery ${sid}: ${String(e?.message ?? e).slice(0, 120)}`); }
   }
   let lastSave = Date.now();
@@ -475,7 +477,7 @@ async function helperOnceImpl(cfg: Config, opts: HelperOpts): Promise<PassSummar
         s.sourceFingerprint = { bytes: bytes.length, sha256: crypto.createHash("sha256").update(bytes).digest("hex") };
       }
       retainOffloadedOutputs(r.events, { transcriptFile: file, harness });
-      if (r.offset !== s.offset || r.events.length) spoolAppend(sid, { offset: r.offset, events: r.events, at: now.toISOString(), source: { file, harness, author, cwd: s.cwd, root: s.root, repo: s.repo, branch: s.branch, baseCommit: s.baseCommit, wipRef: s.wipRef, startedAtMs: s.startedAtMs, sourceFingerprint: s.sourceFingerprint } });
+      if (r.offset !== s.offset || r.events.length) spoolAppend(sid, { offset: r.offset, events: r.events, at: now.toISOString(), source: { file, harness, author, cwd: s.cwd, root: s.root, repo: s.repo, branch: s.branch, baseCommit: s.baseCommit, wipRef: s.wipRef, startedAtMs: s.startedAtMs, lastSeenMtime: mtime, sourceFingerprint: s.sourceFingerprint } });
       s.offset = r.offset;
       sum.events_spooled += r.events.length;
       if (resumed) s.ended = false;

@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { spoolAppend, spoolPending } from "./helper/spool.js";
+import { helperOnce } from "./helper/daemon.js";
+import { drainUsageWrites } from "./usage.js";
 import { assertSafeSelftestDatabase, assertSelftestDatabaseMarker } from "./selftest-db-guard.js";
 import { getPool, migrate, closePools } from "./continuity/db.js";
 import { appendEvents, upsertSession, sessionEvents, putArtifact, createThread, claimThread, updateSession, publishCheckpoint, headCheckpoint } from "./continuity/store.js";
@@ -34,4 +40,12 @@ try {
   assert.equal((await headCheckpoint(pool, thread.id))!.id, newer.id);
   assert.equal((await make(43, 201)).advanced, true);
   console.log("ok 4. delayed same-generation publication cannot regress event watermark or newer snapshot dispatch");
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "ledger-spool-recovery-")); const savedConfig = process.env.LEDGER_CONFIG_DIR; process.env.LEDGER_CONFIG_DIR = temp;
+  try {
+    const missing = path.join(temp, "deleted-transcript.jsonl"), recoveredId = `recovery-${crypto.randomUUID()}`;
+    spoolAppend(recoveredId, { offset: 500, at: new Date().toISOString(), events: [event(999)], source: { file: missing, harness: "codex", author: "fixture", cwd: temp, root: null, lastSeenMtime: Date.now() } });
+    const summary = await helperOnce({ author: "fixture", continuity: { database_url: url, classify: false } } as any, { roots: { claude: path.join(temp, "absent"), codex: path.join(temp, "absent") }, pool });
+    assert.equal(summary.events_uploaded, 1, summary.errors.join(";")); assert.equal((await sessionEvents(pool, recoveredId)).length, 1); assert.equal(spoolPending(recoveredId).batches.length, 0);
+    console.log("ok 5. missing helper state and deleted source transcript recover/upload pending spool from retained metadata");
+  } finally { await drainUsageWrites(); if (savedConfig === undefined) delete process.env.LEDGER_CONFIG_DIR; else process.env.LEDGER_CONFIG_DIR = savedConfig; fs.rmSync(temp, { recursive: true, force: true }); }
 } finally { await closePools(); }

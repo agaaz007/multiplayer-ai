@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { queueSnapshot, snapshotQueueSize } from "./helper/snapshot-queue.js";
 import { spoolAppend, spoolCursor } from "./helper/spool.js";
 import { writeHeartbeat, readHeartbeat } from "./helper/heartbeat.js";
@@ -42,4 +42,18 @@ try {
   clearInterval(heartbeat); assert.equal(stalled.ok, false); assert.match(stalled.error!, /deadline/); assert.ok(beats >= 15, `heartbeat ticks ${beats}`); assert.equal(spoolCursor("live"), beats); assert.ok(readHeartbeat()?.updated_at); assert.equal(snapshotQueueSize(), 0);
   assert.equal(stalled.verified, undefined);
   console.log(`ok 3. 60-second stalled push killed at deadline; ${beats} durable capture/heartbeat ticks continued`);
+  const parentCode = `import {queueSnapshot} from ${JSON.stringify(new URL("./helper/snapshot-queue.js", import.meta.url).href)}; await queueSnapshot(${JSON.stringify(root)}, {ref:"refs/wip/test/source"}, 60000);`;
+  const parent = spawn(process.execPath, ["--input-type=module", "-e", parentCode], { env: process.env, stdio: "ignore" });
+  let childPid = 0;
+  for (let i = 0; i < 100; i++) {
+    await new Promise(r => setTimeout(r, 20));
+    try { const owner = JSON.parse(fs.readFileSync(path.join(indexDir, "worker.lock"), "utf8")); process.kill(owner.pid, 0); childPid = owner.pid; break; } catch { /* old lock or starting */ }
+  }
+  assert.ok(childPid > 0, "snapshot job started"); parent.kill("SIGKILL");
+  let dead = false;
+  for (let i = 0; i < 100; i++) { await new Promise(r => setTimeout(r, 20)); try { process.kill(childPid, 0); } catch (e: any) { if (e.code === "ESRCH") { dead = true; break; } } }
+  assert.ok(dead, "parent disconnect terminates detached supervisor/Git group");
+  fs.unlinkSync(path.join(remote, "hooks", "pre-receive"));
+  const recovered = await queueSnapshot(root, { ref: "refs/wip/test/source" })!; assert.equal(recovered.verified, true, recovered.error ?? "worker did not recover");
+  console.log("ok 4. killed helper parent terminates snapshot group; next worker safely reclaims private index");
 } finally { fs.rmSync(tmp, { recursive: true, force: true }); }

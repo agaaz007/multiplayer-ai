@@ -207,7 +207,7 @@ for (const t of [lean.text, pack.text]) {
   assert.deepEqual(lean.evidence_summary, { total: 13, shown: [], omitted: { count: 13, fetch: [`ledger_events(session_id: "${sidA}", after_seq: 0, before_seq: 11)`, `ledger_events(session_id: "${sidR}", after_seq: 0, before_seq: 8)`] } }, "lean shows no evidence and names the per-span fetches");
   // honesty, compact: sessions on one line, the snapshot, the decision rule, no full contract
   assert.ok(t.includes(`Honesty: 2 contributing sessions: ${R8} (rachit, Codex, last seen 50m ago); ${A8} (agaaz, Claude Code, last seen 2h ago, ended).`), t.split("\n")[4]);
-  assert.ok(t.includes(`Code saved through ${fmt(T(69))} (remote-verified; session ${R8}).`) && t.includes("Act only on [in force] Ledger objects and [accepted by <person>] record decisions"), "snapshot and decision rule in the honesty block");
+  assert.ok(t.includes(`Snapshot verified at ${fmt(T(69))} (remote-verified; session ${R8}; checkpoint ${cp.id.slice(0,8)}; commit ${WIP_COMMIT.slice(0,12)}).`) && t.includes("Act only on [in force] Ledger objects and [accepted by <person>] record decisions"), "snapshot and decision rule in the honesty block");
   // state: the confirmed decision first, the ≤3 proposed items per kind in full with the acceptance labels
   assert.ok(t.includes(`- [confirmed by agaaz; how it was accepted was not recorded] Use ClickHouse paywall_resolved`) && t.includes(`- [PROPOSED] The Mixpanel gap comes from the 7-day attribution window, not distinct_id (by rachit, ${TODAY}; evidence: seq 4 of ${R8})`));
   assert.equal(LEAN_PROPOSED_FULL, 3);
@@ -320,7 +320,7 @@ for (const t of [lean.text, pack.text]) {
   assert.ok(pack.omitted.some((o) => o.startsWith("4 evidence events omitted") && o.includes(`after_seq: 0, before_seq: 8`)), `omitted names the gap: ${pack.omitted.join(" | ")}`);
   assert.deepEqual(pack.contributing_sessions.map((s) => [s.session_id, s.author, s.harness, s.ended, s.spans]), [[sidR, "rachit", "codex", false, 1], [sidA, "agaaz", "claude", true, 1]], "contributing sessions, most recent first");
   assert.ok(t.includes(`- ${R8} · rachit · Codex · last seen ${fmt(T(70))} (not marked ended) · 1 span · thread ${thread.id.slice(0, 8)}`) && t.includes(`- ${A8} · agaaz · Claude Code · last seen ${fmt(T(15))} (ended) · 1 span`), "honesty lists sessions with harness, last seen, ended");
-  assert.ok(t.includes(`Code saved through ${fmt(T(69))} (remote-verified; session ${R8}).`), "latest verified snapshot named");
+  assert.ok(t.includes(`Snapshot verified at ${fmt(T(69))} (remote-verified; session ${R8}; checkpoint ${cp.id.slice(0,8)}; commit ${WIP_COMMIT.slice(0,12)}).`), "latest verified snapshot named");
   assert.deepEqual(pack.sources, { instructions: 2, assistant_messages: 3, tool_calls: 5, compaction_summaries: 1, sessions: 2, spans: 2, proposed_updates: 4, confirmed_updates: 1 });
   assert.ok(t.includes("Sources: 2 instructions, 3 assistant messages, 5 tool calls, 1 compaction summaries across 2 sessions in 2 spans; 4 proposed and 1 confirmed state updates."), "sources line");
   assert.ok(t.includes("The claim is advisory.") && t.includes("Proposed items are unconfirmed") && t.includes("Narrative-free: everything below is machine-assembled from evidence"), "standard honesty lines");
@@ -390,12 +390,14 @@ for (const t of [lean.text, pack.text]) {
 
 // ---------- 7. bootstrap for the repo record; non-code for the other ----------
 {
-  assert.deepEqual(pack.bootstrap, [
-    `git fetch origin ${WIP_REF}:${WIP_REF}`,
-    `git worktree add --detach ../attribution-investigation ${WIP_COMMIT}`,
-    `# then, deliberately: git -C ../attribution-investigation rebase origin/master   (or merge; your call, not automatic)`,
-  ]);
-  assert.ok(pack.text.includes(`## Bootstrap\nsnapshot from session ${R8} (rachit, Codex)\n\`\`\`\ngit fetch origin ${WIP_REF}:${WIP_REF}\n`), "bootstrap block names the snapshot's session");
+  assert.equal(pack.snapshot?.commit,WIP_COMMIT);
+  assert.equal(pack.snapshot?.checkpoint_id,cp.id);
+  assert.equal(pack.bootstrap[0],`git fetch origin ${WIP_REF}:${WIP_REF}`);
+  assert.ok(pack.bootstrap.includes(`git worktree add --detach ../attribution-investigation ${WIP_COMMIT}`));
+  assert.ok(pack.bootstrap.some(line=>line.includes('Original source base:')));
+  assert.ok(pack.bootstrap.some(line=>line.includes('Do not apply a full-tree diff')));
+  assert.ok(!pack.bootstrap.some(line=>/^git .*\b(rebase|merge)\b/.test(line)));
+  assert.ok(pack.text.includes(`## Bootstrap\nsnapshot from session ${R8}; checkpoint ${cp.id.slice(0,8)}\n\`\`\`\ngit fetch origin ${WIP_REF}:${WIP_REF}\n`), "bootstrap block names the exact checkpoint's session");
   assert.ok(pack.text.includes("2. Check out the snapshot into a fresh worktree"), "code contract");
   const copyLean = await buildRecordPack(cfg, pool, recCopy.id, { mode: "inspect", author: "agaaz", now: T(120) });
   assert.ok(copyLean.text.includes("## Bootstrap\nnon-code record; no worktree") && copyLean.text.includes("Non-code record: no code snapshot applies.") && !copyLean.text.includes("First turn contract"), "lean non-code bootstrap and honesty");
@@ -409,7 +411,7 @@ for (const t of [lean.text, pack.text]) {
   await S.updateSession(pool, sidR, { wip_ref: null, wip_commit: null });
   const viaHead = await buildRecordPack(cfg, pool, recAttr.id, { mode: "inspect", author: "agaaz", now: T(120) });
   assert.equal(viaHead.bootstrap[0], `git fetch origin ${WIP_REF}:${WIP_REF}`);
-  assert.ok(viaHead.text.includes(`snapshot from thread ${thread.id.slice(0, 8)} head checkpoint`), "falls back to the thread head");
+  assert.ok(viaHead.text.includes(`snapshot from session ${R8}; checkpoint ${cp.id.slice(0,8)}`), "exact checkpoint remains authoritative when the mutable session fields disappear");
   await S.updateSession(pool, sidR, { wip_ref: WIP_REF, wip_commit: WIP_COMMIT });
   ok("bootstrap: the repo record prints fetch + worktree commands for rachit's wip ref (session first, thread head as fallback); the non-code record says 'non-code record; no worktree' and adapts the contract");
 }
@@ -441,7 +443,7 @@ for (const t of [lean.text, pack.text]) {
   const tight = await buildRecordPack(cfg, pool, recAttr.id, { mode: "inspect", author: "agaaz", now: T(120), budgetTokens: 1500, detail: "evidence" });
   assert.ok(approxTokens(pack.text) <= 6000, `default pack within 6000 tokens: ${approxTokens(pack.text)}`);
   assert.ok(tight.text.length < pack.text.length, `tight pack is smaller: ${tight.text.length} < ${pack.text.length}`);
-  for (const must of ["## Honesty", "Sources: 2 instructions", `Code saved through ${fmt(T(69))}`, "### Decisions (1)", "- [confirmed by agaaz; how it was accepted was not recorded] Use ClickHouse paywall_resolved", "## Pending / unknown operations (1)", "seq 7 Bash: psql analytics", "## Bootstrap", `git fetch origin ${WIP_REF}:${WIP_REF}`, "## First turn contract", `NOT IN FORCE (1): ${dec1.id} → ${dec2.id}`, "## Omitted for budget or unavailable"]) {
+  for (const must of ["## Honesty", "Sources: 2 instructions", `Snapshot verified at ${fmt(T(69))}`, "### Decisions (1)", "- [confirmed by agaaz; how it was accepted was not recorded] Use ClickHouse paywall_resolved", "## Pending / unknown operations (1)", "seq 7 Bash: psql analytics", "## Bootstrap", `git fetch origin ${WIP_REF}:${WIP_REF}`, "## First turn contract", `NOT IN FORCE (1): ${dec1.id} → ${dec2.id}`, "## Omitted for budget or unavailable"]) {
     assert.ok(tight.text.includes(must), `tight pack keeps: ${must}`);
   }
   assert.ok(pack.text.includes(codexSummary) && !tight.text.includes(codexSummary), "the summary text is dropped under budget");

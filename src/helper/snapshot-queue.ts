@@ -15,7 +15,7 @@ export function queueSnapshot(worktree: string, opts: ShadowOpts, timeoutMs = 18
   const index = path.join(ledgerHome(), "snapshot-indexes", crypto.createHash("sha256").update(root).digest("hex"));
   const promise = new Promise<ShadowResult>((resolve) => {
     let finished = false;
-    const child = fork(new URL("./snapshot-worker.js", import.meta.url), [], { stdio: ["ignore", "ignore", "pipe", "ipc"], detached: process.platform !== "win32" });
+    const child = fork(new URL("./snapshot-worker.js", import.meta.url), [], { execArgv: [], stdio: ["ignore", "ignore", "pipe", "ipc"], detached: process.platform !== "win32" });
     let stderr = "";
     child.stderr?.on("data", (b: Buffer) => { stderr = (stderr + b.toString()).slice(-4096); });
     const stop = () => { try { if (process.platform !== "win32" && child.pid) process.kill(-child.pid, "SIGKILL"); else child.kill("SIGKILL"); } catch { /* exited */ } };
