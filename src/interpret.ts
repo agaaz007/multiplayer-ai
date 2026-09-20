@@ -466,18 +466,20 @@ export function renderMemoryReport(r: MemoryReport, objects: LedgerObject[]): st
 
   // 5. Gaps
   md.push(`## Gaps`, ``, `What this memory cannot yet back with lineage. Listed so the numbers above stay honest.`, ``);
+  const some = <T>(c: Capped<T>, render: (x: T) => string, n = 5) =>
+    c.count ? `: ${c.examples.slice(0, n).map(render).join(", ")}${c.count > n ? ", …" : ""}` : ``;
   md.push(
-    `* **${r.gaps.findings_without_pins.length}** finding${r.gaps.findings_without_pins.length === 1 ? "" : "s"} pin no definition or prior result, so their lineage cannot be traced` +
-      (r.gaps.findings_without_pins.length ? `: ${r.gaps.findings_without_pins.slice(0, 5).map((f) => link(f.id, byId)).join(", ")}${r.gaps.findings_without_pins.length > 5 ? ", …" : ""}` : ``)
+    `* **${r.gaps.findings_without_pins.count}** of ${r.reuse.findings_total} findings pin no definition or prior result, so their lineage cannot be traced` +
+      some(r.gaps.findings_without_pins, (f) => link(f.id, byId))
   );
   md.push(
-    `* **${r.gaps.unresolved_names.length}** record${r.gaps.unresolved_names.length === 1 ? "" : "s"} name a dependency without pinning a version (a name is not lineage)` +
-      (r.gaps.unresolved_names.length ? `: ${r.gaps.unresolved_names.slice(0, 5).map((x) => `${link(x.id, byId)} → ${x.names.slice(0, 3).map((n) => `\`${esc(n)}\``).join(", ")}`).join("; ")}` : ``)
+    `* **${r.gaps.unresolved_names.count}** record${r.gaps.unresolved_names.count === 1 ? "" : "s"} name a dependency without pinning a version (a name is not lineage)` +
+      some(r.gaps.unresolved_names, (x) => `${link(x.id, byId)} → ${x.names.slice(0, 2).map((n) => `\`${esc(n)}\``).join(", ")}`, 3)
   );
-  md.push(`* **${r.gaps.unreproduced}** finding${r.gaps.unreproduced === 1 ? "" : "s"} nobody has re-run at the current version`);
+  md.push(`* **${r.gaps.unreproduced}** of ${r.reuse.findings_total} findings have not been re-run by anyone at their current version`);
   md.push(
-    `* **${r.gaps.drafts.length}** draft${r.gaps.drafts.length === 1 ? "" : "s"} awaiting review` +
-      (r.gaps.drafts.length ? `: ${r.gaps.drafts.slice(0, 5).map((d) => `${link(d.id, byId)} (${d.origin})`).join(", ")}${r.gaps.drafts.length > 5 ? ", …" : ""}` : ``)
+    `* **${r.gaps.drafts.count}** draft${r.gaps.drafts.count === 1 ? "" : "s"} awaiting review` +
+      some(r.gaps.drafts, (d) => `${link(d.id, byId)} (${d.origin})`)
   );
   md.push(``);
 
