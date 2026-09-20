@@ -102,6 +102,17 @@ try {
   fs.writeFileSync(path.join(transcripts, "session-0.jsonl"), JSON.stringify({ type: "user", message: { role: "user", content: "rewritten shorter" } }) + "\n");
   const rotation = await helperOnce(cfg, { roots: { claude: transcripts, codex: path.join(temp, "absent") }, pool: noDb }); assert.ok(rotation.errors.some(e => /shrank|prefix changed/.test(e)));
   ok("source rewrite fails closed instead of deduplicating new content under old byte IDs");
+  const middlePath = path.join(transcripts, "middle.jsonl");
+  const header = JSON.stringify({ type: "session_meta", payload: { id: "middle", cwd: repo, metadata: "h".repeat(400) } }) + "\n";
+  const line = (text: string) => JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: text } }) + "\n";
+  const originalMiddle = header + line("A".repeat(1500)) + line("Z".repeat(2000)); fs.writeFileSync(middlePath, originalMiddle);
+  const middleRoots = { claude: path.join(temp, "absent"), codex: transcripts };
+  // Rename to recognized Codex layout; first 256 and final 1024 bytes stay equal.
+  const recognizedMiddle = path.join(transcripts, "rollout-middle.jsonl"); fs.renameSync(middlePath, recognizedMiddle);
+  await helperOnce(cfg, { roots: middleRoots, pool: noDb });
+  fs.writeFileSync(recognizedMiddle, header + line("B".repeat(1500)) + line("Z".repeat(2000)));
+  const middleRewrite = await helperOnce(cfg, { roots: middleRoots, pool: noDb }); assert.ok(middleRewrite.errors.some(e => /admitted content changed/.test(e)), middleRewrite.errors.join(";"));
+  ok("equal-length middle rewrite with identical prefix/boundary is detected by streamed admitted-prefix digest");
   delete process.env.LEDGER_CAPTURE_PAUSE_UPLOAD;
   const release = acquireProcessLease(path.join(process.env.LEDGER_CONFIG_DIR!, "helper-pass.lock"));
   await assert.rejects(helperOnce(cfg, { roots: { claude: transcripts }, pool: noDb }), /lease busy/); release();

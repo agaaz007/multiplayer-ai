@@ -31,6 +31,7 @@ The local regression log is `.context/production-full-tests.log` (gitignored). A
 - Postgres changes are additive. Apply the candidate migration and restart the actual MCP/helper runtimes during rollout.
 - Spool v2 requires a compatible rollback runtime. Preserve original v1 inputs and all pending segments; an old v1 writer must not resume against migrated state.
 - Rewritten/rotated transcripts stop visibly pending source-generation repair. Unsupported Codex offloaded-output layouts remain unavailable. Neither is automatic recovery.
+- Admitted transcript bytes are checked with a streamed prefix digest before further admission. Memory is bounded, but growing large transcripts incur additional disk reads; measure that cost during the canary. Moving a session between allowed repositories requires an explicit thread rebind before new code snapshots can publish.
 - Snapshot history is isolated to prevent denied files leaking through parent commits. Restore into a fresh detached worktree and port reviewed paths against the recorded base; do not merge/rebase the snapshot history or apply full-tree deletions.
 - Usage reports measure observed calls and operations. Returned rows, agent-reported references and evidence-backed handoff statuses do not prove time saved or independent human verification. Disabled, missing or queued telemetry is a coverage gap, not zero use.
 - No production database migration, credential change, runtime deployment or live-backup restore is claimed by this implementation.
