@@ -1,4 +1,5 @@
 import path from "node:path";
+import { latestVerifiedSnapshot, snapshotBootstrap, type VerifiedSnapshot } from "./snapshot-evidence.js";
 import type pg from "pg";
 import { loadAll, type Config } from "../store.js";
 import { TYPES } from "../schema.js";
@@ -7,7 +8,7 @@ import { claimThread, getClaim, getSession, getThread, headCheckpoint, pendingOp
 import { listRecords, recordEvidence, recordEvidenceCount, recordLinks, recordState, unassignedSpans, type LinkSource, type RecordKind, type RecordState, type RecordStatus, type StateUpdate, type UnassignedSpan, type WorkRecord, codeRepos, recordWhere } from "./records.js";
 import { clipSummary, INSTRUCTIONS_HEAD, RECENT_FILES_MINUTES, SUMMARY_BUDGET_SHARE, SUMMARY_MAX_TOKENS } from "./resume.js";
 import { eventLine, PREVIEW_MAX_CHARS } from "./evidence.js";
-import { defaultRemoteBranch, repoIdentity, repoRoot } from "./shadow.js";
+import { repoIdentity, repoRoot } from "./shadow.js";
 import { readProgress } from "./classify.js";
 import { DECISION_RULE, ledgerRefStatuses, renderDecisionsInForce, stateLine, writtenLedgerIds, type LedgerRefInput, type LedgerRefStatus } from "./packsections.js";
 import { artifactIds, parseAsOf, pendingOperationsAsOf, recordEvidenceCountAsOf, recordStateAsOf, recordVisitDelta, renderVisitDelta, spanFetch, type PackDetail, type VisitDelta } from "./packlean.js";
@@ -23,7 +24,7 @@ export { type PackDetail, type VisitDelta } from "./packlean.js";
  *     mode: "continue" | "inspect";      // continue claims the thread of the latest contributing session
  *     author: string;                    // the resuming author (claim holder)
  *     sessionId?: string;                // the resuming session; synthesized if absent
- *     repoPath?: string;                 // local checkout, for the bootstrap rebase target
+ *     repoPath?: string;                 // local checkout, to verify the bootstrap repository
  *     budgetTokens?: number;             // default 6000; shrinks sections, never switches detail
  *     detail?: "lean" | "evidence";      // default "lean": state, decisions, pending, changed-since, bootstrap, drill-down references;
  *                                        // "evidence": inline event lines, session summary text, files, unassigned spans (the pre-2026-09-15 pack)
@@ -99,7 +100,7 @@ export interface RecordPackOpts {
   mode: RecordPackMode;
   /** the session doing the resuming; synthesized if absent */
   sessionId?: string;
-  /** a local checkout of the record's repo, for the bootstrap rebase target */
+  /** a local checkout of the record's repo, to verify the bootstrap repository */
   repoPath?: string;
   budgetTokens?: number;
   now?: Date;
@@ -142,6 +143,8 @@ export interface RecordPack {
   contributing_sessions: ContributingSession[];
   claim: { acquired: boolean; generation?: number; holder?: ClaimRow | null; thread_id: string | null; note: string };
   bootstrap: string[];
+  /** Exact verified checkpoint used by both honesty text and bootstrap. */
+  snapshot: VerifiedSnapshot | null;
   sources: RecordSources;
   omitted: string[];
   text: string;
@@ -291,13 +294,8 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
   }
 
   // ----- honesty: verified snapshot, sources -----
-  let vSnap: { at: Date; from: string } | null = null;
-  for (const s of sessions) {
-    if (!s.repo || !s.verified_snapshot_at) continue;
-    if (!vSnap || s.verified_snapshot_at.getTime() > vSnap.at.getTime()) vSnap = { at: s.verified_snapshot_at, from: `session ${short(s.session_id)}` };
-  }
-  const head = thread ? await headCheckpoint(pool, thread.id) : null;
-  if (head?.verified_snapshot_at && (!vSnap || head.verified_snapshot_at.getTime() > vSnap.at.getTime())) vSnap = { at: head.verified_snapshot_at, from: `thread ${short(thread!.id)} head checkpoint` };
+  const snapshot = hasCode ? await latestVerifiedSnapshot(pool,{sessionIds:sessions.map(s=>s.session_id),repos:code,asOf}) : null;
+  const vSnap = snapshot ? {at:snapshot.verified_at,from:`session ${short(snapshot.session_id)}; checkpoint ${short(snapshot.checkpoint_id)}; commit ${snapshot.commit.slice(0,12)}`} : null;
   const counts = await recordSourceCounts(pool, rec.id);
   const sources: RecordSources = { ...counts, proposed_updates: state.proposed_count, confirmed_updates: state.confirmed_count };
 
@@ -398,30 +396,15 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
   unassigned = unassigned.slice(0, UNASSIGNED_MAX);
   if (unassignedTotal > UNASSIGNED_MAX) omitted.push(`${unassignedTotal - UNASSIGNED_MAX} more unassigned spans in contributing sessions; ledger_unassigned(session_id: …) per session`);
 
-  // ----- bootstrap: the latest snapshot among contributing sessions, else their thread's head -----
+  // ----- bootstrap: the same exact verified checkpoint used by the honesty section -----
   let bootstrap: string[] = [];
-  let wip: { ref: string; commit: string; from: string } | null = null;
+  const wip = snapshot ? {ref:snapshot.ref,commit:snapshot.commit,from:`session ${short(snapshot.session_id)}; checkpoint ${short(snapshot.checkpoint_id)}`} : null;
   if (hasCode) {
-    for (const s of sessions) {
-      if (s.wip_ref && s.wip_commit) { wip = { ref: s.wip_ref, commit: s.wip_commit, from: `session ${short(s.session_id)} (${s.author}, ${harnessName(s.harness)})` }; break; }
-      if (s.thread_id) {
-        const hc = s.thread_id === thread?.id ? head : await headCheckpoint(pool, s.thread_id);
-        if (hc?.wip_ref && hc?.wip_commit) { wip = { ref: hc.wip_ref, commit: hc.wip_commit, from: `thread ${short(s.thread_id)} head checkpoint` }; break; }
-      }
-    }
     const localRepo = opts.repoPath ? repoRoot(opts.repoPath) : null;
-    const sameRepo = localRepo ? code.includes(repoIdentity(localRepo)) : false;
-    if (opts.repoPath && !sameRepo) omitted.push(`bootstrap rebase target defaulted: ${localRepo ? `local checkout is ${repoIdentity(localRepo)}, record ${rec.repo ? "repo is" : "touched repos are"} ${code.join(", ")}` : `${opts.repoPath} is not a git repo`}`);
-    if (wip) {
-      const slug = rec.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "record";
-      bootstrap = [
-        `git fetch origin ${wip.ref}:${wip.ref}`,
-        `git worktree add --detach ../${slug} ${wip.commit}`,
-        `# then, deliberately: git -C ../${slug} rebase ${localRepo && sameRepo ? defaultRemoteBranch(localRepo) : "origin/master"}   (or merge; your call, not automatic)`,
-      ];
-    } else {
-      omitted.push("no verified code snapshot among contributing sessions: the helper never confirmed a wip ref for them; continue from the branch tip and treat the code state as unknown");
-    }
+    const sameRepo = localRepo && snapshot ? repoIdentity(localRepo) === snapshot.repo : false;
+    if (snapshot && (!opts.repoPath || sameRepo)) bootstrap = snapshotBootstrap(snapshot,rec.title);
+    else if (snapshot && opts.repoPath) omitted.push(`Bootstrap withheld: use a checkout of snapshot repository ${snapshot.repo}; the supplied checkout does not match.`);
+    else omitted.push("no verified code snapshot among contributing sessions: no accepted checkpoint pairs an exact wip commit with its remote verification; code state remains unverified");
   }
 
   // ----- render within budget; softer sections shrink first, each drop named -----
@@ -458,7 +441,7 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
     const sesMax = level >= 5 ? 3 : 12;
     if (sessions.length > sesMax) { L.push(`- … ${sessions.length - sesMax} more contributing sessions`); om.push(`${sessions.length - sesMax} contributing sessions not listed; ledger_record_get(record_id: ${q(rec.id)})`); }
     if (!hasCode) L.push(`Non-code record: no code snapshot applies.`);
-    else if (vSnap) L.push(`Code saved through ${fmt(vSnap.at)} (remote-verified; ${vSnap.from}).`);
+    else if (vSnap) L.push(`Snapshot verified at ${fmt(vSnap.at)} (remote-verified; ${vSnap.from}).`);
     else L.push(`No verified code snapshot among contributing sessions: treat the code state as unverified.`);
     L.push(`Sources: ${sources.instructions} instructions, ${sources.assistant_messages} assistant messages, ${sources.tool_calls} tool calls, ${sources.compaction_summaries} compaction summaries across ${sources.sessions} sessions in ${sources.spans} spans; ${sources.proposed_updates} proposed and ${sources.confirmed_updates} confirmed state updates.`);
     L.push(`The claim is advisory. It protects the shared record, not the other machine. Proposed items are unconfirmed: nobody has accepted them. Narrative-free: everything below is machine-assembled from evidence; nothing was summarized by this tool.`);
@@ -629,7 +612,7 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
     const sesShown = sessions.slice(0, sesMax);
     L.push(`Honesty: ${sessions.length ? `${sessions.length} contributing session${sessions.length === 1 ? "" : "s"}: ${sesShown.map((s) => `${short(s.session_id)} (${s.author}, ${harnessName(s.harness)}, last seen ${ago(s.last_seen_at, now)}${s.ended ? ", ended" : ""})`).join("; ")}${sessions.length > sesShown.length ? `; … ${sessions.length - sesShown.length} more` : ""}.` : "no span is linked to this record yet; link one with ledger_record_link."}`);
     if (sessions.length > sesMax) om.push(`${sessions.length - sesMax} contributing sessions not listed (for budget); ${evidenceFetch}`);
-    L.push(`${!hasCode ? "Non-code record: no code snapshot applies." : vSnap ? `Code saved through ${fmt(vSnap.at)} (remote-verified; ${vSnap.from}).` : "No verified code snapshot among contributing sessions: treat the code state as unverified."} Claim advisory; nothing inlined, references are exact fetches.`);
+    L.push(`${!hasCode ? "Non-code record: no code snapshot applies." : vSnap ? `Snapshot verified at ${fmt(vSnap.at)} (remote-verified; ${vSnap.from}).` : "No verified code snapshot among contributing sessions: treat the code state as unverified."} Claim advisory; nothing inlined, references are exact fetches.`);
     L.push(LEAN_DECISION_RULE);
     const lag = lagStats.filter((s) => s.cap > s.cls);
     if (lag.length) L.push(`Classifier lag: ${lag.map((s) => `${short(s.session_id)} ${s.cap - s.cls}/${s.cap}`).join(", ")} events unclassified (ledger_unassigned).`);
@@ -729,7 +712,7 @@ export async function buildRecordPack(cfg: Config, pool: pg.Pool, recordId: stri
   return {
     record: rec, state, ledger_refs: ledgerRefs, evidence_summary: out.evidence, session_summary: sessionSummary,
     files, recent_files: recentFiles, pending_operations: pend, last_error: lastErr, unassigned, contributing_sessions: sessions,
-    claim: claimInfo, bootstrap, sources, omitted: out.omitted, text: out.text,
+    claim: claimInfo, snapshot, bootstrap, sources, omitted: out.omitted, text: out.text,
     detail, as_of: asOf ? asOf.toISOString() : null, changed_since: delta, drill_down: drill,
   };
 }

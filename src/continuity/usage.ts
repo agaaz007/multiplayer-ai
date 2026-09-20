@@ -12,6 +12,7 @@ create table if not exists cont_usage_invocations (
  outcome text not null, availability text not null, records jsonb not null default '[]',
  received_at timestamptz not null default now()
 );
+alter table cont_usage_invocations add column if not exists logical_operation_key text;
 create index if not exists cont_usage_invocations_window_idx on cont_usage_invocations(started_at,actor,traffic_class);
 create table if not exists cont_usage_storage_ops (
  operation_id uuid primary key, invocation_id uuid not null, backend text not null,
@@ -88,10 +89,10 @@ export async function flushUsage(pool: pg.Pool, limit=100): Promise<{uploaded:nu
         await boundedUsageWrite(pool,async client => {
         if(e.kind === "invocation") {
           const x=e.value;
-          await client.query(`insert into cont_usage_invocations(invocation_id,actor,session_id,harness,identity_source,identity_verified,machine,version,tool,traffic_class,purpose,parent_invocation_id,started_at,finished_at,duration_ms,outcome,availability,records)
-           values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb)
+          await client.query(`insert into cont_usage_invocations(invocation_id,actor,session_id,harness,identity_source,identity_verified,machine,version,tool,traffic_class,purpose,parent_invocation_id,started_at,finished_at,duration_ms,outcome,availability,records,logical_operation_key)
+           values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb,$19)
            on conflict(invocation_id) do update set finished_at=excluded.finished_at,duration_ms=excluded.duration_ms,outcome=excluded.outcome,availability=excluded.availability,records=excluded.records
-           where cont_usage_invocations.finished_at is null`,[x.invocation_id,x.actor,x.session_id,x.harness,x.identity_source,x.identity_verified,x.machine,x.version,x.tool,x.traffic_class,x.purpose,x.parent_invocation_id,x.started_at,x.finished_at,x.duration_ms,x.outcome,x.availability,JSON.stringify(x.records)]);
+           where cont_usage_invocations.finished_at is null`,[x.invocation_id,x.actor,x.session_id,x.harness,x.identity_source,x.identity_verified,x.machine,x.version,x.tool,x.traffic_class,x.purpose,x.parent_invocation_id,x.started_at,x.finished_at,x.duration_ms,x.outcome,x.availability,JSON.stringify(x.records),x.logical_operation_key ?? null]);
         } else {
           const x=e.value;
           await client.query(`insert into cont_usage_storage_ops(operation_id,invocation_id,backend,operation_class,purpose,started_at,duration_ms,success,returned_rows,evidence_returned,attempt) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) on conflict do nothing`,[x.operation_id,x.invocation_id,x.backend,x.operation_class,x.purpose,x.started_at,x.duration_ms,x.success,x.returned_rows,x.evidence_returned,x.attempt]);
@@ -131,11 +132,11 @@ export async function usageSummary(pool:pg.Pool,opts:{from:string;to:string;acto
   return withoutUsage(async () => {
     const params=[opts.from,opts.to,opts.actor ?? null,opts.traffic_class ?? null];
     const where=`i.started_at >= $1::timestamptz and i.started_at < $2::timestamptz and ($3::text is null or i.actor=$3) and ($4::text is null or i.traffic_class=$4)`;
-    const invocations=await pool.query(`select i.actor,i.tool,i.purpose,i.traffic_class,i.outcome,i.availability,count(*)::int as invocations,count(i.finished_at)::int as terminal_outcomes,avg(i.duration_ms) as mean_duration_ms from cont_usage_invocations i where ${where} group by 1,2,3,4,5,6 order by 1,2,3,4,5,6`,params);
+    const invocations=await pool.query(`select i.actor,i.tool,i.purpose,i.traffic_class,i.outcome,i.availability,count(*)::int as invocations,count(i.finished_at)::int as terminal_outcomes,avg(i.duration_ms) as mean_duration_ms,percentile_cont(0.95) within group(order by i.duration_ms) as p95_duration_ms,percentile_cont(0.99) within group(order by i.duration_ms) as p99_duration_ms,count(distinct i.logical_operation_key)::int as known_logical_operations,count(*) filter(where i.logical_operation_key is null)::int as invocations_without_retry_identity from cont_usage_invocations i where ${where} group by 1,2,3,4,5,6 order by 1,2,3,4,5,6`,params);
     const operations=await pool.query(`select i.actor,o.backend,o.operation_class,o.purpose,o.success,o.attempt,count(*)::int as operations,count(*) filter(where o.returned_rows=0)::int as zero_row_operations,sum(o.returned_rows)::bigint as returned_rows,count(*) filter(where o.evidence_returned=true)::int as known_evidence_returns,count(*) filter(where o.evidence_returned is null)::int as unknown_evidence_returns from cont_usage_storage_ops o join cont_usage_invocations i using(invocation_id) where ${where} group by 1,2,3,4,5,6 order by 1,2,3,4,5,6`,params);
     const references=await pool.query(`select i.actor as caller_author,r->>'author' as source_author,count(*)::int as record_appearances,count(distinct r->>'id')::int as distinct_records from cont_usage_invocations i cross join lateral jsonb_array_elements(i.records) r where ${where} and i.tool='ledger_show_contribution' and i.outcome='success' group by 1,2 order by 1,2`,params);
     const orphaned=await pool.query(`select count(*)::int as operations_without_invocation from cont_usage_storage_ops o where o.started_at >= $1::timestamptz and o.started_at < $2::timestamptz and not exists(select 1 from cont_usage_invocations i where i.invocation_id=o.invocation_id)`,params.slice(0,2));
     const retention=await pool.query(`select pruned_before,invocations_deleted,operations_deleted,performed_at from cont_usage_retention_runs order by performed_at desc limit 20`);
-    return {retention_history:retention.rows,window:{from:opts.from,to:opts.to,bounds:"[from,to)"},invocations:invocations.rows,storage_operations:operations.rows,agent_reported_references:references.rows,operations_without_invocation:orphaned.rows[0].operations_without_invocation,local_spool:await usageSpoolHealth(),limitations:["Unknown traffic remains unknown; no historical backfill is inferred.","Reference appearances are agent-reported use, not completed handoffs.","Local spool health covers this machine; remote machine completeness requires its health evidence."]};
+    return {retention_history:retention.rows,window:{from:opts.from,to:opts.to,bounds:"[from,to)"},invocations:invocations.rows,storage_operations:operations.rows,agent_reported_references:references.rows,operations_without_invocation:orphaned.rows[0].operations_without_invocation,local_spool:await usageSpoolHealth(),limitations:["Unknown traffic remains unknown; no historical backfill is inferred.","Invocations are grouped by invocation start; SQL dispatches by operation start. Retry grouping is known only when a caller supplied an idempotency key.","Reference appearances are agent-reported use, not completed handoffs.","Local spool health covers this machine; remote machine completeness requires its health evidence."]};
   });
 }

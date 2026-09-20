@@ -357,7 +357,7 @@ export async function materializeArtifacts(pool: pg.Pool, sessionId: string, eve
 
 export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<PassSummary> {
   const release = acquireProcessLease(path.join(ledgerHome(), "helper-pass.lock"));
-  try { return await withUsageInvocation(cfg, { tool: "helper_capture", traffic_class: "maintenance", purpose: "capture_write", version: process.env.LEDGER_BUILD_COMMIT ?? "0.1.0" }, () => helperOnceImpl(cfg, opts)); }
+  try { return await withUsageInvocation(cfg, { tool: "helper:pass", traffic_class: process.env.LEDGER_SELFTEST === "1" ? "evaluation" : "unknown", purpose: "capture_write", version: process.env.LEDGER_BUILD_COMMIT ?? "0.1.0" }, () => helperOnceImpl(cfg, opts)); }
   finally { release(); }
 }
 async function helperOnceImpl(cfg: Config, opts: HelperOpts): Promise<PassSummary> {
@@ -416,6 +416,7 @@ async function helperOnceImpl(cfg: Config, opts: HelperOpts): Promise<PassSummar
       const readFromStart = !s || !s.offset;
       const from = sid ? (spoolCursor(sid) ?? s?.offset ?? 0) : 0;
       if (fs.statSync(file).size < from) throw new Error("transcript shrank or rotated; source cursor retained, explicit generation repair required");
+      if (s && !s.sourceFingerprint && sid) s.sourceFingerprint = spoolSource(sid)?.sourceFingerprint as SessState["sourceFingerprint"];
       if (s?.sourceFingerprint) {
         const fd = fs.openSync(file, "r"), bytes = Buffer.alloc(s.sourceFingerprint.bytes);
         try { fs.readSync(fd, bytes, 0, bytes.length, 0); } finally { fs.closeSync(fd); }
@@ -468,14 +469,14 @@ async function helperOnceImpl(cfg: Config, opts: HelperOpts): Promise<PassSummar
       const resumed = Boolean(s.ended && r.events.length);
       // Persist even an empty normalized chunk: source cursor and admission share
       // the same fsynced manifest. A crash before saveState replays, never skips.
-      retainOffloadedOutputs(r.events, { transcriptFile: file, harness });
-      if (r.offset !== s.offset || r.events.length) spoolAppend(sid, { offset: r.offset, events: r.events, at: now.toISOString(), source: { file, harness, author, cwd: s.cwd, root: s.root, repo: s.repo, branch: s.branch, baseCommit: s.baseCommit, wipRef: s.wipRef, startedAtMs: s.startedAtMs } });
-      s.offset = r.offset;
       if (!s.sourceFingerprint && r.offset) {
         const fd = fs.openSync(file, "r"), bytes = Buffer.alloc(Math.min(256, r.offset));
         try { fs.readSync(fd, bytes, 0, bytes.length, 0); } finally { fs.closeSync(fd); }
         s.sourceFingerprint = { bytes: bytes.length, sha256: crypto.createHash("sha256").update(bytes).digest("hex") };
       }
+      retainOffloadedOutputs(r.events, { transcriptFile: file, harness });
+      if (r.offset !== s.offset || r.events.length) spoolAppend(sid, { offset: r.offset, events: r.events, at: now.toISOString(), source: { file, harness, author, cwd: s.cwd, root: s.root, repo: s.repo, branch: s.branch, baseCommit: s.baseCommit, wipRef: s.wipRef, startedAtMs: s.startedAtMs, sourceFingerprint: s.sourceFingerprint } });
+      s.offset = r.offset;
       sum.events_spooled += r.events.length;
       if (resumed) s.ended = false;
       sum.sessions++;
@@ -491,6 +492,7 @@ async function helperOnceImpl(cfg: Config, opts: HelperOpts): Promise<PassSummar
   // All local capture is committed before the first network operation. A failed
   // connection cannot prevent other sessions' transcript admission this pass.
   saveState(st);
+  writeHeartbeat({ snapshot_queue_depth: snapshotQueueSize(), capture_sessions: Object.fromEntries(admitted.map(({ sid }) => [sid, spoolStatus(sid)])) });
   if (process.env.LEDGER_CAPTURE_PAUSE_UPLOAD === "1") { sum.errors.push("remote upload paused by LEDGER_CAPTURE_PAUSE_UPLOAD; local admission/spool retained"); return sum; }
   try { boundSessions = new Set(await boundSessionIds(pool)); } catch (e: any) {
     sum.errors.push(`remote unavailable; local spool retained: ${String(e?.message ?? e).slice(0, 120)}`);

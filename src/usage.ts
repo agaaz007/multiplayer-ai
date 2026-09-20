@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
@@ -17,6 +17,8 @@ export interface UsageMetadata {
   /** Stable across one transport retry only when the transport supplies one. */
   invocation_id?: string;
   parent_invocation_id?: string;
+  /** Hashed idempotency key; null when transport retry identity is unknown. */
+  logical_operation_key?: string;
   version?: string;
 }
 export interface UsageSummary {
@@ -27,7 +29,7 @@ export interface UsageSummary {
 export interface UsageInvocation {
   invocation_id: string; actor: string; session_id: string | null; harness: string; identity_source: string;
   identity_verified: boolean; machine: string | null; version: string; tool: string; traffic_class: TrafficClass;
-  purpose: UsagePurpose; parent_invocation_id: string | null; started_at: string; finished_at: string | null;
+  purpose: UsagePurpose; parent_invocation_id: string | null; logical_operation_key?: string | null; started_at: string; finished_at: string | null;
   duration_ms: number | null; outcome: "started" | "success" | "refusal" | "error";
   availability: string; records: {id:string;version?:string;author?:string}[];
 }
@@ -110,7 +112,7 @@ function recordsOf(value: unknown): UsageSummary["records"] {
 export async function withUsageInvocation<T>(cfg: Config, metadata: UsageMetadata, fn: () => Promise<T>, summary?: (result:T) => UsageSummary): Promise<T> {
   if(process.env.LEDGER_USAGE === "0") return fn();
   const id=metadata.invocation_id && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(metadata.invocation_id) ? metadata.invocation_id : randomUUID();
-  const invocation: UsageInvocation={invocation_id:id,actor:safe(cfg.author),session_id:metadata.session_id ? safe(metadata.session_id) : null,harness:metadata.identity?.harness ?? "unknown",identity_source:safe(metadata.identity?.source),identity_verified:metadata.identity?.verified ?? false,machine:cfg.continuity?.machine ? safe(cfg.continuity.machine) : null,version:safe(metadata.version,"unknown"),tool:safe(metadata.tool),traffic_class:metadata.traffic_class ?? "unknown",purpose:metadata.purpose ?? "interactive_read",parent_invocation_id:metadata.parent_invocation_id ? safe(metadata.parent_invocation_id) : null,started_at:new Date().toISOString(),finished_at:null,duration_ms:null,outcome:"started",availability:"unknown",records:[]};
+  const invocation: UsageInvocation={invocation_id:id,actor:safe(cfg.author),session_id:metadata.session_id ? safe(metadata.session_id) : null,harness:metadata.identity?.harness ?? "unknown",identity_source:safe(metadata.identity?.source),identity_verified:metadata.identity?.verified ?? false,machine:cfg.continuity?.machine ? safe(cfg.continuity.machine) : null,version:safe(metadata.version,"unknown"),tool:safe(metadata.tool),traffic_class:metadata.traffic_class ?? "unknown",purpose:metadata.purpose ?? "interactive_read",parent_invocation_id:metadata.parent_invocation_id ? safe(metadata.parent_invocation_id) : null,logical_operation_key:metadata.logical_operation_key && /^[a-f0-9]{64}$/.test(metadata.logical_operation_key) ? metadata.logical_operation_key : null,started_at:new Date().toISOString(),finished_at:null,duration_ms:null,outcome:"started",availability:"unknown",records:[]};
   const began=performance.now(); emit({kind:"invocation",value:{...invocation}});
   return context.run({invocation},async () => {
     try {
@@ -167,7 +169,7 @@ export function instrumentMcpTools(server: {registerTool: (...args:any[]) => any
     const readTools=new Set(["ledger_brief","ledger_search","ledger_get","ledger_stats","ledger_investigation","ledger_investigations","ledger_threads","ledger_thread_get","ledger_records","ledger_record_get","ledger_unassigned","ledger_events","ledger_evidence_search","ledger_artifact_get","ledger_impact","ledger_show_contribution"]);
     const purpose:UsagePurpose=readTools.has(name) || config?.annotations?.readOnlyHint ? "interactive_read" : "maintenance";
     try {
-      return await withUsageInvocation(cfg,{tool:name,session_id:resolved.ok ? resolved.id : undefined,identity:resolved.ok ? resolved.identity : undefined,traffic_class,purpose,version:process.env.LEDGER_BUILD_COMMIT ?? "0.1.0"},async () => {
+      return await withUsageInvocation(cfg,{tool:name,session_id:resolved.ok ? resolved.id : undefined,identity:resolved.ok ? resolved.identity : undefined,traffic_class,purpose,logical_operation_key:typeof args[0]?.request_id === "string" ? createHash("sha256").update(JSON.stringify([cfg.author,resolved.ok ? resolved.id : null,name,args[0].request_id])).digest("hex") : undefined,version:process.env.LEDGER_BUILD_COMMIT ?? "0.1.0"},async () => {
         const result=await handler(...args);
         const invocation_id=currentUsageInvocationId();
         return invocation_id ? {...result,structuredContent:{...result?.structuredContent,usage:{invocation_id,source:"ledger_server"}}} : result;
