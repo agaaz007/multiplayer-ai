@@ -101,16 +101,24 @@ function compact<T extends Record<string, unknown>>(o: T): T {
  * string or a multibyte character. If the file is now shorter than `offset`, it was rotated or
  * rewritten: read again from 0.
  */
-function readNewLines(file: string, offset: number): { lines: { at: number; text: string }[]; offset: number } {
+export interface TranscriptLimits { maxBytes?: number; maxLines?: number }
+function readNewLines(file: string, offset: number, limits: TranscriptLimits = {}): { lines: { at: number; text: string }[]; offset: number } {
   const size = fs.statSync(file).size;
   if (size < offset) offset = 0;
   if (size === offset) return { lines: [], offset };
   const fd = fs.openSync(file, "r");
   let buf: Buffer;
   try {
-    buf = Buffer.alloc(size - offset);
+    buf = Buffer.alloc(Math.min(size - offset, limits.maxBytes ?? size));
     const n = fs.readSync(fd, buf, 0, buf.length, offset);
     if (n < buf.length) buf = buf.subarray(0, n);
+    // A single admitted tool result may exceed the ordinary chunk budget. Read
+    // that one frame up to the existing 32 MiB parser safety ceiling; never skip it.
+    if (buf.indexOf(10) === -1 && n < size - offset && limits.maxBytes) {
+      buf = Buffer.alloc(Math.min(size - offset, 32 << 20));
+      const extended = fs.readSync(fd, buf, 0, buf.length, offset); buf = buf.subarray(0, extended);
+      if (buf.indexOf(10) === -1 && extended < size - offset) throw new Error("transcript frame exceeds 32 MiB; cursor retained, repair required");
+    }
   } finally {
     fs.closeSync(fd);
   }
@@ -124,6 +132,7 @@ function readNewLines(file: string, offset: number): { lines: { at: number; text
     if (text.trim()) lines.push({ at: offset + pos, text });
     pos = nl + 1;
     consumed = pos;
+    if (lines.length >= (limits.maxLines ?? Infinity)) break;
   }
   return { lines, offset: offset + consumed };
 }
@@ -230,9 +239,9 @@ export function claudeCompactSummaryText(raw: string): string {
 
 // ---------- Claude Code ----------
 
-function streamClaude(file: string, fromOffset: number, dataTools: string[]): StreamResult {
+function streamClaude(file: string, fromOffset: number, dataTools: string[], limits: TranscriptLimits = {}): StreamResult {
   const res: StreamResult = { harness: "claude", events: [], offset: fromOffset, unknown: {} };
-  const { lines, offset } = readNewLines(file, fromOffset);
+  const { lines, offset } = readNewLines(file, fromOffset, limits);
   res.offset = offset;
   if (!res.session_id) res.session_id = path.basename(file, ".jsonl");
   for (const { at, text } of lines) {
@@ -356,9 +365,9 @@ const CODEX_KNOWN = new Set([
 
 interface PatchRef { ev?: NormEvent; path: string; call_id?: string; ts?: string }
 
-function streamCodex(file: string, fromOffset: number, dataTools: string[]): StreamResult {
+function streamCodex(file: string, fromOffset: number, dataTools: string[], limits: TranscriptLimits = {}): StreamResult {
   const res: StreamResult = { harness: "codex", events: [], offset: fromOffset, unknown: {} };
-  const { lines, offset } = readNewLines(file, fromOffset);
+  const { lines, offset } = readNewLines(file, fromOffset, limits);
   res.offset = offset;
   const recentTexts = new Set<string>(); // legacy + new message shapes can both carry one turn
   const remember = (t: string) => { recentTexts.add(t); if (recentTexts.size > 64) recentTexts.delete(recentTexts.values().next().value!); };
@@ -586,7 +595,7 @@ export function detectHarness(file: string): Agent {
   return file.includes(`${path.sep}.codex${path.sep}`) || path.basename(file).startsWith("rollout-") ? "codex" : "claude";
 }
 
-export function streamTranscript(file: string, fromOffset = 0, harness?: Agent, dataTools: string[] = DEFAULT_DATA_TOOLS): StreamResult {
+export function streamTranscript(file: string, fromOffset = 0, harness?: Agent, dataTools: string[] = DEFAULT_DATA_TOOLS, limits: TranscriptLimits = {}): StreamResult {
   const h = harness ?? detectHarness(file);
-  return h === "codex" ? streamCodex(file, fromOffset, dataTools) : streamClaude(file, fromOffset, dataTools);
+  return h === "codex" ? streamCodex(file, fromOffset, dataTools, limits) : streamClaude(file, fromOffset, dataTools, limits);
 }

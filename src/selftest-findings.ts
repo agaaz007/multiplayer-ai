@@ -60,8 +60,10 @@ try {
   assert.equal(draft.fields.result, "12.4% (n=41,200)");
   assert.equal((draft.fields.inputs as any[])[0].population, "Android IN users shown subscription_paywall");
   assert.equal((draft.fields.inputs as any[])[0].source, "mcp__mixpanel__query");
-  assert.deepEqual(draft.fields.definitions_used, ["trial_start_cvr"], "metric matching a definition fills definitions_used");
-  assert.deepEqual(draft.fields.caveats, ["single pull"]);
+  assert.deepEqual(draft.fields.definitions_used, [], "an unscoped name match cannot establish definition lineage");
+  assert.deepEqual(draft.fields.dependencies, []);
+  assert.match(String(draft.fields.caveats), /scope is missing or incomplete/);
+  assert.ok((draft.fields.caveats as string[]).includes("single pull"));
   assert.deepEqual(draft.fields.capture_coverage, [{ session_id: sid, evidence_ids: [qA] }]);
   assert.equal(draft.fields.capture_method, "query_grain_proposal");
   assert.match(String(draft.fields.capture_reason), new RegExp(`${qA}.*${RID}`));
@@ -132,6 +134,35 @@ try {
   const acc3 = reviewFinding(cfg, p3.id, "accept", { actor: "agaaz", window: { from: "2026-09-10", to: "2026-09-16" } });
   assert.deepEqual(get(acc3.id!).fields.data_window, { from: "2026-09-10", to: "2026-09-16" });
   assert.equal(get(acc3.id!).fields.window, "last 7 days", "the stated window travels with the accepted finding");
+
+  // Fully scoped proposals resolve exact versions, preserve scope through acceptance, and refuse ambiguity.
+  const scoped = {product:'fixture',dataset:'events',environment:'test',metric:'scoped_rate',population:'eligible users',grain:'user',attribution_rule:'first exposure'};
+  const definition = record(cfg,{type:'definition',fields:{title:'Scoped conversion definition',metric:scoped.metric,formula:'trials / eligible users',source:'fixture',owner:'agaaz',valid_from:'2026-08-01',analysis_scope:scoped}});
+  const scopedInput = {population:scoped.population,metric:scoped.metric,window:'2026-08-20..2026-08-31',result:'12%',query_ref:qA,investigation_record_id:RID,analysis_scope:scoped};
+  const scopedProposal = proposeFinding(cfg,scopedInput,{session:sid});
+  const pins = [{relation:'uses-definition',id:definition.id,version:definition.content_version}];
+  assert.deepEqual(get(scopedProposal.id).fields.analysis_scope,scoped);
+  assert.deepEqual(get(scopedProposal.id).fields.dependencies,pins);
+  const scopedAccepted = reviewFinding(cfg,scopedProposal.id,'accept',{actor:cfg.author});
+  assert.deepEqual(get(scopedAccepted.id!).fields.analysis_scope,scoped);
+  assert.deepEqual(get(scopedAccepted.id!).fields.dependencies,pins);
+  assert.throws(()=>proposeFinding(cfg,{...scopedInput,population:'different'},{session:sid}),/population must match/);
+  assert.throws(()=>proposeFinding(cfg,{...scopedInput,analysis_scope:{...scoped,window:{from:'2026-08-01',to:'2026-08-03'}}},{session:sid}),/window must match/);
+  const partial = proposeFinding(cfg,{...scopedInput,analysis_scope:{product:'fixture',metric:scoped.metric}},{session:sid});
+  assert.deepEqual(get(partial.id).fields.analysis_scope,{product:'fixture',metric:scoped.metric});
+  assert.deepEqual(get(partial.id).fields.dependencies,[]);
+  assert.throws(()=>reviewFinding(cfg,partial.id,'accept',{actor:cfg.author}),/requires complete analysis_scope/);
+  assert.equal(get(partial.id).status,'draft');
+  // Same metric and scope in another independent accepted lineage is ambiguous, even if newer.
+  record(cfg,{type:'definition',fields:{title:'Competing scoped definition',metric:scoped.metric,formula:'other denominator',source:'fixture',owner:'agaaz',valid_from:'2026-08-01',analysis_scope:scoped}});
+  const ambiguous = proposeFinding(cfg,scopedInput,{session:sid});
+  assert.deepEqual(get(ambiguous.id).fields.dependencies,[]);
+  assert.match(String(get(ambiguous.id).fields.caveats),/Multiple applicable definition claims/);
+  assert.throws(()=>reviewFinding(cfg,ambiguous.id,'accept',{actor:cfg.author}),/exact uses-definition/);
+  // Explicitly named consulted definition is pinned; an unrelated product cannot win.
+  const explicit = proposeFinding(cfg,{...scopedInput,definition_ids:[definition.id]},{session:sid});
+  assert.deepEqual(get(explicit.id).fields.dependencies,pins);
+  assert.throws(()=>proposeFinding(cfg,{...scopedInput,definition_ids:['missing-definition']},{session:sid}),/definition not found/);
 
   // ---------- MCP surface: propose + review, capture_ack shapes, refusals ----------
   const server = createMcpServer(cfg);

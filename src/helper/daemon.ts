@@ -8,7 +8,7 @@ import { getPool } from "../continuity/db.js";
 import { streamTranscript, detectHarness, type NormEvent } from "../continuity/events.js";
 import { shadowCommit, repoRoot, repoIdentity, currentBranch, headCommit } from "../continuity/shadow.js";
 import * as S from "../continuity/store.js";
-import { spoolAppend, spoolPending, spoolAck } from "./spool.js";
+import { spoolAppend, spoolPending, spoolAck, spoolCursor, spoolStatus } from "./spool.js";
 import { readBinding, takeSignal, readIndex, appendLocalNotifications } from "./signals.js";
 import { redactText } from "../continuity/redact.js";
 import { classifySession, classifyAllowed, unclassifiedCount } from "../continuity/classify.js";
@@ -130,7 +130,8 @@ export function loadState(): Record<string, SessState> {
 export function saveState(st: Record<string, SessState>): void {
   fs.mkdirSync(ledgerHome(), { recursive: true });
   const tmp = stateFile() + ".tmp";
-  fs.writeFileSync(tmp, JSON.stringify(st));
+  const fd = fs.openSync(tmp, "w", 0o600);
+  try { fs.writeFileSync(fd, JSON.stringify(st)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
   fs.renameSync(tmp, stateFile());
 }
 
@@ -298,7 +299,7 @@ export async function materializeArtifacts(pool: pg.Pool, sessionId: string, eve
     if (e.kind !== "tool.finished") continue;
     const p = e.payload as Record<string, any>;
     let full: string | undefined = typeof p._full === "string" ? p._full : undefined;
-    delete p._full;
+
     if (!full && typeof p.offloaded_path === "string" && fs.existsSync(p.offloaded_path)) {
       try {
         const size = fs.statSync(p.offloaded_path).size;
@@ -309,13 +310,12 @@ export async function materializeArtifacts(pool: pg.Pool, sessionId: string, eve
     if (!full) continue;
     const buf = Buffer.from(full, "utf8");
     const sha = crypto.createHash("sha256").update(buf).digest("hex");
-    try {
-      const a = await storeArtifact(pool, { sha256: sha, kind: "tool_output", bytes: buf, session_id: sessionId });
-      p.artifact_id = a.id;
-      p.artifact_sha256 = sha;
-    } catch (err: any) {
-      p.oversized = { byte_size: buf.length, note: `artifact store failed: ${String(err?.message ?? err).slice(0, 120)}` };
-    }
+    // Transient output failures are retryable exactly like input failures. The
+    // immutable spool still holds _full; acknowledgment cannot pass this event.
+    const a = await storeArtifact(pool, { sha256: sha, kind: "tool_output", bytes: buf, session_id: sessionId });
+    p.artifact_id = a.id;
+    p.artifact_sha256 = sha;
+    delete p._full;
   }
 }
 
@@ -337,7 +337,7 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
   const uploadedSessions = new Set<string>();
   /** sessions bound to an investigation (ledger_investigation_bind/_new); one SELECT per pass, then one UPDATE per bound session below */
   let boundSessions = new Set<string>();
-  try { boundSessions = new Set(await boundSessionIds(pool)); } catch (e: any) { sum.errors.push(`investigation bindings: ${String(e?.message ?? e).slice(0, 120)}`); }
+
 
   // ---- discover ----
   const files = [...walk(roots.claude, 3), ...walk(roots.codex, 5)];
@@ -354,6 +354,7 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
   const byFile = new Map<string, string>();
   for (const [sid, s] of Object.entries(st)) byFile.set(s.file, sid);
 
+  const admitted: { file: string; mtime: number; sid: string; s: SessState; resumed: boolean }[] = [];
   for (const { file, mtime } of active.values()) {
     try {
       const harness = detectHarness(file);
@@ -362,11 +363,11 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
 
       // ---- tail ----
       const readFromStart = !s || !s.offset;
-      const r = streamTranscript(file, s?.offset ?? 0, harness, cfg.data_tools);
+      const r = streamTranscript(file, sid ? (spoolCursor(sid) ?? s?.offset ?? 0) : 0, harness, cfg.data_tools, { maxBytes: 1 << 20, maxLines: 200 });
       if (!sid) { sid = sessionIdFor(file, harness, r.session_id); s = st[sid] ?? { file, harness, offset: 0, lastSeenMtime: 0, seenCallIds: [], reconciled: [], unknown: {} }; st[sid] = s; byFile.set(file, sid); }
       s = s!;
       if (s.startedAtMs == null) s.startedAtMs = startedAtFor(file, readFromStart ? r.events : []);
-      s.offset = r.offset;
+
       s.lastSeenMtime = mtime;
       if (r.cwd) s.cwd = r.cwd;
       if (r.branch) s.branch = r.branch;
@@ -394,25 +395,27 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
       for (const e of r.events) if (e.call_id && e.kind === "tool.requested") s.seenCallIds.push(e.call_id);
       if (s.seenCallIds.length > 5000) s.seenCallIds = s.seenCallIds.slice(-5000);
       const quiet = now.getTime() - mtime > quietMs;
-      if (r.events.length) {
-        spoolAppend(sid, { offset: r.offset, events: r.events, at: now.toISOString() });
-        sum.events_spooled += r.events.length;
-        if (s.ended) {
-          s.ended = false;
-          log(`session ${sid.slice(0, 8)} resumed after end/quiet; capture continues (routing may be a fork)`);
-          // the quiet-end released our claim; take it back if nobody else has, so checkpoints advance the head again
-          if (s.threadId) {
-            try {
-              const note = await claimUnlessLiveHolder(pool, st, s.threadId, sid, author, now.getTime(), quietMs);
-              log(`session ${sid.slice(0, 8)} re-claim on thread ${s.threadId.slice(0, 8)}: ${note}`);
-            } catch (e: any) { log(`re-claim failed for ${sid.slice(0, 8)}: ${String(e?.message ?? e).slice(0, 120)}`); }
-          }
-        }
-      }
+      const resumed = Boolean(s.ended && r.events.length);
+      // Persist even an empty normalized chunk: source cursor and admission share
+      // the same fsynced manifest. A crash before saveState replays, never skips.
+      if (r.offset !== s.offset || r.events.length) spoolAppend(sid, { offset: r.offset, events: r.events, at: now.toISOString() });
+      s.offset = r.offset;
+      sum.events_spooled += r.events.length;
+      if (resumed) s.ended = false;
       sum.sessions++;
-
+      admitted.push({ file, mtime, sid, s, resumed });
+    } catch (e: any) { sum.errors.push(`local capture ${path.basename(file)}: ${String(e?.message ?? e).slice(0, 200)}`); }
+  }
+  // All local capture is committed before the first network operation. A failed
+  // connection cannot prevent other sessions' transcript admission this pass.
+  saveState(st);
+  try { boundSessions = new Set(await boundSessionIds(pool)); } catch (e: any) { sum.errors.push(`investigation bindings: ${String(e?.message ?? e).slice(0, 120)}`); }
+  for (const { file, mtime, sid, s, resumed } of admitted) {
+    const quiet = now.getTime() - mtime > quietMs;
+    try {
+      if (resumed && s.threadId) await claimUnlessLiveHolder(pool, st, s.threadId, sid, author, now.getTime(), quietMs);
       // ---- session row ----
-      const stored = await S.upsertSession(pool, { id: sid, author, harness, machine, cwd: s.cwd, repo: s.repo, branch: s.branch, transcript_path: file, started_at: s.startedAtMs != null ? new Date(s.startedAtMs) : undefined, last_seen_at: new Date(mtime) });
+      const stored = await S.upsertSession(pool, { id: sid, author, harness: s.harness, machine, cwd: s.cwd, repo: s.repo, branch: s.branch, transcript_path: file, started_at: s.startedAtMs != null ? new Date(s.startedAtMs) : undefined, last_seen_at: new Date(mtime) });
 
       // ---- bind ----
       if (!s.threadId && !s.sidechain && s.repo) {

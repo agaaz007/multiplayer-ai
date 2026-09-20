@@ -647,6 +647,7 @@ export interface DraftCapture {
  */
 export function recordDraft(cfg: Config, input: RecordInput & { capture: DraftCapture }): RecordResult {
   const raw = prepare(cfg, input);
+  if (raw.analysis_scope !== undefined) raw.analysis_scope = AnalysisScopeSchema.partial().parse(raw.analysis_scope);
   raw.status = "draft";
   for (const k of ["title", ...MAIN_FIELD[input.type]]) {
     if (typeof raw[k] !== "string" || !raw[k].trim()) throw new Error(`draft ${input.type} needs ${k}`);

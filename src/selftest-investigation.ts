@@ -56,6 +56,28 @@ const intervalPack=analyticalContext(loadAll(cfg),{question:'bounded trial rate'
 assert.ok(intervalPack.resolutions.some(r=>r.status==='unavailable'));
 assert.match(intervalPack.text,/split the analysis window/);
 
+// Legacy discoveries cannot become authority, even beside applicable results or with no scope supplied.
+const legacy = record(cfg,{type:'definition',fields:{title:'Funnel handoff prior evidence',metric:'funnel_rate',formula:'known retained funnel formula',source:'fixture',owner:'agaaz',valid_from:'2026-08-01'}});
+const partialLegacy = record(cfg,{type:'definition',fields:{title:'Funnel handoff partial draft',metric:'funnel_rate',formula:'partial candidate',source:'fixture',owner:'agaaz',valid_from:'2026-08-01',status:'draft',analysis_scope:{product:scope.product}}});
+const incompatible = record(cfg,{type:'definition',fields:{title:'Funnel handoff other product',metric:'funnel_rate',formula:'wrong product',source:'fixture',owner:'agaaz',valid_from:'2026-08-01',status:'draft',analysis_scope:{product:'wrong-product'}}});
+const discovery = analyticalContext(loadAll(cfg),{question:'Funnel handoff',scope});
+assert.equal(discovery.discovery_status,'candidates_available');
+assert.equal(discovery.availability,'available');
+assert.ok(discovery.legacy_candidates.some(c=>c.id===legacy.id && c.content_version===legacy.content_version && c.scope_gaps.includes('product')));
+assert.ok(discovery.legacy_candidates.some(c=>c.id===partialLegacy.id && c.authority_label==='draft'));
+assert.ok(!discovery.legacy_candidates.some(c=>c.id===incompatible.id));
+assert.ok(!discovery.current.some(o=>[legacy.id,partialLegacy.id].includes(o.id)));
+assert.ok(!discovery.objects.some(o=>[legacy.id,partialLegacy.id].includes(o.id)));
+assert.match(discovery.text,/Candidate only/);
+assert.equal(analyticalContext(loadAll(cfg),{question:'utterly_nonmatching_token',scope}).discovery_status,'no_matches');
+assert.throws(()=>analyticalContext(loadAll(cfg),{question:'   ',scope}),/must not be empty/);
+assert.throws(()=>analyticalContext(loadAll(cfg),{question:'Funnel',scope,candidate_limit:0}),/limits/);
+const unscopedDiscovery = analyticalContext(loadAll(cfg),{question:'Funnel handoff'});
+assert.ok(!unscopedDiscovery.current.some(o=>o.id===legacy.id),'a missing task scope cannot promote a legacy candidate');
+assert.equal(analyticalContext(loadAll(cfg),{question:'Funnel handoff',scope,candidate_limit:1}).legacy_candidates.length,1);
+// Missing scope never edits or enriches the original record during a read.
+assert.equal(objectVersion(getById(cfg,legacy.id)!),legacy.content_version);
+
 await verifyAcceptanceEvidence(cfg,{acceptance});
 await assert.rejects(verifyAcceptanceEvidence(cfg,{acceptance:{...acceptance,evidence_refs:[{artifact_id:d1.id,sha256:'f'.repeat(64),role:'review'}]}}),/version mismatch/);
 await assert.rejects(verifyAcceptanceEvidence(cfg,{acceptance:{...acceptance,evidence_refs:[{sha256:'f'.repeat(64),role:'review'}]}}),/unavailable/);
