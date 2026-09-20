@@ -32,6 +32,10 @@ export interface UsageInvocation {
   purpose: UsagePurpose; parent_invocation_id: string | null; logical_operation_key?: string | null; started_at: string; finished_at: string | null;
   duration_ms: number | null; outcome: "started" | "success" | "refusal" | "error";
   availability: string; records: {id:string;version?:string;author?:string}[];
+  /** Bytes of context this invocation actually delivered to the agent. Null when it injects nothing. */
+  payload_bytes: number | null;
+  /** Records a byte budget left out of that payload. 0 means nothing was dropped; null means not an injection. */
+  payload_dropped: number | null;
 }
 export interface UsageStorageOperation {
   operation_id: string; invocation_id: string; backend: "git" | "neon";
@@ -39,7 +43,7 @@ export interface UsageStorageOperation {
   success: boolean; returned_rows: number | null; evidence_returned: boolean | null; attempt: number;
 }
 export type UsageEnvelope = {kind:"invocation";value:UsageInvocation} | {kind:"storage";value:UsageStorageOperation};
-interface Context { invocation: UsageInvocation; disabled?: boolean }
+interface Context { invocation: UsageInvocation; disabled?: boolean; injected?: boolean }
 const context = new AsyncLocalStorage<Context>();
 const pending = new Set<Promise<void>>();
 const queues = new Map<string,Promise<void>>();
@@ -109,12 +113,40 @@ function recordsOf(value: unknown): UsageSummary["records"] {
   }).slice(0,100);
 }
 
+const cleanRecords=(rows: UsageSummary["records"]): UsageInvocation["records"] =>
+  (rows ?? []).filter(r => /^(?:def|fnd|chg|dec)-[A-Za-z0-9-]+$/.test(r.id)).slice(0,100).map(r => ({id:r.id,version:r.version && /^[a-f0-9]{64}$/.test(r.version) ? r.version : undefined,author:r.author ? safe(r.author) : undefined}));
+
+/**
+ * Record what an agent actually received from the invocation in flight: the ids in the payload, its
+ * byte size, and how many records a byte budget left out. Ids, counts and sizes only — never a record
+ * body, so the redaction rules in continuity/redact.ts have nothing to strip.
+ *
+ * The product's claim was "the agent used these records", asserted on the agent's own word with no
+ * record of what was ever delivered. A brief that was truncated to a ~2 KB preview for eighteen days
+ * looked identical to one that arrived whole. An injection row states the truncation as a fact.
+ *
+ * A no-op outside an invocation and when usage is off, so no caller has to check and no logging
+ * failure can reach a hook or a tool result.
+ */
+export function reportInjectedContext(delivered: {record_ids?: string[]; bytes?: number; dropped?: number}): void {
+  try {
+    const c=context.getStore();
+    if(!c || c.disabled) return;
+    c.injected=true;
+    const i=c.invocation;
+    if(Number.isFinite(delivered.bytes)) i.payload_bytes=Math.max(0,Math.round(delivered.bytes!));
+    if(Number.isFinite(delivered.dropped)) i.payload_dropped=Math.max(0,Math.round(delivered.dropped!));
+    if(delivered.record_ids) i.records=cleanRecords(delivered.record_ids.map(id => ({id})));
+  } catch { lastError="usage_injection_report_failed"; }
+}
+
 export async function withUsageInvocation<T>(cfg: Config, metadata: UsageMetadata, fn: () => Promise<T>, summary?: (result:T) => UsageSummary): Promise<T> {
   if(process.env.LEDGER_USAGE === "0") return fn();
   const id=metadata.invocation_id && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(metadata.invocation_id) ? metadata.invocation_id : randomUUID();
-  const invocation: UsageInvocation={invocation_id:id,actor:safe(cfg.author),session_id:metadata.session_id ? safe(metadata.session_id) : null,harness:metadata.identity?.harness ?? "unknown",identity_source:safe(metadata.identity?.source),identity_verified:metadata.identity?.verified ?? false,machine:cfg.continuity?.machine ? safe(cfg.continuity.machine) : null,version:safe(metadata.version,"unknown"),tool:safe(metadata.tool),traffic_class:metadata.traffic_class ?? "unknown",purpose:metadata.purpose ?? "interactive_read",parent_invocation_id:metadata.parent_invocation_id ? safe(metadata.parent_invocation_id) : null,logical_operation_key:metadata.logical_operation_key && /^[a-f0-9]{64}$/.test(metadata.logical_operation_key) ? metadata.logical_operation_key : null,started_at:new Date().toISOString(),finished_at:null,duration_ms:null,outcome:"started",availability:"unknown",records:[]};
+  const invocation: UsageInvocation={invocation_id:id,actor:safe(cfg.author),session_id:metadata.session_id ? safe(metadata.session_id) : null,harness:metadata.identity?.harness ?? "unknown",identity_source:safe(metadata.identity?.source),identity_verified:metadata.identity?.verified ?? false,machine:cfg.continuity?.machine ? safe(cfg.continuity.machine) : null,version:safe(metadata.version,"unknown"),tool:safe(metadata.tool),traffic_class:metadata.traffic_class ?? "unknown",purpose:metadata.purpose ?? "interactive_read",parent_invocation_id:metadata.parent_invocation_id ? safe(metadata.parent_invocation_id) : null,logical_operation_key:metadata.logical_operation_key && /^[a-f0-9]{64}$/.test(metadata.logical_operation_key) ? metadata.logical_operation_key : null,started_at:new Date().toISOString(),finished_at:null,duration_ms:null,outcome:"started",availability:"unknown",records:[],payload_bytes:null,payload_dropped:null};
+  const store: Context={invocation};
   const began=performance.now(); emit({kind:"invocation",value:{...invocation}});
-  return context.run({invocation},async () => {
+  return context.run(store,async () => {
     try {
       const result=await fn();
       let details:UsageSummary={};
@@ -122,7 +154,9 @@ export async function withUsageInvocation<T>(cfg: Config, metadata: UsageMetadat
       const isError=(result as {isError?:boolean})?.isError === true;
       invocation.outcome=details.outcome ?? (isError ? "error" : "success");
       invocation.availability=details.availability ?? "unknown";
-      invocation.records=(details.records ?? recordsOf(result) ?? []).filter(r => /^(?:def|fnd|chg|dec)-[A-Za-z0-9-]+$/.test(r.id)).slice(0,100).map(r => ({id:r.id,version:r.version && /^[a-f0-9]{64}$/.test(r.version) ? r.version : undefined,author:r.author ? safe(r.author) : undefined}));
+      // An explicit injection report is what the agent received; the generic result scan is a guess
+      // about it, so it never overwrites one.
+      if(!store.injected) invocation.records=cleanRecords(details.records ?? recordsOf(result) ?? []);
       return result;
     } catch (e) { invocation.outcome=(e as {code?:string})?.code === "refusal" ? "refusal" : "error"; throw e; }
     finally { invocation.finished_at=new Date().toISOString();invocation.duration_ms=Math.max(0,performance.now()-began);emit({kind:"invocation",value:{...invocation}}); }

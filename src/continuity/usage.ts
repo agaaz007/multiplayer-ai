@@ -13,6 +13,10 @@ create table if not exists cont_usage_invocations (
  received_at timestamptz not null default now()
 );
 alter table cont_usage_invocations add column if not exists logical_operation_key text;
+-- What the agent actually received: bytes delivered and records a byte budget left out.
+-- Null for the invocations that inject nothing, which is most of them.
+alter table cont_usage_invocations add column if not exists payload_bytes int;
+alter table cont_usage_invocations add column if not exists payload_dropped int;
 create index if not exists cont_usage_invocations_window_idx on cont_usage_invocations(started_at,actor,traffic_class);
 create table if not exists cont_usage_storage_ops (
  operation_id uuid primary key, invocation_id uuid not null, backend text not null,
@@ -89,10 +93,10 @@ export async function flushUsage(pool: pg.Pool, limit=100): Promise<{uploaded:nu
         await boundedUsageWrite(pool,async client => {
         if(e.kind === "invocation") {
           const x=e.value;
-          await client.query(`insert into cont_usage_invocations(invocation_id,actor,session_id,harness,identity_source,identity_verified,machine,version,tool,traffic_class,purpose,parent_invocation_id,started_at,finished_at,duration_ms,outcome,availability,records,logical_operation_key)
-           values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb,$19)
-           on conflict(invocation_id) do update set finished_at=excluded.finished_at,duration_ms=excluded.duration_ms,outcome=excluded.outcome,availability=excluded.availability,records=excluded.records
-           where cont_usage_invocations.finished_at is null`,[x.invocation_id,x.actor,x.session_id,x.harness,x.identity_source,x.identity_verified,x.machine,x.version,x.tool,x.traffic_class,x.purpose,x.parent_invocation_id,x.started_at,x.finished_at,x.duration_ms,x.outcome,x.availability,JSON.stringify(x.records),x.logical_operation_key ?? null]);
+          await client.query(`insert into cont_usage_invocations(invocation_id,actor,session_id,harness,identity_source,identity_verified,machine,version,tool,traffic_class,purpose,parent_invocation_id,started_at,finished_at,duration_ms,outcome,availability,records,logical_operation_key,payload_bytes,payload_dropped)
+           values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb,$19,$20,$21)
+           on conflict(invocation_id) do update set finished_at=excluded.finished_at,duration_ms=excluded.duration_ms,outcome=excluded.outcome,availability=excluded.availability,records=excluded.records,payload_bytes=excluded.payload_bytes,payload_dropped=excluded.payload_dropped
+           where cont_usage_invocations.finished_at is null`,[x.invocation_id,x.actor,x.session_id,x.harness,x.identity_source,x.identity_verified,x.machine,x.version,x.tool,x.traffic_class,x.purpose,x.parent_invocation_id,x.started_at,x.finished_at,x.duration_ms,x.outcome,x.availability,JSON.stringify(x.records),x.logical_operation_key ?? null,x.payload_bytes ?? null,x.payload_dropped ?? null]);
         } else {
           const x=e.value;
           await client.query(`insert into cont_usage_storage_ops(operation_id,invocation_id,backend,operation_class,purpose,started_at,duration_ms,success,returned_rows,evidence_returned,attempt) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) on conflict do nothing`,[x.operation_id,x.invocation_id,x.backend,x.operation_class,x.purpose,x.started_at,x.duration_ms,x.success,x.returned_rows,x.evidence_returned,x.attempt]);
