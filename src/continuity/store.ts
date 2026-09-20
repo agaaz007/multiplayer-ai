@@ -336,6 +336,15 @@ export async function publishCheckpoint(pool: pg.Pool, cp: { thread_id: string; 
     else if (live.holder_session_id !== cp.session_id) reason = `claim held by ${live.holder_author} (${live.holder_session_id.slice(0, 8)})`;
     else if (cp.generation !== t.rows[0].generation) reason = `generation ${cp.generation} != thread ${t.rows[0].generation}`;
     else advanced = true;
+    if (advanced && t.rows[0].head_checkpoint_id) {
+      const head = (await c.query<CheckpointRow>(`select * from cont_checkpoints where id=$1`, [t.rows[0].head_checkpoint_id])).rows[0];
+      if (head?.session_id === cp.session_id && head.generation === cp.generation) {
+        const oldOrder = Number(head.structured_state?.snapshot_dispatch_order), newOrder = Number(cp.structured_state?.snapshot_dispatch_order);
+        if (cp.through_event_seq < head.through_event_seq || (Number.isFinite(oldOrder) && Number.isFinite(newOrder) && newOrder <= oldOrder)) {
+          advanced = false; reason = "checkpoint superseded by a newer captured watermark or snapshot dispatch";
+        }
+      }
+    }
     const r = await c.query<{ id: string }>(
       `insert into cont_checkpoints (thread_id, session_id, generation, kind, through_event_seq, base_commit, wip_ref, wip_commit, verified_snapshot_at, verified_events_at, structured_state, narrative, narrative_status, capture_gaps, advanced_head)
        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) returning id`,

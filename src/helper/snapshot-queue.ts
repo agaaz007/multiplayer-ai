@@ -24,7 +24,7 @@ export function queueSnapshot(worktree: string, opts: ShadowOpts, timeoutMs = 18
     child.once("error", e => finish({ ok: false, error: e.message, files: [], gaps: [{ kind: "snapshot_worker_error" }] }));
     child.once("exit", (code, signal) => finish({ ok: false, error: `snapshot worker exited (${code ?? signal}): ${stderr.slice(0, 200)}`, files: [], gaps: [{ kind: "snapshot_worker_exit" }] }));
     child.once("message", (m: any) => finish(m.result ?? { ok: false, error: m.error ?? "invalid snapshot worker reply", files: [], gaps: [] }));
-    child.send({ worktree: root, opts: { ...opts, privateIndexDirectory: index } });
+    child.send({ worktree: root, timeoutMs: timeoutMs + 1000, opts: { ...opts, privateIndexDirectory: index } });
   }).finally(() => { running.delete(root); });
   running.set(root, promise);
   return promise;

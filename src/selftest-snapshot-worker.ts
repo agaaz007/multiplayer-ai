@@ -20,7 +20,9 @@ try {
   const first = queueSnapshot(root, { ref: "refs/wip/test/source", push: true })!;
   assert.equal(queueSnapshot(root, { ref: "refs/wip/test/source" }), null);
   const result = await first; assert.equal(result.ok, true, result.error ?? "snapshot failed"); assert.equal(result.verified, true, result.error ?? "snapshot failed"); assert.equal(hash(realIndex), before);
-  assert.equal(git(["show", `${result.commit}:code.txt`]), "working"); assert.ok(!git(["ls-tree", "-r", "--name-only", result.commit!]).includes(".env"));
+  assert.equal(git(["show", `${result.commit}:code.txt`]), "working");
+  assert.throws(() => execFileSync("git", ["--git-dir", remote, "show", `${result.commit}^:.env`], { stdio: "pipe" }));
+  assert.equal(execFileSync("git", ["--git-dir", remote, "rev-list", "--all", "--", ".env"], { encoding: "utf8" }).trim(), ""); assert.ok(!git(["ls-tree", "-r", "--name-only", result.commit!]).includes(".env"));
   const restored = path.join(tmp, "restored"); git(["worktree", "add", "--detach", restored, result.commit!]); assert.equal(fs.readFileSync(path.join(restored, "code.txt"), "utf8"), "working"); assert.equal(fs.existsSync(path.join(restored, ".env")), false);
   console.log("ok 1. verified remote snapshot restores exact worktree; real dirty index and deny rules preserved");
   const dirs = fs.readdirSync(path.join(process.env.LEDGER_CONFIG_DIR!, "snapshot-indexes")); assert.equal(dirs.length, 1);
