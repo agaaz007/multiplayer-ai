@@ -260,7 +260,7 @@ function streamClaude(file: string, fromOffset: number, dataTools: string[], lim
   if (!res.session_id) res.session_id = path.basename(file, ".jsonl");
   for (const { at, text } of lines) {
     let j: any;
-    try { j = JSON.parse(text); } catch { res.unknown["unparseable"] = (res.unknown["unparseable"] ?? 0) + 1; continue; }
+    try { j = JSON.parse(text); } catch { res.unknown["unparseable"] = (res.unknown["unparseable"] ?? 0) + 1; res.events.push({ producer_event_id: `L${at}:rejected`, kind: "capture.gap", payload: { kind: "source_frame_rejected", reason: "invalid_json", source_byte_offset: at, source_sha256: hash(text) } }); continue; }
     if (j.sessionId) res.session_id = String(j.sessionId);
     if (j.cwd) res.cwd = String(j.cwd);
     if (j.gitBranch) res.branch = String(j.gitBranch);
@@ -439,7 +439,7 @@ function streamCodex(file: string, fromOffset: number, dataTools: string[], limi
 
   for (const { at, text } of lines) {
     let j: any;
-    try { j = JSON.parse(text); } catch { res.unknown["unparseable"] = (res.unknown["unparseable"] ?? 0) + 1; continue; }
+    try { j = JSON.parse(text); } catch { res.unknown["unparseable"] = (res.unknown["unparseable"] ?? 0) + 1; res.events.push({ producer_event_id: `L${at}:rejected`, kind: "capture.gap", payload: { kind: "source_frame_rejected", reason: "invalid_json", source_byte_offset: at, source_sha256: hash(text) } }); continue; }
     const p = j.payload ?? {};
     const t = String(j.type);
     const key = p.type ? `${t}/${p.type}` : t;

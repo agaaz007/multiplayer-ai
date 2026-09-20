@@ -1,4 +1,5 @@
 import path from "node:path";
+import { latestVerifiedSnapshot, snapshotBootstrap, type VerifiedSnapshot } from "./snapshot-evidence.js";
 import type pg from "pg";
 import { loadAll, type Config } from "../store.js";
 import { TYPES } from "../schema.js";
@@ -83,6 +84,8 @@ export interface ResumePack {
   claim: { acquired: boolean; generation?: number; holder?: ClaimRow | null; note: string };
   fork?: ThreadRow;
   checkpoint: Record<string, unknown> | null;
+  /** Exact remotely verified snapshot, which may precede the latest unverified checkpoint. */
+  snapshot: VerifiedSnapshot | null;
   loss_window: Record<string, unknown>;
   capture_gaps: unknown[];
   /** the instructions shown in the pack, in order (first INSTRUCTIONS_HEAD + last INSTRUCTIONS_TAIL when the list was shaped) */
@@ -225,12 +228,17 @@ export async function buildResumePack(cfg: Config, pool: pg.Pool, threadId: stri
 
   // ----- loss window (measured, never a constant) -----
   const lastSeen = srcSession?.last_seen_at ?? null;
-  const vSnap = latest?.verified_snapshot_at ?? srcSession?.last_verified_snapshot_at ?? null;
+  const snapshot = await latestVerifiedSnapshot(pool,{threadId:t.id,asOf});
+  const vSnap = snapshot?.verified_at ?? null;
+  if (latest?.wip_commit && latest.wip_commit !== snapshot?.commit) omitted.push(`Latest checkpoint ${latest.id} names an unverified or unselected commit ${latest.wip_commit}; it is not the verified bootstrap snapshot.`);
   const vEv = latest?.verified_events_at ?? srcSession?.last_acked_event_at ?? null;
   const secs = (a: Date | null, b: Date | null) => (a && b ? Math.max(0, Math.round((a.getTime() - b.getTime()) / 1000)) : null);
   const loss = {
     last_seen_at: lastSeen, verified_snapshot_at: vSnap, verified_events_at: vEv,
-    unsaved_code_seconds: secs(lastSeen, vSnap), unacked_event_seconds: secs(lastSeen, vEv),
+    // A remote verification timestamp does not identify when the tree was captured or bound later edits.
+    unsaved_code_seconds: null, since_snapshot_verification_seconds: secs(lastSeen,vSnap),
+    verified_snapshot_commit: snapshot?.commit ?? null, verified_snapshot_checkpoint_id: snapshot?.checkpoint_id ?? null,
+    unacked_event_seconds: secs(lastSeen, vEv),
     session_ended: Boolean(srcSession?.ended_at),
     in_flight_operations: pend.length,
   };
@@ -239,9 +247,9 @@ export async function buildResumePack(cfg: Config, pool: pg.Pool, threadId: stri
   // ----- intervening changes -----
   let gitDiff: string | null = null;
   let bootstrap: string[] = [];
-  const wipRef = latest?.wip_ref ?? srcSession?.wip_ref ?? null;
-  const wipCommit = latest?.wip_commit ?? srcSession?.wip_commit ?? null;
-  const baseCommit = latest?.base_commit ?? srcSession?.base_commit ?? null;
+  const wipRef = latest?.wip_ref ?? null;
+  const wipCommit = latest?.wip_commit ?? null;
+  const baseCommit = latest?.base_commit ?? null;
   const localRepo = opts.repoPath ? repoRoot(opts.repoPath) : null;
   const sameRepo = localRepo ? repoIdentity(localRepo) === t.repo : false;
   if (localRepo && sameRepo) {
@@ -254,15 +262,14 @@ export async function buildResumePack(cfg: Config, pool: pg.Pool, threadId: stri
   } else if (opts.repoPath) {
     omitted.push(`intervening git diff skipped: ${localRepo ? `local checkout is ${repoIdentity(localRepo)}, thread repo is ${t.repo}` : `${opts.repoPath} is not a git repo`}`);
   }
-  if (wipRef && wipCommit) {
-    const slug = t.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "thread";
-    bootstrap = [
-      `git fetch origin ${wipRef}:${wipRef}`,
-      `git worktree add --detach ../${slug} ${wipCommit}`,
-      `# then, deliberately: git -C ../${slug} rebase ${localRepo ? defaultRemoteBranch(localRepo) : "origin/master"}   (or merge; your call, not automatic)`,
-    ];
+  if (snapshot) {
+    bootstrap = snapshotBootstrap(snapshot,t.title);
+    if (opts.repoPath && (!sameRepo || repoIdentity(localRepo!) !== snapshot.repo)) {
+      bootstrap = [];
+      omitted.push(`Bootstrap withheld: use a checkout of snapshot repository ${snapshot.repo}; the supplied checkout does not match.`);
+    }
   } else {
-    omitted.push("no verified code snapshot for this thread: the helper never confirmed a wip ref on the remote; continue from the branch tip and treat the code state as unknown");
+    omitted.push("no verified code snapshot for this thread: no accepted checkpoint pairs an exact wip commit with its remote verification; code state remains unverified");
   }
 
   // ----- ledger objects since the checkpoint -----
@@ -320,9 +327,9 @@ export async function buildResumePack(cfg: Config, pool: pg.Pool, threadId: stri
     if (asOfLine) L.push(asOfLine);
     L.push(``);
     L.push(`## Honesty`);
-    L.push(`Code saved through ${fmt(vSnap)} (remote-verified). Events acknowledged through ${fmt(vEv)}. Source session last seen ${fmt(lastSeen)}${srcSession?.ended_at ? ", ended" : ", not marked ended"}.`);
-    if (loss.unsaved_code_seconds != null) L.push(`Up to ${loss.unsaved_code_seconds}s of edits and ${pend.length} in-flight tool call(s) may be missing.`);
-    else L.push(`No verified snapshot timestamp: treat the code state as unverified.`);
+    L.push(`Snapshot ${snapshot?.commit.slice(0,12) ?? "unavailable"} verified at ${fmt(vSnap)}${snapshot ? ` (checkpoint ${snapshot.checkpoint_id})` : ""}. Events acknowledged through ${fmt(vEv)}. Source session last seen ${fmt(lastSeen)}${srcSession?.ended_at ? ", ended" : ", not marked ended"}.`);
+    if (snapshot) L.push(`Verification applies only to commit ${snapshot.commit}; its timestamp does not bound later uncaptured edits. ${pend.length} in-flight tool call(s) have unknown outcomes.`);
+    else L.push(`No exact verified snapshot: treat the code state as unverified.`);
     L.push(`The claim is advisory. It protects the shared record, not the other machine. Any narrative below is generated and unreviewed; machine fields are the evidence.`);
     L.push(sourcesLine(sources));
     if (lagLine) L.push(lagLine);
@@ -430,14 +437,14 @@ export async function buildResumePack(cfg: Config, pool: pg.Pool, threadId: stri
   while (approxTokens(out.text) > budget && level < 4) out = render(++level);
 
   return {
-    thread: summary, claim: claimInfo, fork, checkpoint: latest ? { id: latest.id, kind: latest.kind, created_at: latest.created_at, base_commit: baseCommit, wip_ref: wipRef, wip_commit: wipCommit, through_event_seq: latest.through_event_seq, structured_state: latest.structured_state, narrative_status: latest.narrative_status, advanced_head: latest.advanced_head } : null,
+    thread: summary, claim: claimInfo, fork, checkpoint: latest ? { id: latest.id, kind: latest.kind, created_at: latest.created_at, base_commit: baseCommit, wip_ref: wipRef, wip_commit: wipCommit, verified_snapshot_at: latest.verified_snapshot_at, through_event_seq: latest.through_event_seq, structured_state: latest.structured_state, narrative_status: latest.narrative_status, advanced_head: latest.advanced_head } : null,
     loss_window: loss, capture_gaps: gaps, instructions: shownInstr, instructions_omitted: instrOmitted,
     session_summary: sessionSummary,
     last_messages: msgRows.map((m) => ({ at: m.occurred_at ? m.occurred_at.toISOString() : null, text: String(m.payload?.text ?? "") })),
     recent_files: recentFiles, files_touched: files, pending_operations: pend.map((p) => ({ call_id: p.call_id, tool: p.tool, input: p.input, seq: p.seq })),
     last_error: lastErr ? lastErr.payload : null, intervening: { git: gitDiff, ledger: ledgerSince },
     decisions: decisionRefs, record_decisions: recordDecisions,
-    bootstrap, sources, omitted: out.omitted, text: out.text,
+    snapshot, bootstrap, sources, omitted: out.omitted, text: out.text,
     detail, as_of: asOf ? asOf.toISOString() : null, changed_since: delta,
   };
 }
@@ -450,8 +457,9 @@ export function threadLine(s: ThreadSummary, now = new Date()): string {
   const claim = s.claim ? `claimed by ${s.claim.holder_author}` : "unclaimed";
   // The head checkpoint can be a later `turn` checkpoint with no snapshot verification of its own; the
   // session row keeps the last remotely verified snapshot, so fall back to it before saying "none".
-  const verifiedAt = s.head?.verified_snapshot_at ?? ls?.last_verified_snapshot_at ?? null;
-  const snap = verifiedAt ? `snapshot ${ago(verifiedAt)}` : "no verified snapshot";
+  const verifiedAt = s.head?.wip_commit ? s.head.verified_snapshot_at : null;
+  const snap = verifiedAt ? `snapshot ${ago(verifiedAt)}` : ls?.last_verified_snapshot_at
+    ? `historical verification ${ago(ls.last_verified_snapshot_at)}; open to resolve exact snapshot` : "no verified snapshot";
   const first = (s.first_instruction ?? s.goal ?? "").replace(/\s+/g, " ").slice(0, 90);
   const last = (s.last_message ?? "").replace(/\s+/g, " ").slice(0, 90);
   return `- ${s.created_by} · ${ls?.harness ?? "?"} · ${path.basename(s.repo)}${s.branch ? ` · ${s.branch}` : ""} · last seen ${ago(ls?.last_seen_at)} (${ended}) · ${snap} · ${claim}\n  "${first}"${last ? ` → "${last}"` : ""}\n  ${s.id}`;
