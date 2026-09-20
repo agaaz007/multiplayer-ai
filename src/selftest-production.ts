@@ -7,6 +7,7 @@ import { assertSafeSelftestDatabase, assertSelftestDatabaseMarker } from "./self
 import { boundedRead, availableSection } from "./continuity/availability.js";
 import { getPool, migrate, closePools } from "./continuity/db.js";
 import { appendEvents, upsertSession } from "./continuity/store.js";
+import { createRecord } from "./continuity/records.js";
 import { startHandoff, updateHandoff, handoffSummary } from "./continuity/handoffs.js";
 import { continuityStartContext } from "./hooks.js";
 import type { Config } from "./store.js";
@@ -36,15 +37,17 @@ try {
 
   const sid = `test-handoff-${randomUUID()}`;
   await upsertSession(pool,{id:sid,author:"agaaz",harness:"codex",machine:"fixture"});
+  const analysisSource=await createRecord(pool,{kind:"investigation",title:`Fixture source ${randomUUID()}`,created_by:"rachit"});
+  const codeSource=await createRecord(pool,{kind:"implementation",title:`Fixture code source ${randomUUID()}`,created_by:"rachit"});
+  const create = (work_kind:"analysis"|"code"="analysis",verified=false,pending=0) => startHandoff(pool,{source_kind:"record",source_id:work_kind === "analysis" ? analysisSource.id : codeSource.id,destination_session:sid,author:"agaaz",mode:"continue",work_kind,source_snapshot_verified:verified,pending_operations:pending});
+  const evidence = (seq:number,role:"verification"|"validation"|"delivered_result"|"pending_operation_resolution") => ({session_id:sid,seq,role});
+  const id=await create(),code=await create("code"),pending=await create("analysis",false,1),failed=await create();
   await appendEvents(pool,sid,[
     {producer_event_id:"verify",kind:"tool.finished",payload:{success:true,output_preview:"Opened original evidence and checked scope"}},
     {producer_event_id:"validate",kind:"tool.finished",payload:{success:true,output_preview:"Continuation validation passed"}},
     {producer_event_id:"deliver",kind:"assistant.message",payload:{text:"Delivered continuation result"}},
     {producer_event_id:"failed",kind:"tool.finished",payload:{success:false}},
   ],null,null);
-  const create = (work_kind:"analysis"|"code"="analysis",verified=false,pending=0) => startHandoff(pool,{source_kind:"record",source_id:randomUUID(),destination_session:sid,author:"agaaz",mode:"continue",work_kind,source_snapshot_verified:verified,pending_operations:pending});
-  const evidence = (seq:number,role:"verification"|"validation"|"delivered_result"|"pending_operation_resolution") => ({session_id:sid,seq,role});
-  const id = await create();
   const base = {id,author:"agaaz",session_id:sid};
   await assert.rejects(updateHandoff(pool,{...base,status:"completed",evidence:[]}),/verification/);
   await assert.rejects(updateHandoff(pool,{...base,author:"rachit",status:"verified",evidence:[evidence(1,"verification")]}),/does not belong/);
@@ -56,13 +59,15 @@ try {
   assert.equal(completed.status,"completed");
   assert.equal(completed.user_confirmed,false,"an agent's evidence does not assert user acceptance");
   await assert.rejects(updateHandoff(pool,{...base,status:"failed",evidence:[],note:"relabel"}),/terminal/);
-  const code = await create("code");
   await assert.rejects(updateHandoff(pool,{...base,id:code,status:"verified",evidence:[evidence(1,"verification")]}),/remotely verified/);
-  const pending = await create("analysis",false,1);
   await assert.rejects(updateHandoff(pool,{...base,id:pending,status:"completed",evidence:[evidence(1,"verification"),evidence(2,"validation"),evidence(3,"delivered_result")]}),/pending operations/);
-  const failed = await create();
   await assert.rejects(updateHandoff(pool,{...base,id:failed,status:"failed",evidence:[]}),/reason/);
   await updateHandoff(pool,{...base,id:failed,status:"failed",evidence:[],note:"Bootstrap unavailable"});
+  const later=await create();
+  await assert.rejects(updateHandoff(pool,{...base,id:later,status:"verified",evidence:[evidence(1,"verification")]}),/after this attempt/);
+  await assert.rejects(updateHandoff(pool,{...base,id:later,status:"verified",evidence:[{session_id:sid,seq:99,role:"made_up"} as any]}),/role/);
+  await assert.rejects(startHandoff(pool,{source_kind:"record",source_id:randomUUID(),destination_session:sid,author:"agaaz",mode:"continue",work_kind:"analysis",source_snapshot_verified:false}),/does not exist/);
+  await assert.rejects(startHandoff(pool,{source_kind:"record",source_id:codeSource.id,destination_session:sid,author:"agaaz",mode:"continue",work_kind:"analysis",source_snapshot_verified:false}),/work kind/);
   const report = await handoffSummary(pool,"2020-01-01","2100-01-01");
   assert.ok(report.rows.some(r=>r.status==="completed"));
   assert.ok(report.rows.some(r=>r.status==="failed"));

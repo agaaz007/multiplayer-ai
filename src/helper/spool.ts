@@ -57,12 +57,27 @@ function* legacyLines(file: string): Generator<string> {
     if (pending.length) throw new Error("legacy spool has an incomplete trailing frame; original retained, repair required");
   } finally { fs.closeSync(fd); }
 }
-function manifest(id: string): Manifest {
+function withSpoolLock<T>(id: string, fn: () => T): T {
+  fs.mkdirSync(spoolDir(), { recursive: true, mode: 0o700 });
+  const file = path.join(spoolDir(), `${safe(id)}.lock`);
+  if (fs.existsSync(file)) {
+    const pid = Number(fs.readFileSync(file, "utf8"));
+    if (!Number.isSafeInteger(pid) || pid < 1) throw new Error("spool lock requires recovery; source retained");
+    let live = true; try { process.kill(pid, 0); } catch (e: any) { if (e.code === "ESRCH") live = false; }
+    if (live) throw new Error("spool writer busy; source retained for retry");
+    fs.unlinkSync(file);
+  }
+  const fd = fs.openSync(file, "wx", 0o600);
+  try { fs.writeFileSync(fd, String(process.pid)); fs.fsyncSync(fd); return fn(); }
+  finally { fs.closeSync(fd); fs.unlinkSync(file); }
+}
+function manifest(id: string, locked = false): Manifest {
   if (fs.existsSync(manifestFile(id))) {
     const m = JSON.parse(fs.readFileSync(manifestFile(id), "utf8")) as Manifest;
     if (m.version !== 2 || !Number.isSafeInteger(m.next) || !Number.isSafeInteger(m.acked) || m.acked < 0 || m.acked > m.next || !Number.isSafeInteger(m.source_cursor) || m.source_cursor < 0) throw new Error("invalid spool manifest; retained for repair");
     return m;
   }
+  if (!locked) return withSpoolLock(id, () => manifest(id, true));
   fs.mkdirSync(directory(id), { recursive: true, mode: 0o700 }); syncDir(spoolDir());
   const m: Manifest = { version: 2, next: 0, acked: 0, source_cursor: 0, legacy_imported: false };
   const legacy = path.join(spoolDir(), `${safe(id)}.jsonl`), ack = path.join(spoolDir(), `${safe(id)}.ack`);
@@ -89,10 +104,12 @@ export function spoolCursor(id: string): number | undefined {
   return manifest(id).source_cursor;
 }
 export function spoolAppend(id: string, batch: SpoolBatch): void {
-  const m = manifest(id);
+  return withSpoolLock(id, () => {
+  const m = manifest(id, true);
   for (const part of chunks(batch)) segment(id, m.next++, part);
   m.source_cursor = batch.offset;
   atomic(manifestFile(id), JSON.stringify(m));
+  });
 }
 export function spoolPending(id: string, maxBatches = 1): { batches: SpoolBatch[]; acked: number } {
   const m = manifest(id), batches: SpoolBatch[] = [];
@@ -106,9 +123,11 @@ export function spoolPending(id: string, maxBatches = 1): { batches: SpoolBatch[
   return { batches, acked: m.acked };
 }
 export function spoolAck(id: string, throughCount: number): void {
-  const m = manifest(id);
+  return withSpoolLock(id, () => {
+  const m = manifest(id, true);
   if (!Number.isSafeInteger(throughCount) || throughCount < m.acked || throughCount > m.next) throw new Error("invalid spool acknowledgment");
   m.acked = throughCount; atomic(manifestFile(id), JSON.stringify(m));
+  });
 }
 export function spoolStatus(id: string): { pending_batches: number; pending_bytes: number; oldest_at: string | null; source_cursor: number } {
   const m = manifest(id); let bytes = 0;

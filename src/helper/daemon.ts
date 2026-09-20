@@ -445,6 +445,7 @@ async function helperOnceImpl(cfg: Config, opts: HelperOpts): Promise<PassSummar
   // All local capture is committed before the first network operation. A failed
   // connection cannot prevent other sessions' transcript admission this pass.
   saveState(st);
+  if (process.env.LEDGER_CAPTURE_PAUSE_UPLOAD === "1") { sum.errors.push("remote upload paused by LEDGER_CAPTURE_PAUSE_UPLOAD; local admission/spool retained"); return sum; }
   try { boundSessions = new Set(await boundSessionIds(pool)); } catch (e: any) {
     sum.errors.push(`remote unavailable; local spool retained: ${String(e?.message ?? e).slice(0, 120)}`);
     return sum; // one failed connection per pass, not one full timeout per session
@@ -549,7 +550,7 @@ async function helperOnceImpl(cfg: Config, opts: HelperOpts): Promise<PassSummar
       // A quiet session has no new agent edits to capture (its last live snapshot already has them), so it is only
       // snapshotted on an explicit turn/end signal. Snapshotting every quiet tracked session each pass ran a synchronous
       // `git add -A` of the same worktree dozens of times per pass and starved uploads and heartbeats (2026-09-13).
-      if (s.root && s.wipRef && (cpSignal || (due && !quiet)) && !s.ended && !s.sidechain) {
+      if (process.env.LEDGER_SNAPSHOTS !== "0" && s.root && s.wipRef && (cpSignal || (due && !quiet)) && !s.ended && !s.sidechain) {
         // Freeze coverage BEFORE starting Git. Later uploads must never be
         // attributed to an earlier snapshot, and a changed claim stays fenced.
         const throughSeq = (await S.appendEvents(pool, sid, [], null, null)).lastSeq;

@@ -153,7 +153,7 @@ const rLines = [
 ];
 fs.writeFileSync(tR, rLines.join("\n") + "\n");
 fs.utimesSync(tR, T(0), T(0));
-let s1 = await helperOnce(cfgR, { roots, now: T(1), push: true, log: () => {} });
+let s1 = await helperOnce(cfgR, { roots, now: T(1), push: true, snapshotWaitMs: 30000, log: () => {} });
 assert.equal(s1.errors.length, 0, `pass 1 errors: ${s1.errors.join(" | ")}`);
 assert.equal(s1.sessions, 1);
 assert.equal(s1.bound, 1, "auto-created + bound a thread from the first prompt");
@@ -188,13 +188,13 @@ assert.ok(!snapTree.includes(".env") && snapTree.includes("src/banner.css"), "se
 ok("e2e 1: rachit's Codex session captured → thread auto-created and claimed → events, artifact, verified snapshot, head checkpoint");
 
 // second pass with nothing new: no duplicate events, no new snapshot
-const s1b = await helperOnce(cfgR, { roots, now: T(2), push: true, log: () => {} });
+const s1b = await helperOnce(cfgR, { roots, now: T(2), push: true, snapshotWaitMs: 30000, log: () => {} });
 assert.equal(s1b.events_uploaded, 0);
 assert.equal(s1b.snapshots, 0);
 ok("idempotent pass: zero re-uploads, zero re-snapshots");
 
 // ---------- e2e 2: rachit's session dies; quiet-end releases the claim ----------
-const s2 = await helperOnce(cfgR, { roots, now: T(35), push: true, log: () => {} });
+const s2 = await helperOnce(cfgR, { roots, now: T(35), push: true, snapshotWaitMs: 30000, log: () => {} });
 assert.equal(s2.errors.length, 0, s2.errors.join(" | "));
 assert.equal(await S.getClaim(pool, thread.id), null, "claim released after quiet period");
 assert.ok((await S.getSession(pool, sidR))!.ended_at, "session marked ended");
@@ -246,7 +246,7 @@ fs.appendFileSync(tR, [
   cl({ timestamp: "2026-09-08T10:05:01Z", type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Build passed; trying the 360px fix now." }] } }),
 ].join("\n") + "\n");
 fs.utimesSync(tR, T(485), T(485));
-const s4 = await helperOnce(cfgR, { roots, now: T(486), push: true, log: () => {} });
+const s4 = await helperOnce(cfgR, { roots, now: T(486), push: true, snapshotWaitMs: 30000, log: () => {} });
 assert.equal(s4.errors.length, 0, s4.errors.join(" | "));
 const sessR2 = (await S.getSession(pool, sidR))!;
 assert.ok(sessR2.fork_thread_id, "stale-generation session routed to a fork");
@@ -281,7 +281,7 @@ ok("e2e 4: stale generation → fork created, late events routed there, history 
   ].join("\n") + "\n");
   fs.utimesSync(tU, T(600), T(600));
   fs.writeFileSync(path.join(repoR, "src", "unbound.txt"), "work with no thread\n");
-  const su = await helperOnce(cfgR, { roots, now: T(601), push: true, log: () => {} });
+  const su = await helperOnce(cfgR, { roots, now: T(601), push: true, snapshotWaitMs: 30000, log: () => {} });
   assert.equal(su.errors.length, 0, su.errors.join(" | "));
   const sU = (await S.getSession(pool, sidU))!;
   assert.equal(sU.thread_id, null, "unbound");
