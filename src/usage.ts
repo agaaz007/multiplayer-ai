@@ -132,7 +132,9 @@ export async function observeStorageOperation<T>(opts: Parameters<typeof startSt
 /** SQL text is classified in memory and never persisted. Unknown CTEs are not called reads. */
 export function sqlOperationClass(sql: unknown): string {
   const text=typeof sql === "string" ? sql.trim().replace(/^(?:--[^\n]*\n|\/\*[\s\S]*?\*\/)\s*/g,"") : "";
-  if (/^(select|show|explain)\b/i.test(text)) return "read";
+  if (/^select\s+pg_(?:advisory|try_advisory)/i.test(text)) return "transaction";
+  if (/^explain\b/i.test(text)) return "unknown";
+  if (/^(select|show)\b/i.test(text)) return "read";
   if (/^with\b/i.test(text)) return /\b(insert|update|delete|merge)\b/i.test(text) ? "write" : "read";
   if (/^(insert|update|delete|merge|copy)\b/i.test(text)) return "write";
   if (/^(begin|commit|rollback|savepoint|release)\b/i.test(text)) return "transaction";

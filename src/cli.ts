@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { withUsageInvocation, drainUsageWrites, usageHealth, usageSpoolHealth, type TrafficClass } from "./usage.js";
 import { flushUsage } from "./continuity/usage.js";
-import { handoffSummary, updateHandoff } from "./continuity/handoffs.js";
+import { handoffSummary, updateHandoff, startHandoff } from "./continuity/handoffs.js";
 import { resolveHarnessIdentity } from "./continuity/safety.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -271,7 +271,8 @@ async function main() {
             }
             // continuity: teammates' open threads + any notices the helper fetched. Fails open in 4 s.
             try {
-              const threads = await openThreadsText(cfg, { cwd: input?.cwd ? String(input.cwd) : process.cwd(), timeoutMs: 8000 }); // SessionStart hook allows 30 s; Neon connects have taken 7-8 s
+              const identity = resolveHarnessIdentity(input?.session_id);
+              const threads = await withUsageInvocation(cfg,{tool:"hook:SessionStart",session_id:identity.ok ? identity.id : undefined,identity:identity.ok ? identity.identity : undefined,purpose:"automatic_brief",traffic_class:process.env.LEDGER_SELFTEST === "1" ? "evaluation" : "ordinary"},() => openThreadsText(cfg!, { cwd: input?.cwd ? String(input.cwd) : process.cwd(), timeoutMs: 8000 })); // SessionStart hook allows 30 s; Neon connects have taken 7-8 s
               if (threads) parts.push(threads);
             } catch { /* never block a session start */ }
           }
@@ -279,6 +280,7 @@ async function main() {
           parts.push(...captureWarnings);
           if (parts.length) process.stdout.write(parts.join("\n\n") + "\n");
           await closePools().catch(() => {});
+          await drainUsageWrites();
           process.exit(0);
         }
         if (res.reconcile && cfg && input?.session_id && (cfg.extractor ?? "auto") !== "none") {
@@ -591,17 +593,33 @@ async function main() {
         const cfg = loadConfig();
         const recordId = flag(args, "--record");
         const mode = (flag(args, "--mode") ?? "continue") as "continue" | "fork" | "inspect";
+
+        const identity = resolveHarnessIdentity(flag(args,"--session") ?? process.env.LEDGER_SESSION_ID);
+        if (mode !== "inspect" && !identity.ok) throw new Error(identity.error);
+        const sid = identity.ok ? identity.id : undefined;
+        const track = async (pack:any,source_kind:"record"|"thread",source_id:string) => {
+          if (!sid || mode === "inspect" || ((source_kind === "thread" || pack.claim.thread_id) && !pack.claim.acquired)) return;
+          const code = source_kind === "thread" || pack.record?.kind === "implementation";
+          const verified = source_kind === "thread" ? Boolean(pack.loss_window?.verified_snapshot_at) : Boolean(pack.bootstrap?.length && pack.contributing_sessions?.some((s:any)=>s.verified_snapshot_at && s.wip_commit && pack.bootstrap.join("\n").includes(s.wip_commit)));
+          try {
+            const id = await startHandoff(getPool(cfg),{source_kind,source_id,destination_session:sid,author:cfg.author,mode:mode as "continue"|"fork",work_kind:code ? "code" : "analysis",source_snapshot_verified:verified,pending_operations:pack.pending_operations?.length ?? 0});
+            console.log(`\nHandoff attempt ${id}: pack delivered, not completed. Report exact captured verification, validation, and delivered-result events with ledger handoff update.`);
+          } catch {console.error("Handoff tracking unavailable; do not repeat a claim to retry telemetry.");}
+        };
+
         if (recordId) {
           if (mode === "fork") throw new Error("--mode fork applies to threads; use continue or inspect with --record");
-          const pack = await buildRecordPack(cfg, getPool(cfg), recordId, { mode, author: cfg.author, sessionId: `cli:${cfg.author}:${Date.now()}`, repoPath: process.cwd(), viewer: cfg.author, detail: (flag(args, "--detail") as "lean" | "evidence" | undefined) });
+          const pack = await buildRecordPack(cfg, getPool(cfg), recordId, { mode, author: cfg.author, sessionId: sid, repoPath: process.cwd(), viewer: cfg.author, detail: (flag(args, "--detail") as "lean" | "evidence" | undefined) });
           console.log(pack.text);
+          await track(pack,"record",recordId);
           await closePools();
           return;
         }
         const id = args[0];
         if (!id || id.startsWith("--")) throw new Error("usage: ledger resume <thread-id> [--mode continue|fork|inspect] [--checkout <dir>]  |  ledger resume --record <id> [--mode continue|inspect]");
-        const pack = await buildResumePack(cfg, getPool(cfg), id, { mode, author: cfg.author, sessionId: `cli:${cfg.author}:${Date.now()}`, repoPath: process.cwd(), viewer: cfg.author, detail: (flag(args, "--detail") as "lean" | "evidence" | undefined) });
+        const pack = await buildResumePack(cfg, getPool(cfg), id, { mode, author: cfg.author, sessionId: sid, repoPath: process.cwd(), viewer: cfg.author, detail: (flag(args, "--detail") as "lean" | "evidence" | undefined) });
         console.log(pack.text);
+        await track(pack,"thread",id);
         const dest = flag(args, "--checkout");
         if (dest && pack.checkpoint?.wip_ref && pack.checkpoint?.wip_commit) {
           const root = repoRoot(process.cwd());

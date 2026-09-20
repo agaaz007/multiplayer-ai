@@ -77,6 +77,8 @@ export interface SessState {
 
 export interface HelperOpts {
   roots?: { claude?: string; codex?: string };
+  /** Explicit dependency injection for isolated fault tests. */
+  pool?: pg.Pool;
   /** transcripts modified within this many minutes are "active" */
   activeWindowMin?: number;
   /** a session with no activity for this long is released and marked ended */
@@ -352,7 +354,7 @@ export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<Pa
   const log = opts.log ?? (() => {});
   const sum: PassSummary = { at: now.toISOString(), sessions: 0, events_spooled: 0, events_uploaded: 0, snapshots: 0, checkpoints: 0, bound: 0, classified: 0, errors: [] };
   if (!cfg.continuity) throw new Error("continuity not configured");
-  const pool = getPool(cfg);
+  const pool = opts.pool ?? getPool(cfg);
   const author = cfg.author;
   const machine = cfg.continuity.machine ?? os.hostname();
   const activeMs = (opts.activeWindowMin ?? 10) * 60_000;

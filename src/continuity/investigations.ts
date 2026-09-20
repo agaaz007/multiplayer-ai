@@ -69,6 +69,14 @@ export interface BindingContext {
   identity?: HarnessIdentity;
 }
 
+export class BindingRefusal extends Error { readonly code = "refusal"; }
+export class BindingUnavailable extends Error {
+  readonly code = "unavailable";
+  constructor(readonly request_id: string, readonly outcome: "not_started" | "not_committed") {
+    super(`Investigation binding unavailable (${outcome}). Retry with the same request_id (${request_id}). Nothing from this attempt was committed.`);
+  }
+}
+
 export class BindingOutcomeUnknown extends Error {
   readonly code = "outcome_unknown";
   constructor(readonly request_id: string) {
@@ -81,13 +89,14 @@ export class BindingOutcomeUnknown extends Error {
  * by operation key, not by blindly retrying a write. */
 async function mutation<T>(pool: pg.Pool, cfg: Config, opts: BindingContext & { session_id: string }, kind: string, input: unknown, run: (c: pg.PoolClient) => Promise<T>): Promise<T & { request_id: string }> {
   const session = String(opts.session_id ?? "").trim();
-  if (!session) throw new Error("session_id is required to bind an investigation");
-  if (!/^[A-Za-z0-9_-]{8,200}$/.test(session)) throw new Error("Invalid harness session_id; use the exact ID printed by SessionStart.");
+  if (!session) throw new BindingRefusal("session_id is required to bind an investigation");
+  if (!/^[A-Za-z0-9_-]{8,200}$/.test(session)) throw new BindingRefusal("Invalid harness session_id; use the exact ID printed by SessionStart.");
   const request = opts.request_id ?? randomUUID();
-  if (!/^[A-Za-z0-9_.:-]{1,200}$/.test(request)) throw new Error("Invalid request_id (1–200 safe identifier characters required)");
+  if (!/^[A-Za-z0-9_.:-]{1,200}$/.test(request)) throw new BindingRefusal("Invalid request_id (1–200 safe identifier characters required)");
   const digest = createHash("sha256").update(JSON.stringify({ kind, input })).digest("hex");
   const key = [cfg.author, session, request];
-  const c = await pool.connect();
+  let c:pg.PoolClient;
+  try { c = await pool.connect(); } catch { throw new BindingUnavailable(request,"not_started"); }
   let committing = false;
   try {
     await c.query("begin");
@@ -96,7 +105,7 @@ async function mutation<T>(pool: pg.Pool, cfg: Config, opts: BindingContext & { 
     await c.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [`binding:${session}`]);
     const prior = await c.query(`select input_hash, result from cont_binding_operations where actor=$1 and session_id=$2 and request_id=$3`, key);
     if (prior.rows[0]) {
-      if (prior.rows[0].input_hash !== digest) throw new Error("request_id was already used with different binding arguments");
+      if (prior.rows[0].input_hash !== digest) throw new BindingRefusal("request_id was already used with different binding arguments");
       await c.query("commit");
       return prior.rows[0].result;
     }
@@ -106,7 +115,12 @@ async function mutation<T>(pool: pg.Pool, cfg: Config, opts: BindingContext & { 
     await c.query("commit");
     return result;
   } catch (error) {
-    if (!committing) { await c.query("rollback").catch(() => {}); throw error; }
+    if (!committing) {
+      await c.query("rollback").catch(() => {});
+      const code=(error as {code?:string})?.code;
+      if(code === "55P03" || code === "57014" || code?.startsWith("08")) throw new BindingUnavailable(request,"not_committed");
+      throw error;
+    }
     // COMMIT may have reached Postgres even if its acknowledgement never arrived.
     // Destroy this client before reconciling, avoiding a pool-size-one deadlock.
     c.release(true);
@@ -127,7 +141,7 @@ async function ensureBindingSession(c: pg.PoolClient, cfg: Config, session: stri
   const provenance = { source: identity?.source ?? "explicit_unverified", verified, harness };
   await c.query(`insert into cont_sessions(id,author,harness,machine,identity_provenance) values($1,$2,$3,$4,$5::jsonb) on conflict(id) do nothing`, [session,cfg.author,harness,cfg.continuity?.machine ?? null,JSON.stringify(provenance)]);
   const r = await c.query(`select author,harness,identity_provenance from cont_sessions where id=$1 for update`, [session]);
-  if (r.rows[0].author !== cfg.author) throw new Error("Session belongs to a different configured author; nothing was bound.");
+  if (r.rows[0].author !== cfg.author) throw new BindingRefusal("Session belongs to a different configured author; nothing was bound.");
   if (verified && (r.rows[0].harness !== harness || !r.rows[0].identity_provenance?.verified)) {
     await c.query(`update cont_sessions set harness=$2, identity_provenance=$3::jsonb, identity_history=identity_history || $4::jsonb where id=$1`, [session,harness,JSON.stringify(provenance),JSON.stringify([{previous_harness:r.rows[0].harness,previous_provenance:r.rows[0].identity_provenance,corrected_at:new Date().toISOString(),source:identity!.source}])]);
   }
@@ -198,13 +212,13 @@ export async function bindInvestigation(pool: pg.Pool, cfg: Config, opts: Bindin
 
 async function bindOnClient(c: pg.PoolClient, cfg: Config, opts: BindingContext & { record_id: string; session_id: string; question?: string }): Promise<{ text: string; record_id: string; title: string; already_bound: boolean }> {
   const session_id = opts.session_id.trim();
-  if (!UUID_RE.test(String(opts.record_id ?? ""))) throw new Error(`record not found: ${String(opts.record_id)} (expected a record id from ledger_investigations)`);
+  if (!UUID_RE.test(String(opts.record_id ?? ""))) throw new BindingRefusal(`record not found: ${String(opts.record_id)} (expected a record id from ledger_investigations)`);
   await ensureBindingSession(c, cfg, session_id, opts.identity);
   const locked = await c.query(`select * from cont_records where id=$1 for update`, [opts.record_id]);
   const rec = locked.rows[0];
-  if (!rec) throw new Error(`record not found: ${opts.record_id}`);
-  if (rec.kind !== "investigation") throw new Error(`record ${rec.id} is a ${rec.kind} record, not an investigation; declare one with ledger_investigation_new or pick one from ledger_investigations`);
-  if (rec.status !== "open") throw new Error(`investigation ${rec.id} is ${rec.status}, not open; pick an open one from ledger_investigations or declare a new question`);
+  if (!rec) throw new BindingRefusal(`record not found: ${opts.record_id}`);
+  if (rec.kind !== "investigation") throw new BindingRefusal(`record ${rec.id} is a ${rec.kind} record, not an investigation; declare one with ledger_investigation_new or pick one from ledger_investigations`);
+  if (rec.status !== "open") throw new BindingRefusal(`investigation ${rec.id} is ${rec.status}, not open; pick an open one from ledger_investigations or declare a new question`);
   const existing = await sessionBinding(c, session_id);
   const already_bound = existing?.record_id === rec.id;
   await c.query(`insert into cont_session_bindings(session_id,record_id,question,bound_by) values($1,$2,$3,$4)
@@ -230,15 +244,15 @@ async function bindOnClient(c: pg.PoolClient, cfg: Config, opts: BindingContext 
  */
 export async function declareInvestigation(pool: pg.Pool, cfg: Config, opts: BindingContext & { question: string; goal?: string; session_id: string; repo?: string | null }): Promise<{ text: string; record_id: string; request_id: string }> {
   const question = String(opts.question ?? "").replace(/\s+/g, " ").trim();
-  if (!question) throw new Error("question is required to declare an investigation");
+  if (!question) throw new BindingRefusal("question is required to declare an investigation");
   return mutation(pool,cfg,opts,"declare",{question,goal:opts.goal?.trim() ?? null,repo:opts.repo ?? null},async c => {
     await c.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [`question:${normalizeTitle(question)}`]);
     const title = clip(question,TITLE_MAX);
     const exact=await c.query(`select id,title,created_by from cont_records where kind='investigation' and status='open' and investigation_question_key=$1`,[normalizeTitle(question)]);
-    if(exact.rows[0]) throw new Error(`An open investigation with a near-identical question already exists: "${exact.rows[0].title}" (${exact.rows[0].id}). Bind to it with ledger_investigation_bind instead of declaring a new one.`);
+    if(exact.rows[0]) throw new BindingRefusal(`An open investigation with a near-identical question already exists: "${exact.rows[0].title}" (${exact.rows[0].id}). Bind to it with ledger_investigation_bind instead of declaring a new one.`);
     const open = await openInvestigationRows(c,{cap:500});
     const dup = open.map(r => ({r,s:titleSimilarity(title,r.title)})).filter(x => x.s >= NEAR_IDENTICAL_TITLE).sort((a,b) => b.s-a.s)[0];
-    if (dup) throw new Error(`An open investigation with a near-identical question already exists: "${dup.r.title}" (${dup.r.record_id}, by ${dup.r.created_by}, match ${dup.s.toFixed(2)}). Bind to it with ledger_investigation_bind(record_id: "${dup.r.record_id}") instead of declaring a new one; if the question is genuinely different, reword it so the difference is in the title.`);
+    if (dup) throw new BindingRefusal(`An open investigation with a near-identical question already exists: "${dup.r.title}" (${dup.r.record_id}, by ${dup.r.created_by}, match ${dup.s.toFixed(2)}). Bind to it with ledger_investigation_bind(record_id: "${dup.r.record_id}") instead of declaring a new one; if the question is genuinely different, reword it so the difference is in the title.`);
     // Identity, record creation, explicit link and binding share the commit boundary.
     await ensureBindingSession(c,cfg,opts.session_id.trim(),opts.identity);
     const rec = await createRecord(c,{kind:"investigation",title,goal:opts.goal?.trim() || null,touched_repos:opts.repo ? [opts.repo] : [],created_by:cfg.author});
