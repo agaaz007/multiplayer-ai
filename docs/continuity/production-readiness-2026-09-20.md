@@ -80,6 +80,17 @@ Invariants: replay may repeat an upload but cannot duplicate a producer event; r
 
 All eight tasks are **P1 release blockers** for this production scope. Smaller discovery/binding fixes may ship to the existing pilot earlier. Estimates include review and targeted testing; autonomous-agent elapsed time is unmeasured. Owners below are engineering roles to assign, not commitments attributed to either teammate.
 
+Build checklist (machine-readable: [task JSONL](production-readiness-tasks-2026-09-20.jsonl)):
+
+- [ ] T1 — Safe fixtures, contracts, and operational baseline.
+- [ ] T2 — Candidate discovery and scope propagation.
+- [ ] T3 — Verified session identity and atomic binding.
+- [ ] T4 — Durable spool, fair bulk upload, and artifact retries.
+- [ ] T5 — Asynchronous snapshots and fenced publication.
+- [ ] T6 — Invocation and Neon-read telemetry.
+- [ ] T7 — Visible availability and measurable handoff outcomes.
+- [ ] T8 — Guarded regression, restore, rollout, and real handoffs.
+
 ### T1 / PR 1 — Establish contracts, safe fixtures, and the operational baseline
 
 **Owner:** release/integration owner. **Effort:** 0.5–1 day. **Depends on:** none. **Findings:** F3, F5–F10.
