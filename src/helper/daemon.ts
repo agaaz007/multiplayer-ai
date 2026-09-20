@@ -380,7 +380,7 @@ async function helperOnceImpl(cfg: Config, opts: HelperOpts): Promise<PassSummar
     if (st[sid]) continue;
     try {
       const source = spoolSource(sid);
-      if (source?.author === author && typeof source.file === "string" && (source.harness === "codex" || source.harness === "claude")) st[sid] = { ...(source as any), file: source.file, harness: source.harness, offset: spoolCursor(sid) ?? 0, lastSeenMtime: 0, seenCallIds: [], reconciled: [], unknown: {} };
+      if (source?.author === author && typeof source.file === "string" && (source.harness === "codex" || source.harness === "claude")) st[sid] = { ...(source as any), file: source.file, harness: source.harness, offset: spoolCursor(sid) ?? 0, lastSeenMtime: Number(source.lastSeenMtime) || 0, seenCallIds: [], reconciled: [], unknown: {} };
     } catch (e: any) { sum.errors.push(`spool recovery ${sid}: ${String(e?.message ?? e).slice(0, 120)}`); }
   }
   let lastSave = Date.now();
@@ -475,7 +475,7 @@ async function helperOnceImpl(cfg: Config, opts: HelperOpts): Promise<PassSummar
         s.sourceFingerprint = { bytes: bytes.length, sha256: crypto.createHash("sha256").update(bytes).digest("hex") };
       }
       retainOffloadedOutputs(r.events, { transcriptFile: file, harness });
-      if (r.offset !== s.offset || r.events.length) spoolAppend(sid, { offset: r.offset, events: r.events, at: now.toISOString(), source: { file, harness, author, cwd: s.cwd, root: s.root, repo: s.repo, branch: s.branch, baseCommit: s.baseCommit, wipRef: s.wipRef, startedAtMs: s.startedAtMs, sourceFingerprint: s.sourceFingerprint } });
+      if (r.offset !== s.offset || r.events.length) spoolAppend(sid, { offset: r.offset, events: r.events, at: now.toISOString(), source: { file, harness, author, cwd: s.cwd, root: s.root, repo: s.repo, branch: s.branch, baseCommit: s.baseCommit, wipRef: s.wipRef, startedAtMs: s.startedAtMs, lastSeenMtime: mtime, sourceFingerprint: s.sourceFingerprint } });
       s.offset = r.offset;
       sum.events_spooled += r.events.length;
       if (resumed) s.ended = false;

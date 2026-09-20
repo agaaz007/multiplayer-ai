@@ -74,6 +74,11 @@ try {
   const summary = await helperOnce({ author: "fixture", continuity: { database_url: "unused", machine: "fixture" } } as any, { roots: { claude: transcripts, codex: path.join(temp, "absent") }, pool: { query: async () => { queries++; assert.ok(spoolCursor("session-0")); assert.ok(spoolCursor("session-1")); throw new Error("offline fixture"); } } as any });
   assert.equal(queries, 1); assert.equal(summary.sessions, 2); assert.ok(summary.events_spooled > 0); assert.ok(summary.errors.some(e => e.includes("remote unavailable")));
   ok("all-session bounded local admission precedes DB access and outage fails once per pass");
+  const runtimeFile = path.join(temp, "rollout-runtime.jsonl"), invocationId = "11111111-2222-4333-8444-555555555555";
+  fs.writeFileSync(runtimeFile, JSON.stringify({ type: "event_msg", payload: { type: "mcp_tool_call_end", call_id: "inner-1", invocation: { server: "ledger", tool: "ledger_search", arguments: { query: "runtime query" } }, result: { Ok: { isError: true, content: [{ type: "text", text: JSON.stringify({ structuredContent: { usage: { source: "ledger_server", invocation_id: invocationId } } }) }] } } } }) + "\n");
+  const runtime = streamTranscript(runtimeFile, 0, "codex").events.find(e => e.kind === "tool.result_meta")!;
+  assert.equal(runtime.payload.server_invocation_id, invocationId); assert.equal(runtime.payload.success, false); assert.equal(runtime.payload.enclosing_call_id, undefined); assert.equal(runtime.payload.invocation_correlation, "server_identity"); assert.ok(String(runtime.payload._full_input).includes("runtime query"));
+  ok("runtime MCP identity/error/input are retained without executing wrapper source or guessing parent");
   // A cwd transition always starts a separate permission-adjudicated chunk.
   const denied = path.join(temp, "denied"); fs.mkdirSync(denied); execFileSync("git", ["init", "-q", denied]);
   const switchFile = path.join(transcripts, "rollout-switch.jsonl");

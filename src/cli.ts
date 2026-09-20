@@ -609,7 +609,7 @@ async function main() {
         const track = async (pack:any,source_kind:"record"|"thread",source_id:string) => {
           if (!sid || mode === "inspect" || ((source_kind === "thread" || pack.claim.thread_id) && !pack.claim.acquired)) return;
           const code = source_kind === "thread" || pack.record?.kind === "implementation";
-          const verified = source_kind === "thread" ? Boolean(pack.loss_window?.verified_snapshot_at) : Boolean(pack.bootstrap?.length && pack.contributing_sessions?.some((s:any)=>s.verified_snapshot_at && s.wip_commit && pack.bootstrap.join("\n").includes(s.wip_commit)));
+          const verified = pack.snapshot?.status === "verified" && Boolean(pack.snapshot.commit && pack.snapshot.verified_at);
           try {
             const id = await startHandoff(getPool(cfg),{source_kind,source_id,destination_session:sid,author:cfg.author,mode:mode as "continue"|"fork",work_kind:code ? "code" : "analysis",source_snapshot_verified:verified,pending_operations:pack.pending_operations?.length ?? 0});
             console.log(`\nHandoff attempt ${id}: pack delivered, not completed. Report exact captured verification, validation, and delivered-result events with ledger handoff update.`);
