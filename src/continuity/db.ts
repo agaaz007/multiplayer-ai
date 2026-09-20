@@ -9,7 +9,7 @@ import { embeddingsConfigured, ensureEmbeddingSchema } from "./embeddings.js";
  * Shared Postgres for execution continuity. One pool per URL, created lazily.
  * All tables are prefixed `cont_` so the database can be shared with anything
  * else the team already keeps there. Migrations are idempotent CREATE IF NOT
- * EXISTS; there is no version table yet, since v1 has one schema.
+ * EXISTS with an additive version marker. Deployment runs migrate before clients.
  *
  * Knowledge objects (definitions, findings, changes, decisions) never live here.
  * They stay in the git ledger and are referenced by id.

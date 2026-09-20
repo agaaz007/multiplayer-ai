@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { ledgerHome } from "../store.js";
+import { acquireProcessLease } from "./process-lock.js";
 import type { NormEvent } from "../continuity/events.js";
 
 /** Immutable, checksummed segments. The manifest is the sole commit boundary for
@@ -58,18 +59,8 @@ function* legacyLines(file: string): Generator<string> {
   } finally { fs.closeSync(fd); }
 }
 function withSpoolLock<T>(id: string, fn: () => T): T {
-  fs.mkdirSync(spoolDir(), { recursive: true, mode: 0o700 });
-  const file = path.join(spoolDir(), `${safe(id)}.lock`);
-  if (fs.existsSync(file)) {
-    const pid = Number(fs.readFileSync(file, "utf8"));
-    if (!Number.isSafeInteger(pid) || pid < 1) throw new Error("spool lock requires recovery; source retained");
-    let live = true; try { process.kill(pid, 0); } catch (e: any) { if (e.code === "ESRCH") live = false; }
-    if (live) throw new Error("spool writer busy; source retained for retry");
-    fs.unlinkSync(file);
-  }
-  const fd = fs.openSync(file, "wx", 0o600);
-  try { fs.writeFileSync(fd, String(process.pid)); fs.fsyncSync(fd); return fn(); }
-  finally { fs.closeSync(fd); fs.unlinkSync(file); }
+  const release = acquireProcessLease(path.join(spoolDir(), `${safe(id)}.lock`));
+  try { return fn(); } finally { release(); }
 }
 function manifest(id: string, locked = false): Manifest {
   if (fs.existsSync(manifestFile(id))) {

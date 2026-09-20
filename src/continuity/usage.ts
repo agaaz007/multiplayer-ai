@@ -20,6 +20,11 @@ create table if not exists cont_usage_storage_ops (
  evidence_returned boolean, attempt int not null, received_at timestamptz not null default now()
 );
 create index if not exists cont_usage_storage_invocation_idx on cont_usage_storage_ops(invocation_id);
+create table if not exists cont_usage_retention_runs (
+ id uuid primary key default gen_random_uuid(), pruned_before timestamptz not null,
+ invocations_deleted int not null, operations_deleted int not null,
+ performed_at timestamptz not null default now()
+);
 create table if not exists cont_schema_versions(version int primary key, applied_at timestamptz not null default now());
 insert into cont_schema_versions(version) values(2) on conflict do nothing;
 `;
@@ -70,7 +75,7 @@ export async function flushUsage(pool: pg.Pool, limit=100): Promise<{uploaded:nu
   uploading=true;
   try { return await withoutUsage(async () => {
     await drainUsageWrites();
-    const dir=usageDirectory();const files=await fs.readdir(dir).catch(()=>[]);let uploaded=0;const deadline=performance.now()+4000;
+    const dir=usageDirectory();const files=(await fs.readdir(dir).catch(()=>[])).filter(f=>/^(?:invocation-[a-f0-9-]{36}-(?:started|finished)|storage-[a-f0-9-]{36})\.json$/.test(f));let uploaded=0;const deadline=performance.now()+4000;
     for(const file of files.filter(f=>/^(?:invocation-[a-f0-9-]{36}-(?:started|finished)|storage-[a-f0-9-]{36})\.json$/.test(f)).slice(0,Math.max(1,Math.min(1000,limit)))) {
       if(performance.now()>=deadline) return {uploaded,pending:files.length-uploaded,dropped:usageHealth().dropped,error:"usage_batch_budget"};
       const filename=path.join(dir,file);
@@ -88,7 +93,7 @@ export async function flushUsage(pool: pg.Pool, limit=100): Promise<{uploaded:nu
           await client.query(`insert into cont_usage_storage_ops(operation_id,invocation_id,backend,operation_class,purpose,started_at,duration_ms,success,returned_rows,evidence_returned,attempt) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) on conflict do nothing`,[x.operation_id,x.invocation_id,x.backend,x.operation_class,x.purpose,x.started_at,x.duration_ms,x.success,x.returned_rows,x.evidence_returned,x.attempt]);
         }
         },Math.max(1,Math.min(2000,deadline-performance.now())));
-        // A terminal outcome may have replaced the started frame during upload.
+        // Immutable phase frames prevent an in-flight start upload deleting a later terminal outcome.
         if(await fs.readFile(filename,"utf8").catch(()=>"") === bytes) await fs.unlink(filename).catch(()=>{});
         uploaded++;
       } catch {return {uploaded,pending:files.length-uploaded,dropped:usageHealth().dropped,error:"usage_upload_failed"};}
@@ -101,9 +106,16 @@ export async function flushUsage(pool: pg.Pool, limit=100): Promise<{uploaded:nu
 export async function pruneUsage(pool:pg.Pool,retentionDays=30):Promise<{invocations:number;operations:number}> {
   if (!Number.isInteger(retentionDays) || retentionDays < 30) throw new Error("Raw usage retention must be at least 30 days");
   return withoutUsage(async () => {
-    const ops=await pool.query(`delete from cont_usage_storage_ops where started_at < now()-($1::int * interval '1 day')`,[retentionDays]);
-    const inv=await pool.query(`delete from cont_usage_invocations where started_at < now()-($1::int * interval '1 day')`,[retentionDays]);
-    return {invocations:inv.rowCount??0,operations:ops.rowCount??0};
+    const client=await pool.connect();
+    try {
+      await client.query("begin");
+      const cutoff=(await client.query(`select now()-($1::int * interval '1 day') as cutoff`,[retentionDays])).rows[0].cutoff;
+      const ops=await client.query(`delete from cont_usage_storage_ops where started_at < $1`,[cutoff]);
+      const inv=await client.query(`delete from cont_usage_invocations where started_at < $1`,[cutoff]);
+      await client.query(`insert into cont_usage_retention_runs(pruned_before,invocations_deleted,operations_deleted) values($1,$2,$3)`,[cutoff,inv.rowCount??0,ops.rowCount??0]);
+      await client.query("commit");
+      return {invocations:inv.rowCount??0,operations:ops.rowCount??0};
+    }catch(e){await client.query("rollback").catch(()=>{});throw e;}finally{client.release();}
   });
 }
 
@@ -119,6 +131,7 @@ export async function usageSummary(pool:pg.Pool,opts:{from:string;to:string;acto
     const operations=await pool.query(`select i.actor,o.backend,o.operation_class,o.purpose,o.success,o.attempt,count(*)::int as operations,count(*) filter(where o.returned_rows=0)::int as zero_row_operations,sum(o.returned_rows)::bigint as returned_rows,count(*) filter(where o.evidence_returned=true)::int as known_evidence_returns,count(*) filter(where o.evidence_returned is null)::int as unknown_evidence_returns from cont_usage_storage_ops o join cont_usage_invocations i using(invocation_id) where ${where} group by 1,2,3,4,5,6 order by 1,2,3,4,5,6`,params);
     const references=await pool.query(`select i.actor as caller_author,r->>'author' as source_author,count(*)::int as record_appearances,count(distinct r->>'id')::int as distinct_records from cont_usage_invocations i cross join lateral jsonb_array_elements(i.records) r where ${where} and i.tool='ledger_show_contribution' and i.outcome='success' group by 1,2 order by 1,2`,params);
     const orphaned=await pool.query(`select count(*)::int as operations_without_invocation from cont_usage_storage_ops o where o.started_at >= $1::timestamptz and o.started_at < $2::timestamptz and not exists(select 1 from cont_usage_invocations i where i.invocation_id=o.invocation_id)`,params.slice(0,2));
-    return {window:{from:opts.from,to:opts.to,bounds:"[from,to)"},invocations:invocations.rows,storage_operations:operations.rows,agent_reported_references:references.rows,operations_without_invocation:orphaned.rows[0].operations_without_invocation,local_spool:await usageSpoolHealth(),limitations:["Unknown traffic remains unknown; no historical backfill is inferred.","Reference appearances are agent-reported use, not completed handoffs.","Local spool health covers this machine; remote machine completeness requires its health evidence."]};
+    const retention=await pool.query(`select pruned_before,invocations_deleted,operations_deleted,performed_at from cont_usage_retention_runs order by performed_at desc limit 20`);
+    return {retention_history:retention.rows,window:{from:opts.from,to:opts.to,bounds:"[from,to)"},invocations:invocations.rows,storage_operations:operations.rows,agent_reported_references:references.rows,operations_without_invocation:orphaned.rows[0].operations_without_invocation,local_spool:await usageSpoolHealth(),limitations:["Unknown traffic remains unknown; no historical backfill is inferred.","Reference appearances are agent-reported use, not completed handoffs.","Local spool health covers this machine; remote machine completeness requires its health evidence."]};
   });
 }

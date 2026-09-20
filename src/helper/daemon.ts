@@ -4,6 +4,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import type pg from "pg";
 import { ledgerHome, type Config } from "../store.js";
+import { acquireProcessLease } from "./process-lock.js";
 import { withUsageInvocation } from "../usage.js";
 import { flushUsage } from "../continuity/usage.js";
 import { getPool } from "../continuity/db.js";
@@ -140,7 +141,7 @@ export function loadState(): Record<string, SessState> {
 }
 export function saveState(st: Record<string, SessState>): void {
   fs.mkdirSync(ledgerHome(), { recursive: true });
-  const tmp = stateFile() + ".tmp";
+  const tmp = `${stateFile()}.${process.pid}.${crypto.randomUUID()}.tmp`;
   const fd = fs.openSync(tmp, "w", 0o600);
   try { fs.writeFileSync(fd, JSON.stringify(st)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
   fs.renameSync(tmp, stateFile());
@@ -351,7 +352,9 @@ export async function materializeArtifacts(pool: pg.Pool, sessionId: string, eve
 }
 
 export async function helperOnce(cfg: Config, opts: HelperOpts = {}): Promise<PassSummary> {
-  return withUsageInvocation(cfg, { tool: "helper_capture", traffic_class: "maintenance", purpose: "capture_write", version: process.env.LEDGER_BUILD_COMMIT ?? "0.1.0" }, () => helperOnceImpl(cfg, opts));
+  const release = acquireProcessLease(path.join(ledgerHome(), "helper-pass.lock"));
+  try { return await withUsageInvocation(cfg, { tool: "helper_capture", traffic_class: "maintenance", purpose: "capture_write", version: process.env.LEDGER_BUILD_COMMIT ?? "0.1.0" }, () => helperOnceImpl(cfg, opts)); }
+  finally { release(); }
 }
 async function helperOnceImpl(cfg: Config, opts: HelperOpts): Promise<PassSummary> {
   const now = opts.now ?? new Date();

@@ -90,17 +90,26 @@ function emit(envelope: UsageEnvelope): void {
 export async function drainUsageWrites(): Promise<void> { await Promise.all([...pending]); }
 
 function recordsOf(value: unknown): UsageSummary["records"] {
-  const r=value as {structuredContent?:{results?:unknown[];objects?:unknown[];sources?:unknown[]};results?:unknown[];objects?:unknown[]};
-  const rows=r?.structuredContent?.sources ?? r?.structuredContent?.results ?? r?.structuredContent?.objects ?? r?.results ?? r?.objects ?? [];
+  const r=value as {structuredContent?:{results?:unknown[];objects?:unknown[];sources?:unknown[];references?:{id:string}[];receipt?:{records?:unknown[]};content_version?:string};results?:unknown[];objects?:unknown[]};
+  const structured=r?.structuredContent;
+  let rows=structured?.sources ?? structured?.results ?? structured?.objects ?? structured?.receipt?.records ?? r?.results ?? r?.objects ?? [];
+  // Preserve reference appearances, including two passages citing the same source.
+  // Only returned source identities count; unresolved caller-supplied IDs do not.
+  if(structured?.references?.length && structured.sources) {
+    const sources=new Map(structured.sources.map(x=>[(x as {id:string}).id,x]));
+    rows=structured.references.flatMap(ref=>sources.has(ref.id)?[sources.get(ref.id)]:[]);
+  }
   return rows.flatMap(x => {
     const v=x as {id?:unknown;content_version?:unknown;author?:unknown};
     if (typeof v?.id !== "string" || !/^(?:def|fnd|chg|dec)-[A-Za-z0-9-]+$/.test(v.id)) return [];
-    return [{id:v.id,version:typeof v.content_version === "string" && /^[a-f0-9]{64}$/.test(v.content_version) ? v.content_version : undefined,author:typeof v.author === "string" ? safe(v.author) : undefined}];
+    const version=v.content_version ?? structured?.content_version;
+    return [{id:v.id,version:typeof version === "string" && /^[a-f0-9]{64}$/.test(version) ? version : undefined,author:typeof v.author === "string" ? safe(v.author) : undefined}];
   }).slice(0,100);
 }
+
 export async function withUsageInvocation<T>(cfg: Config, metadata: UsageMetadata, fn: () => Promise<T>, summary?: (result:T) => UsageSummary): Promise<T> {
   if(process.env.LEDGER_USAGE === "0") return fn();
-  const id=metadata.invocation_id && /^[a-f0-9-]{36}$/.test(metadata.invocation_id) ? metadata.invocation_id : randomUUID();
+  const id=metadata.invocation_id && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(metadata.invocation_id) ? metadata.invocation_id : randomUUID();
   const invocation: UsageInvocation={invocation_id:id,actor:safe(cfg.author),session_id:metadata.session_id ? safe(metadata.session_id) : null,harness:metadata.identity?.harness ?? "unknown",identity_source:safe(metadata.identity?.source),identity_verified:metadata.identity?.verified ?? false,machine:cfg.continuity?.machine ? safe(cfg.continuity.machine) : null,version:safe(metadata.version,"unknown"),tool:safe(metadata.tool),traffic_class:metadata.traffic_class ?? "unknown",purpose:metadata.purpose ?? "interactive_read",parent_invocation_id:metadata.parent_invocation_id ? safe(metadata.parent_invocation_id) : null,started_at:new Date().toISOString(),finished_at:null,duration_ms:null,outcome:"started",availability:"unknown",records:[]};
   const began=performance.now(); emit({kind:"invocation",value:{...invocation}});
   return context.run({invocation},async () => {
