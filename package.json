@@ -40,7 +40,8 @@
     "preview:ui": "npm run build && node scripts/preview-ui.mjs",
     "prepare": "npm run build",
     "test:analytical-competitors": "npm run build && node dist/eval/analytical-competitors-selftest.js",
-    "test:production": "node scripts/test-isolated.mjs selftest-availability selftest-binding-usage selftest-production"
+    "test:production": "node scripts/test-isolated.mjs selftest-availability selftest-binding-usage selftest-production",
+    "test:timeline": "node scripts/test-isolated.mjs selftest-timeline"
   },
   "engines": {
     "node": ">=20"
