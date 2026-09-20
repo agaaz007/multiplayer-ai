@@ -23,7 +23,7 @@ Run `npm run test:all` with a local PostgreSQL installation containing pgvector.
 
 New fault coverage includes local spool crash boundaries and corruption, concurrent upload deduplication, artifact retries, snapshot timeout and parent termination, denied files in snapshot ancestry, stale snapshot publication, lost helper state with deleted source transcripts, ambiguous binding commits, timed-out database reads, usage replay, and exact source/destination evidence for handoffs. Restore checks compare database rows and artifact hashes and clone a synthetic Git backup.
 
-The local regression log is `.context/production-full-tests.log` (gitignored). A successful local run does not establish the live backup's recoverability, either machine's online capture SLO, or a completed teammate handoff.
+Validation completed on 21 September 2026: `npm run test:all` exited 0 after the full TypeScript/UI build and all 27 suites, including the pgvector embeddings suite and isolated restore of 17 continuity tables. `git diff --check` also passed. The local regression log is `.context/production-full-tests.log` (gitignored). This successful local run does not establish the live backup's recoverability, either machine's online capture SLO, or a completed teammate handoff.
 
 ## Compatibility and known limits
 
