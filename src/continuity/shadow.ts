@@ -181,19 +181,22 @@ export function shadowCommit(worktree: string, opts: ShadowOpts): ShadowResult {
     };
     // A restarted helper can lose the previous shadow commit. Continuing from the remote tip keeps the push a fast-forward;
     // parenting on HEAD made every later push of the ref fail as non-fast-forward, so nothing was saved (2026-09-13).
-    const parent = opts.parent ?? (opts.push === false ? null : remoteTip()) ?? head;
+    // The first shared snapshot is an orphan. Parenting on local HEAD can push
+    // private history (including denied files removed from the final tree).
+    // Shared successors parent ONLY on the already-published snapshot lineage.
+    const parent = opts.push === false ? (opts.parent ?? null) : remoteTip();
 
     const when = (opts.now ?? new Date()).toISOString();
     const msg = opts.message ?? `wip snapshot ${when}`;
-    const makeCommit = (p: string): string => {
-      const c = git(root, ["commit-tree", tree, "-p", p, "-m", msg], {
+    const makeCommit = (p: string | null): string => {
+      const c = git(root, ["commit-tree", tree, ...(p ? ["-p", p] : []), "-m", msg], {
         GIT_AUTHOR_NAME: "ledger-helper", GIT_AUTHOR_EMAIL: "helper@ledger.local", GIT_COMMITTER_NAME: "ledger-helper", GIT_COMMITTER_EMAIL: "helper@ledger.local",
       });
       git(root, ["update-ref", opts.ref, c]);
       res.commit = c;
-      res.parent = p;
+      res.parent = p ?? undefined;
       try {
-        res.files = git(root, ["diff-tree", "--no-commit-id", "--name-status", "-r", p, c]).split("\n").filter(Boolean).map((l) => { const [status, ...rest] = l.split("\t"); return { status, path: rest.join("\t") }; });
+        res.files = git(root, ["diff-tree", "--no-commit-id", "--name-status", "-r", ...(p ? [p, c] : ["--root", c])]).split("\n").filter(Boolean).map((l) => { const [status, ...rest] = l.split("\t"); return { status, path: rest.join("\t") }; });
       } catch { /* first commit or unusual parent */ }
       return c;
     };

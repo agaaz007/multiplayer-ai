@@ -29,7 +29,7 @@ import { addStateUpdate, asOfRecordSummaries, confirmStateUpdate, createRecord, 
 import { acceptanceLabel } from "./continuity/packsections.js";
 
 const text = (s: string) => ({ content: [{ type: "text" as const, text: s }] });
-const refused = (s: string) => ({ ...text(s), isError: true as const });
+const refused = (s: string) => ({ ...text(s), isError: true as const, structuredContent: {outcome:"refusal", availability:"unavailable"} });
 
 // ---------- investigation binding (dec-20260917 bind-or-new) ----------
 // src/continuity/investigations.ts is owned by the continuity side and may not be on disk in every
@@ -38,8 +38,8 @@ const refused = (s: string) => ({ ...text(s), isError: true as const });
 type AnyPool = ReturnType<typeof getPool>;
 interface InvestigationsModule {
   listInvestigations(pool: AnyPool, cfg: Config, o: { q?: string; author?: string; hours?: number; limit?: number }): Promise<{ text: string; items: unknown[] }>;
-  bindInvestigation(pool: AnyPool, cfg: Config, o: { record_id: string; session_id: string; question?: string; request_id?: string; identity?: HarnessIdentity }): Promise<{ text: string; record_id: string; title: string; already_bound: boolean }>;
-  declareInvestigation(pool: AnyPool, cfg: Config, o: { question: string; goal?: string; session_id: string; repo?: string; request_id?: string; identity?: HarnessIdentity }): Promise<{ text: string; record_id: string }>;
+  bindInvestigation(pool: AnyPool, cfg: Config, o: { record_id: string; session_id: string; question?: string; request_id?: string; identity?: HarnessIdentity }): Promise<{ text: string; record_id: string; title: string; already_bound: boolean; request_id: string }>;
+  declareInvestigation(pool: AnyPool, cfg: Config, o: { question: string; goal?: string; session_id: string; repo?: string; request_id?: string; identity?: HarnessIdentity }): Promise<{ text: string; record_id: string; request_id: string }>;
   sessionBinding(pool: AnyPool, session_id: string): Promise<unknown>;
 }
 const INVESTIGATIONS_MODULE: string = "./continuity/investigations.js";
@@ -700,7 +700,7 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
     const RECORD_KINDS = ["implementation", "investigation", "writing", "decision", "other"] as const;
     const RECORD_STATUSES = ["open", "done", "archived"] as const;
     const UPDATE_KINDS = ["progress", "decision", "hypothesis", "blocker", "next", "contradiction", "note"] as const;
-    const failed = (tool: string, e: any) => text(`${tool} failed: ${e?.message ?? String(e)}`);
+    const failed = (tool: string, e: any) => ({...text(`${tool} failed: ${e?.message ?? String(e)}`),isError:true as const,structuredContent:{outcome:e?.code === "refusal" ? "refusal" : "error",availability:"unavailable",code:e?.code ?? "error",...(e?.request_id ? {request_id:e.request_id} : {}),...(e?.outcome ? {operation_outcome:e.outcome} : {})}});
 
     // ---------- investigations (dec-20260917 bind-or-new): bind this session to one, or declare a new one ----------
     server.registerTool(
@@ -741,7 +741,7 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
         try { sid = sessionOf(session_id); } catch (e: any) { return refused(`ledger_investigation_bind refused: ${e.message}`); }
         try {
           const r = await (await investigationsModule()).bindInvestigation(pool(), cfg, { record_id, session_id: sid, question, request_id, identity: resolveHarnessIdentity(sid).identity });
-          return { ...text(r.text), structuredContent: { record_id: r.record_id, title: r.title, already_bound: r.already_bound, session_id: sid } };
+          return { ...text(r.text), structuredContent: { record_id: r.record_id, title: r.title, already_bound: r.already_bound, session_id: sid, request_id: r.request_id } };
         } catch (e: any) { return { ...failed("ledger_investigation_bind", e), isError: true }; }
       }
     );
@@ -765,7 +765,7 @@ export function createMcpServer(cfg: Config, opts: { guidePath?: string } = {}) 
         try {
           const repoRootOf = repo ? repoRoot(repo) : null;
           const r = await (await investigationsModule()).declareInvestigation(pool(), cfg, { question, goal, session_id: sid, repo: repoRootOf ? repoIdentity(repoRootOf) : repo, request_id, identity: resolveHarnessIdentity(sid).identity });
-          return { ...text(r.text), structuredContent: { record_id: r.record_id, session_id: sid } };
+          return { ...text(r.text), structuredContent: { record_id: r.record_id, session_id: sid, request_id: r.request_id } };
         } catch (e: any) { return { ...failed("ledger_investigation_new", e), isError: true }; }
       }
     );

@@ -109,7 +109,7 @@ function recordsOf(value: unknown): UsageSummary["records"] {
 
 export async function withUsageInvocation<T>(cfg: Config, metadata: UsageMetadata, fn: () => Promise<T>, summary?: (result:T) => UsageSummary): Promise<T> {
   if(process.env.LEDGER_USAGE === "0") return fn();
-  const id=metadata.invocation_id && /^[a-f0-9-]{36}$/.test(metadata.invocation_id) ? metadata.invocation_id : randomUUID();
+  const id=metadata.invocation_id && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(metadata.invocation_id) ? metadata.invocation_id : randomUUID();
   const invocation: UsageInvocation={invocation_id:id,actor:safe(cfg.author),session_id:metadata.session_id ? safe(metadata.session_id) : null,harness:metadata.identity?.harness ?? "unknown",identity_source:safe(metadata.identity?.source),identity_verified:metadata.identity?.verified ?? false,machine:cfg.continuity?.machine ? safe(cfg.continuity.machine) : null,version:safe(metadata.version,"unknown"),tool:safe(metadata.tool),traffic_class:metadata.traffic_class ?? "unknown",purpose:metadata.purpose ?? "interactive_read",parent_invocation_id:metadata.parent_invocation_id ? safe(metadata.parent_invocation_id) : null,started_at:new Date().toISOString(),finished_at:null,duration_ms:null,outcome:"started",availability:"unknown",records:[]};
   const began=performance.now(); emit({kind:"invocation",value:{...invocation}});
   return context.run({invocation},async () => {
