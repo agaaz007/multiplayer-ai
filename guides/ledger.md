@@ -43,7 +43,7 @@ assumptions written down beats a perfect one that arrived after the turn was kil
 Do these before the work, not after.
 
 - **Before writing a query:** resolve the accepted definition for the task's product, dataset/environment, metric, population, grain, attribution rule and window. Check that its formula and evidence support the task; accepted is not synonymous with proven correct. If the metric has no definition, record one before reporting a number.
-- **Before an analysis:** use `ledger_investigation` with the question and `analysis_scope`, adding exact `definition_ids` when known. `ledger_search` remains discovery. Missing scope, conflicting accepted versions, missing artifacts and unresolved lineage must remain explicit. Do not present a result marked needs-review as safe to reuse.
+- **Before an analysis:** use `ledger_investigation` with the question and `analysis_scope`, adding exact `definition_ids` when known. `ledger_search` remains discovery. Missing scope, conflicting accepted versions, missing artifacts and unresolved lineage must remain explicit. The separate `legacy_candidates` list surfaces up to five relevant records with unknown or incomplete scope, exact content versions and lifecycle labels; these are not applicable authority, even when the accepted list is empty. Open candidates with `ledger_get` and validate their original evidence before reuse. Known incompatible scope is excluded. Do not present a result marked needs-review as safe to reuse.
 - **Before attributing a metric move:** `ledger_search` with type `change` over the window. Something probably shipped.
 - **Before proposing direction:** `ledger_search` with type `decision`. It may already be decided, or decided against.
 
@@ -241,7 +241,7 @@ Decision in force (dec-20260917 bind-or-new): an analysis session is bound to on
 
 **Identity is the question; repos are tools.** An investigation is keyed by the question it pursues, never by the folder a chat ran in: match and bind on the question, whichever checkout you are sitting in, and a warehouse-only or sheets-only investigation with no repo is complete. A repo a bound session runs inside is recorded on the record as a *touched repo*, a capability the work may read, not its identity. The classifier links analysis spans to an open investigation whose question matches; it never opens one, so an unbound analysis session leaves its spans unassigned until a session binds or declares.
 
-**After each material pull**, call `ledger_propose_finding({ population, metric, window, result, query_ref: "q:<tool_use_id>", investigation_record_id?, title?, caveats? })`. `query_ref` is the evidence id the checkpoint prints. The tool writes a DRAFT finding with `stance: PROPOSED`, linked to the investigation and covering that query (`capture_ack.status: pending_review`). If the session is unbound and no `investigation_record_id` is given, it refuses: bind or declare first. It never creates an orphan and never accepts anything.
+**After each material pull**, call `ledger_propose_finding({ population, metric, window, result, query_ref: "q:<tool_use_id>", investigation_record_id?, analysis_scope?, definition_ids?, title?, caveats? })`. `query_ref` is the evidence id the checkpoint prints. The tool writes a DRAFT finding with `stance: PROPOSED`, linked to the investigation and covering that query (`capture_ack.status: pending_review`). If the session is unbound and no `investigation_record_id` is given, it refuses: bind or declare first. It never creates an orphan and never accepts anything. Carry the explicitly known `analysis_scope` (product, dataset, environment, metric, population, grain, attribution_rule, optional window). Partial scope stays on drafts; stable scoped records require all facets. Supply exact `definition_ids` when consulted; only a sole accepted version applicable to the full scope/window is pinned. Missing or conflicting definitions stay unresolved, never inferred from a metric name alone. Acceptance preserves scope and exact dependency versions.
 
 **A person accepts or discards** with `ledger_review_finding({ id, action: "accept" | "discard", reason?, window? })`:
 
@@ -252,6 +252,10 @@ Decision in force (dec-20260917 bind-or-new): an analysis session is bound to on
 **PROPOSED findings are not law.** The brief and `ledger drafts` list them under "Drafts, not in force" with their investigation and `query_ref`. Reuse a proposed result only as a proposal, say so, and never present it as accepted knowledge. `ledger_record_finding` remains the path for a full argued finding; a query-grain proposal is the floor, not a replacement.
 
 ---
+
+### Reviewing valuable legacy findings
+
+Use the bounded `legacy_candidates` list as a review queue. To enrich an unscoped legacy finding, first open and verify its retained query, population and window. Record a **new scoped finding**, pinning the original ID and `content_version` with `dependencies: [{relation: "derived-from", id, version}]`, plus the exact applicable definition. State the validation performed and any uncertainty. Do not supersede across different scope identities or edit the original. If the original is a draft, retain the enriched result as a draft until its source is reviewed; stable results cannot depend on unaccepted evidence. Existing same-scope corrections still require explicit acceptance against the predecessor's exact version and `ledger_impact` review. Candidate discovery itself never changes a record's acceptance or scope.
 
 ## Execution continuity: continuing a teammate's unfinished work
 

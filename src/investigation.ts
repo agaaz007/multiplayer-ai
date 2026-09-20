@@ -43,7 +43,7 @@ export function analyticalContext(objects: LedgerObject[], opts: InvestigationOp
     visited.add(id);
     const o = byId.get(id);
     if (!o) { warnings.push(`Missing linked source: ${id}`); continue; }
-    if (!matchesDiscoveryScope(o, opts.scope)) { warnings.push(`Linked source does not establish requested scope: ${id}`); continue; }
+    if (!matchesDiscoveryScope(o, opts.scope) || legacyScopeGaps(o, opts.scope)) { warnings.push(`Linked source does not establish requested scope: ${id}`); continue; }
     const r = resolveAccepted(objects, id, {asOf: opts.as_of, scope: opts.scope});
     const family = [...r.history.map(h=>h.id)].sort().join('|') || id;
     contexts.set(family, r);

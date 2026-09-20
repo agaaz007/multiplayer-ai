@@ -53,6 +53,10 @@ export async function upsertSession(q: Q, s: { id: string; author: string; harne
     `insert into cont_sessions (id, author, harness, machine, cwd, repo, branch, transcript_path, started_at, last_seen_at)
      values ($1,$2,$3,$4,$5,$6,$7,$8,$9,coalesce($10, now()))
      on conflict (id) do update set
+       harness = case when excluded.transcript_path is not null and excluded.harness in ('claude','codex') then excluded.harness else cont_sessions.harness end,
+       identity_history = case when excluded.transcript_path is not null and excluded.harness in ('claude','codex') and cont_sessions.harness <> excluded.harness then
+         coalesce(cont_sessions.identity_history, '[]'::jsonb) || jsonb_build_array(jsonb_build_object('harness', cont_sessions.harness, 'provenance', cont_sessions.identity_provenance, 'corrected_at', now())) else cont_sessions.identity_history end,
+       identity_provenance = case when excluded.transcript_path is not null and excluded.harness in ('claude','codex') then jsonb_build_object('source','captured_transcript','verified',true,'harness',excluded.harness) else cont_sessions.identity_provenance end,
        machine = coalesce(excluded.machine, cont_sessions.machine),
        cwd = coalesce(excluded.cwd, cont_sessions.cwd),
        repo = coalesce(excluded.repo, cont_sessions.repo),
@@ -60,9 +64,11 @@ export async function upsertSession(q: Q, s: { id: string; author: string; harne
        transcript_path = coalesce(excluded.transcript_path, cont_sessions.transcript_path),
        started_at = coalesce(cont_sessions.started_at, excluded.started_at),
        last_seen_at = greatest(cont_sessions.last_seen_at, excluded.last_seen_at)
+     where cont_sessions.author = excluded.author
      returning *`,
     [s.id, s.author, s.harness, s.machine ?? null, s.cwd ?? null, s.repo ?? null, s.branch ?? null, s.transcript_path ?? null, s.started_at ?? null, s.last_seen_at ?? null]
   );
+  if (!r.rows[0]) throw new Error("session belongs to a different configured author");
   return r.rows[0];
 }
 

@@ -69,12 +69,13 @@ assert.ok(!discovery.legacy_candidates.some(c=>c.id===incompatible.id));
 assert.ok(!discovery.current.some(o=>[legacy.id,partialLegacy.id].includes(o.id)));
 assert.ok(!discovery.objects.some(o=>[legacy.id,partialLegacy.id].includes(o.id)));
 assert.match(discovery.text,/Candidate only/);
-assert.equal(analyticalContext(loadAll(cfg),{question:'utterly_nonmatching_token',scope}).discovery_status,'no_matches');
+assert.equal(analyticalContext(loadAll(cfg),{question:'utterly_nonmatching_token',scope:{...scope,metric:'nonexistent_metric'}}).discovery_status,'no_matches');
 assert.throws(()=>analyticalContext(loadAll(cfg),{question:'   ',scope}),/must not be empty/);
 assert.throws(()=>analyticalContext(loadAll(cfg),{question:'Funnel',scope,candidate_limit:0}),/limits/);
 const unscopedDiscovery = analyticalContext(loadAll(cfg),{question:'Funnel handoff'});
 assert.ok(!unscopedDiscovery.current.some(o=>o.id===legacy.id),'a missing task scope cannot promote a legacy candidate');
 assert.equal(analyticalContext(loadAll(cfg),{question:'Funnel handoff',scope,candidate_limit:1}).legacy_candidates.length,1);
+assert.ok(!analyticalContext(loadAll(cfg),{question:'Funnel handoff',definition_ids:[legacy.id]}).current.some(o=>o.id===legacy.id),'explicit legacy id does not bypass unknown scope');
 // Missing scope never edits or enriches the original record during a read.
 assert.equal(objectVersion(getById(cfg,legacy.id)!),legacy.content_version);
 
