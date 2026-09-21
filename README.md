@@ -37,8 +37,8 @@ Codex (app or CLI) ───────┘                              ├─�
 Requires Node 20+ and git.
 
 ```bash
-git clone <this repo> && cd ledger
-npm install && npm link          # puts `ledger` on your PATH
+npm install -g @tranzmit/multiplayer
+ledger --help
 ```
 
 **First machine** (creates the data repo):

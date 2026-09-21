@@ -1,5 +1,5 @@
 {
-  "name": "@tranzmit/ledger",
+  "name": "@tranzmit/multiplayer",
   "version": "0.1.0",
   "description": "A shared ledger of definitions, findings, changes, and decisions that any coding agent (Claude Code, Codex, Cursor) reads before work and writes after. MCP server + CLI over plain markdown in git.",
   "type": "module",
@@ -64,5 +64,17 @@
     "@types/pg": "^8.23.1",
     "esbuild": "0.28.2",
     "typescript": "^7.0.2"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/agaaz007/multiplayer-ai.git"
+  },
+  "homepage": "https://github.com/agaaz007/multiplayer-ai#readme",
+  "bugs": {
+    "url": "https://github.com/agaaz007/multiplayer-ai/issues"
   }
 }

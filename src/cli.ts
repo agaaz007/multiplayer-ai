@@ -822,6 +822,11 @@ async function main() {
       case "rules":
         console.log(agentRulesText());
         return;
+      case "help":
+      case "--help":
+      case "-h":
+        console.log(USAGE);
+        return;
       default:
         console.log(USAGE);
         process.exit(cmd ? 1 : 0);

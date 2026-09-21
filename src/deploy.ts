@@ -48,7 +48,7 @@ export function describeSource(): Omit<ReleaseInfo, "id" | "dir" | "built_at"> {
   const pkgFile = path.join(PACKAGE_ROOT, "package.json");
   if (!fs.existsSync(pkgFile)) throw new Error(`no package.json next to dist/: ${PACKAGE_ROOT}`);
   const pkg = JSON.parse(fs.readFileSync(pkgFile, "utf8"));
-  if (pkg.name !== "@tranzmit/ledger") throw new Error(`not the ledger package: ${pkg.name} at ${PACKAGE_ROOT}`);
+  if (!["@tranzmit/multiplayer", "@tranzmit/ledger"].includes(pkg.name)) throw new Error(`not the ledger package: ${pkg.name} at ${PACKAGE_ROOT}`);
   if (!fs.existsSync(path.join(PACKAGE_ROOT, "dist", "cli.js"))) throw new Error(`dist/cli.js missing in ${PACKAGE_ROOT}: run npm run build first`);
   const status = gitOut(["status", "--porcelain", "--untracked-files=no"]);
   return {
